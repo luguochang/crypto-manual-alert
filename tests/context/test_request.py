@@ -42,7 +42,7 @@ def test_build_manual_decision_request_accepts_legacy_query_alias():
 
 
 def test_manual_request_cannot_disable_manual_only():
-    """用户输入不能关闭 manual_only，这是 v1 手动提醒系统的硬边界。"""
+    """用户输入不能关闭 manual_only，这是手动提醒系统的硬边界。"""
     request = build_manual_decision_request({"manual_only": False})
 
     assert request.manual_only is True

@@ -31,6 +31,20 @@ class DecisionRequest:
         object.__setattr__(self, "query_text", (self.query_text or "").strip())
         object.__setattr__(self, "manual_only", True)
 
+    def query_semantics(self) -> dict[str, bool | str]:
+        return {
+            "mode": "audit_note",
+            "drives_lead_plan": False,
+            "drives_worker_selection": False,
+            "drives_tool_budget": False,
+            "drives_facts_requirement": False,
+            "drives_final_input": False,
+            "explanation": (
+                "query_text is retained for operator audit context; current production "
+                "planning is driven by symbol/horizon/config."
+            ),
+        }
+
 
 def build_manual_decision_request(payload: dict[str, Any] | Any) -> DecisionRequest:
     """将手动 API 请求归一化为 DecisionRequest。

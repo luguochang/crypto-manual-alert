@@ -2,15 +2,32 @@ from __future__ import annotations
 
 import copy
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-
-class ConfigError(ValueError):
-    """Raised when configuration is unsafe or invalid."""
+from .final_input_switch_review import validate_final_input_switch_review_path
+from .models import (
+    AppConfig,
+    Config,
+    ConfigError,
+    DecisionConfig,
+    EvalConfig,
+    EvalFinancialQualityConfig,
+    EvalReleaseGateConfig,
+    MacroEventConfig,
+    MarketDataConfig,
+    MacroEventConfig,
+    NotificationConfig,
+    ResearchConfig,
+    SchedulerConfig,
+    SecurityConfig,
+    ShadowConfig,
+    SkillProvidersConfig,
+    TradingConfig,
+    WorkflowConfig,
+)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -39,125 +56,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
-
-
-@dataclass(frozen=True)
-class AppConfig:
-    mode: str = "SHADOW"
-    timezone: str = "Asia/Shanghai"
-    data_dir: str = "data"
-    log_level: str = "INFO"
-
-
-@dataclass(frozen=True)
-class TradingConfig:
-    auto_order_enabled: bool = False
-    manual_execution_required: bool = True
-    allowed_symbols: list[str] = field(default_factory=lambda: ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"])
-    max_risk_per_trade_pct: float = 0.25
-    max_leverage: int = 2
-    daily_loss_stop_pct: float = 1.0
-    stop_after_consecutive_losses: int = 2
-    plan_ttl_seconds: int = 90
-
-
-@dataclass(frozen=True)
-class MarketDataConfig:
-    provider: str = "okx_public"
-    okx_base_url: str = "https://www.okx.com"
-    request_timeout_seconds: int = 8
-    aggregate_timeout_seconds: int = 25
-    stale_market_data_seconds: int = 120
-    order_book_depth: int = 20
-    candle_bar: str = "1H"
-    candle_limit: int = 60
-
-
-@dataclass(frozen=True)
-class DecisionConfig:
-    engine: str = "fixture"
-    skill_path: str = "third_party/skills/crypto-macro-decision"
-    command: str = ""
-    timeout_seconds: int = 900
-    fixture_plan_path: str = "tests/fixtures/decision_plan_valid.json"
-    openai_base_url: str = ""
-    openai_api_key_env: str = "OPENAI_API_KEY"
-    openai_model: str = ""
-    openai_temperature: float = 0.1
-    openai_max_tokens: int = 1800
-
-
-@dataclass(frozen=True)
-class NotificationConfig:
-    provider: str = "bark"
-    enabled: bool = False
-    bark_base_url: str = "https://api.day.app"
-    bark_device_key_env: str = "BARK_DEVICE_KEY"
-    timeout_seconds: int = 8
-    retry_count: int = 1
-    max_body_chars: int = 900
-    send_failure_alerts: bool = True
-
-
-@dataclass(frozen=True)
-class SchedulerConfig:
-    enabled: bool = False
-    interval_seconds: int = 1800
-    run_on_start: bool = True
-    lock_ttl_seconds: int = 1800
-    max_iterations: int = 0
-    job_timeout_seconds: int = 300
-
-
-@dataclass(frozen=True)
-class ResearchConfig:
-    enabled: bool = False
-    planner: str = "static"
-    leader_mode: str = "static"
-    search_provider: str = "disabled"
-    max_queries: int = 6
-    max_workers: int = 4
-    max_results_per_query: int = 3
-    request_timeout_seconds: int = 8
-
-
-@dataclass(frozen=True)
-class SecurityConfig:
-    forbid_trade_keys: bool = True
-    secret_env_names: list[str] = field(default_factory=list)
-    forbidden_env_names: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class Config:
-    app: AppConfig
-    trading: TradingConfig
-    market_data: MarketDataConfig
-    decision: DecisionConfig
-    notification: NotificationConfig
-    scheduler: SchedulerConfig
-    research: ResearchConfig
-    security: SecurityConfig
-
-    def safe_dict(self) -> dict[str, Any]:
-        return {
-            "app": self.app.__dict__,
-            "trading": self.trading.__dict__,
-            "market_data": self.market_data.__dict__,
-            "decision": self.decision.__dict__,
-            "notification": {
-                **self.notification.__dict__,
-                "bark_device_key_env": self.notification.bark_device_key_env,
-                "bark_device_key_value": "<redacted>" if os.getenv(self.notification.bark_device_key_env) else "<unset>",
-            },
-            "scheduler": self.scheduler.__dict__,
-            "research": self.research.__dict__,
-            "security": {
-                "forbid_trade_keys": self.security.forbid_trade_keys,
-                "secret_env_names": list(self.security.secret_env_names),
-                "forbidden_env_names": list(self.security.forbidden_env_names),
-            },
-        }
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -211,6 +109,12 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         merged.setdefault("research", {})["max_workers"] = int(os.environ["RESEARCH_MAX_WORKERS"])
     if "RESEARCH_REQUEST_TIMEOUT_SECONDS" in os.environ:
         merged.setdefault("research", {})["request_timeout_seconds"] = int(os.environ["RESEARCH_REQUEST_TIMEOUT_SECONDS"])
+    if "SHADOW_WORKER_MODE" in os.environ:
+        merged.setdefault("shadow", {})["worker_mode"] = os.environ["SHADOW_WORKER_MODE"]
+    if "WORKFLOW_EXECUTION_MODE" in os.environ:
+        merged.setdefault("workflow", {})["execution_mode"] = os.environ["WORKFLOW_EXECUTION_MODE"]
+    if "MACRO_EVENT_PROVIDER" in os.environ:
+        merged.setdefault("macro_event", {})["provider"] = os.environ["MACRO_EVENT_PROVIDER"]
     if "PLAN_TTL_SECONDS" in os.environ:
         merged.setdefault("trading", {})["plan_ttl_seconds"] = int(os.environ["PLAN_TTL_SECONDS"])
     if "STALE_MARKET_DATA_SECONDS" in os.environ:
@@ -219,6 +123,13 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_config(data: dict[str, Any]) -> Config:
+    eval_section = _section(data, "eval")
+    eval_release_gate = eval_section.get("release_gate", {})
+    if not isinstance(eval_release_gate, dict):
+        raise ConfigError("Config section must be a mapping: eval.release_gate")
+    eval_financial_quality = eval_section.get("financial_quality", {})
+    if not isinstance(eval_financial_quality, dict):
+        raise ConfigError("Config section must be a mapping: eval.financial_quality")
     return Config(
         app=AppConfig(**_section(data, "app")),
         trading=TradingConfig(**_section(data, "trading")),
@@ -227,6 +138,14 @@ def _build_config(data: dict[str, Any]) -> Config:
         notification=NotificationConfig(**_section(data, "notification")),
         scheduler=SchedulerConfig(**_section(data, "scheduler")),
         research=ResearchConfig(**_section(data, "research")),
+        eval=EvalConfig(
+            release_gate=EvalReleaseGateConfig(**eval_release_gate),
+            financial_quality=EvalFinancialQualityConfig(**eval_financial_quality),
+        ),
+        shadow=ShadowConfig(**_section(data, "shadow")),
+        workflow=WorkflowConfig(**_section(data, "workflow")),
+        skill_providers=SkillProvidersConfig(**_section(data, "skill_providers")),
+        macro_event=MacroEventConfig(**_section(data, "macro_event")),
         security=SecurityConfig(**_section(data, "security")),
     )
 
@@ -235,15 +154,19 @@ def _validate(config: Config) -> None:
     if config.app.mode not in {"OFF", "SHADOW", "MANUAL_ALERT"}:
         raise ConfigError(f"Unsupported app.mode: {config.app.mode}")
     if config.trading.auto_order_enabled:
-        raise ConfigError("auto_order_enabled must remain false in manual-alert v1")
+        raise ConfigError("auto_order_enabled must remain false for manual-alert mode")
     if not config.trading.manual_execution_required:
-        raise ConfigError("manual_execution_required must remain true in manual-alert v1")
+        raise ConfigError("manual_execution_required must remain true for manual-alert mode")
     if config.trading.max_risk_per_trade_pct <= 0 or config.trading.max_risk_per_trade_pct > 1:
         raise ConfigError("max_risk_per_trade_pct must be within (0, 1]")
     if config.trading.max_leverage > 2:
-        raise ConfigError("max_leverage must not exceed 2 in v1")
+        raise ConfigError("max_leverage must not exceed 2 in manual-alert mode")
     if config.decision.engine == "command":
-        raise ConfigError("decision.engine=command is disabled in manual-alert v1")
+        raise ConfigError("decision.engine=command is disabled for manual-alert mode")
+    if config.decision.final_input_mode == "decision_input":
+        validate_final_input_switch_review_path(config.decision.final_input_mode_switch_review_path)
+    elif config.decision.final_input_mode != "legacy_prompt":
+        raise ConfigError(f"Unsupported decision.final_input_mode: {config.decision.final_input_mode}")
     if config.research.planner not in {"static", "llm"}:
         raise ConfigError(f"Unsupported research.planner: {config.research.planner}")
     if config.research.leader_mode not in {"static", "llm"}:
@@ -254,6 +177,40 @@ def _validate(config: Config) -> None:
         raise ConfigError("research.max_queries must be positive")
     if config.research.max_workers <= 0:
         raise ConfigError("research.max_workers must be positive")
+    if config.shadow.worker_mode not in {"local_audit", "llm_tool_shadow"}:
+        raise ConfigError("shadow.worker_mode must be one of: local_audit, llm_tool_shadow")
+    if config.workflow.execution_mode not in {"legacy_baseline", "controlled_shadow", "production_candidate_swarm"}:
+        raise ConfigError(
+            "workflow.execution_mode must be one of: legacy_baseline, controlled_shadow, production_candidate_swarm"
+        )
+    if config.skill_providers.realtime_search not in {"disabled", "fixture", "responses_web_search"}:
+        raise ConfigError("skill_providers.realtime_search must be one of: disabled, fixture, responses_web_search")
+    if config.skill_providers.root_cause not in {"disabled", "fixture", "realtime_search"}:
+        raise ConfigError("skill_providers.root_cause must be one of: disabled, fixture, realtime_search")
+    if config.skill_providers.liquidity_order_book not in {"disabled", "fixture", "exchange_native"}:
+        raise ConfigError("skill_providers.liquidity_order_book must be one of: disabled, fixture, exchange_native")
+    if config.macro_event.provider not in {"disabled", "no_active_event"}:
+        raise ConfigError("macro_event.provider must be one of: disabled, no_active_event")
+    if config.eval.release_gate.minimum_case_count < 1:
+        raise ConfigError("eval.release_gate.minimum_case_count must be at least 1")
+    if not 0 <= config.eval.release_gate.schema_valid_rate_threshold <= 1:
+        raise ConfigError("eval.release_gate.schema_valid_rate_threshold must be within [0, 1]")
+    allowed_badcase_severities = {"low", "medium", "high", "critical"}
+    unknown_badcase_severities = [
+        severity
+        for severity in config.eval.release_gate.required_badcase_severities
+        if severity not in allowed_badcase_severities
+    ]
+    if unknown_badcase_severities:
+        raise ConfigError("eval.release_gate.required_badcase_severities contains unsupported severity")
+    if not config.eval.financial_quality.evaluation_targets:
+        raise ConfigError("eval.financial_quality.evaluation_targets must not be empty")
+    if config.eval.financial_quality.minimum_scored_count < 1:
+        raise ConfigError("eval.financial_quality.minimum_scored_count must be at least 1")
+    if not 0 <= config.eval.financial_quality.minimum_direction_hit_rate <= 1:
+        raise ConfigError("eval.financial_quality.minimum_direction_hit_rate must be within [0, 1]")
+    if not 0 <= config.eval.financial_quality.maximum_brier_score <= 1:
+        raise ConfigError("eval.financial_quality.maximum_brier_score must be within [0, 1]")
     if config.security.forbid_trade_keys:
         for name in config.security.forbidden_env_names:
             if os.getenv(name):

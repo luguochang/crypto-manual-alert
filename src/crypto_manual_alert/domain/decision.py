@@ -25,45 +25,6 @@ OPENING_ACTIONS = {"open long", "open short", "trigger long", "trigger short", "
 
 
 @dataclass(frozen=True)
-class DataPoint:
-    name: str
-    value: float | str | dict[str, Any] | list[Any] | None
-    timestamp_ms: int | None
-    source: str
-    status: str = "ok"
-
-    def age_seconds(self, now: datetime | None = None) -> float | None:
-        if self.timestamp_ms is None:
-            return None
-        current = now or datetime.now(timezone.utc)
-        return current.timestamp() - (self.timestamp_ms / 1000)
-
-
-@dataclass(frozen=True)
-class MarketSnapshot:
-    symbol: str
-    fetched_at: datetime
-    points: dict[str, DataPoint]
-    unavailable: list[str] = field(default_factory=list)
-
-    def stale_points(self, max_age_seconds: int) -> list[str]:
-        stale = []
-        for name, point in self.points.items():
-            age = point.age_seconds(self.fetched_at)
-            if age is None or age > max_age_seconds:
-                stale.append(name)
-        return stale
-
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "symbol": self.symbol,
-            "fetched_at": self.fetched_at.isoformat(),
-            "points": {name: point.__dict__ for name, point in self.points.items()},
-            "unavailable": self.unavailable,
-        }
-
-
-@dataclass(frozen=True)
 class DecisionPlan:
     plan_id: str
     instrument: str
@@ -133,48 +94,3 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(value)
-
-
-@dataclass(frozen=True)
-class RuleHit:
-    rule_id: str
-    passed: bool
-    severity: str
-    message: str
-    blocking: bool
-    evidence_refs: list[str] = field(default_factory=list)
-    details: dict[str, Any] = field(default_factory=dict)
-
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "rule_id": self.rule_id,
-            "passed": self.passed,
-            "severity": self.severity,
-            "message": self.message,
-            "blocking": self.blocking,
-            "evidence_refs": list(self.evidence_refs),
-            "details": self.details,
-        }
-
-
-@dataclass(frozen=True)
-class RiskVerdict:
-    allowed: bool
-    reasons: list[str]
-    warnings: list[str] = field(default_factory=list)
-    rule_hits: list[RuleHit] = field(default_factory=list)
-
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "allowed": self.allowed,
-            "reasons": list(self.reasons),
-            "warnings": list(self.warnings),
-            "rule_hits": [hit.to_public_dict() for hit in self.rule_hits],
-        }
-
-
-@dataclass(frozen=True)
-class NotificationResult:
-    ok: bool
-    status_code: int | None = None
-    error: str | None = None
