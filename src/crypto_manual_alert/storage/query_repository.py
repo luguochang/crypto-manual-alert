@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.storage.journal import Journal
 
 
 class JournalQueryRepository:

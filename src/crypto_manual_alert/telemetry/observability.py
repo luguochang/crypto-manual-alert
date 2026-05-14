@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from .journal import Journal
+from crypto_manual_alert.storage.journal import Journal
 
 
 SECRET_KEY_HINTS = ("api_key", "authorization", "secret", "token", "passphrase", "device_key", "bark")
@@ -112,8 +112,9 @@ class ObservabilityRecorder:
         symbol: str,
         horizon: str | None = None,
         metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> str:
-        trace_id = uuid.uuid4().hex
+        trace_id = trace_id or uuid.uuid4().hex
         self.journal.append_trace(
             trace_id=trace_id,
             created_at=_now_iso(),

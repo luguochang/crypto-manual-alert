@@ -1,5 +1,15 @@
 """持久化查询边界。"""
 
-from .query_repository import JournalQueryRepository
+__all__ = ["Journal", "JournalQueryRepository"]
 
-__all__ = ["JournalQueryRepository"]
+
+def __getattr__(name: str):
+    if name == "Journal":
+        from .journal import Journal
+
+        return Journal
+    if name == "JournalQueryRepository":
+        from .query_repository import JournalQueryRepository
+
+        return JournalQueryRepository
+    raise AttributeError(name)
