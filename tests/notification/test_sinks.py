@@ -4,7 +4,7 @@ import httpx
 
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.domain import DecisionPlan, RiskVerdict
-from crypto_manual_alert.notifier import BarkNotificationSink
+from crypto_manual_alert.notification.sinks import BarkNotificationSink
 
 
 def test_bark_notification_url_encodes_slashes(monkeypatch):
@@ -14,7 +14,7 @@ def test_bark_notification_url_encodes_slashes(monkeypatch):
         captured["url"] = url
         return httpx.Response(200, json={"code": 200, "message": "success"})
 
-    monkeypatch.setattr("crypto_manual_alert.notifier.httpx.get", fake_get)
+    monkeypatch.setattr("crypto_manual_alert.notification.sinks.httpx.get", fake_get)
     monkeypatch.setenv("BARK_DEVICE_KEY", "device/key")
     config = load_config("config/default.yaml")
     plan = DecisionPlan(
@@ -40,4 +40,3 @@ def test_bark_notification_url_encodes_slashes(monkeypatch):
     assert result.ok is True
     assert "%2F" in captured["url"]
     assert "T1/T2" not in captured["url"]
-

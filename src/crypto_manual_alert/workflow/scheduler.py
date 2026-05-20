@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from .journal import Journal
+from crypto_manual_alert.storage.journal import Journal
 
 
 logger = logging.getLogger(__name__)

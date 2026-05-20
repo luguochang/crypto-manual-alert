@@ -5,28 +5,35 @@ from typing import Any, Callable
 
 from crypto_manual_alert.config import Config
 from crypto_manual_alert.context.request import DecisionRequest
+from crypto_manual_alert.context.run_context import DecisionRunContext
 from crypto_manual_alert.domain import DecisionPlan, RiskVerdict
-from crypto_manual_alert.journal import Journal
-from crypto_manual_alert.runner import PlanRunner
+from crypto_manual_alert.storage.journal import Journal
+from crypto_manual_alert.workflow.controlled_adapter import ControlledSwarmAuditAdapter
+from crypto_manual_alert.workflow.legacy_adapter import DecisionStep, LegacyPlanRunnerAdapter
+from crypto_manual_alert.workflow.results import DecisionStepResult, coerce_decision_step_result
 
 
-RunnerFactory = Callable[[Config, Journal], PlanRunner]
+AdapterFactory = Callable[[Config, Journal], DecisionStep]
+LegacyAdapterFactory = AdapterFactory
 
 
 @dataclass(frozen=True)
 class RunResult:
-    """一次工作流执行后返回给 API/UI 的稳定摘要。"""
+    """Stable API/UI summary returned after one workflow run."""
 
     trace_id: str
+    context: dict[str, Any]
     plan: dict[str, Any]
     verdict: dict[str, Any]
 
 
 class RunExecutor:
-    """工作流受控入口。
+    """Controlled workflow entry point.
 
-    首版仍复用已经验证过的 PlanRunner 管线，只在外层统一 DecisionRequest、
-    副作用边界和 API 需要的返回摘要，避免路由层直接承载业务编排。
+    The current implementation still delegates production execution to the
+    verified legacy PlanRunner through LegacyPlanRunnerAdapter. Its job is to
+    normalize DecisionRequest, create DecisionRunContext, and keep side-effect
+    boundaries out of routing/API code.
     """
 
     def __init__(
@@ -34,32 +41,38 @@ class RunExecutor:
         *,
         config: Config,
         journal: Journal,
-        runner_factory: RunnerFactory | None = None,
+        legacy_adapter_factory: AdapterFactory | None = None,
+        controlled_adapter_factory: AdapterFactory | None = None,
     ):
         self.config = config
         self.journal = journal
-        self.runner_factory = runner_factory or PlanRunner
+        self.legacy_adapter_factory = legacy_adapter_factory or LegacyPlanRunnerAdapter
+        self.controlled_adapter_factory = controlled_adapter_factory or ControlledSwarmAuditAdapter
 
     def submit(self, request: DecisionRequest) -> RunResult:
-        """同步提交一次手动或定时决策。
-
-        eval/replay/postmortem 会被拒绝，避免首版入口误触发 Bark 或生产 plan 写入。
-        """
+        """Submit one manual or scheduled production decision run."""
 
         if request.run_type not in {"manual", "scheduled"}:
-            raise ValueError("RunExecutor only accepts manual or scheduled requests in v1")
-        runner = self.runner_factory(self.config, self.journal)
-        plan, verdict = runner.run_once(request.symbol)
-        trace_id = _resolve_trace_id(self.journal, plan)
-        return RunResult(trace_id=trace_id, plan=_plan_summary(plan), verdict=_verdict_summary(verdict))
+            raise ValueError("RunExecutor only accepts manual or scheduled production requests")
+        context = DecisionRunContext.create(request)
+        decision_step = self._decision_step_factory()(self.config, self.journal)
+        step_result = coerce_decision_step_result(decision_step.run(context), require_trace_id=True)
+        plan = step_result.plan
+        verdict = step_result.verdict
+        trace_id = step_result.trace_id
+        context_summary = context.to_public_summary()
+        context_summary["artifacts"] = context.to_artifact_summary()
+        return RunResult(
+            trace_id=trace_id,
+            context=context_summary,
+            plan=_plan_summary(plan),
+            verdict=_verdict_summary(verdict),
+        )
 
-
-def _resolve_trace_id(journal: Journal, plan: DecisionPlan) -> str:
-    traces = journal.list_traces(limit=5)
-    for trace in traces:
-        if trace.get("final_plan_id") == plan.plan_id:
-            return str(trace["trace_id"])
-    return str(traces[0]["trace_id"]) if traces else ""
+    def _decision_step_factory(self) -> AdapterFactory:
+        if self.config.workflow.execution_mode in {"controlled_shadow", "production_candidate_swarm"}:
+            return self.controlled_adapter_factory
+        return self.legacy_adapter_factory
 
 
 def _plan_summary(plan: DecisionPlan) -> dict[str, Any]:

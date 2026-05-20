@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 import httpx
 
-from .config import Config
-from .domain import DataPoint, MarketSnapshot
+from crypto_manual_alert.config import Config
+from crypto_manual_alert.domain import DataPoint, MarketSnapshot
 
 
 class MarketDataProvider(Protocol):
@@ -15,10 +16,29 @@ class MarketDataProvider(Protocol):
 
 
 class OkxPublicMarketDataProvider:
-    def __init__(self, config: Config):
+    """Exchange-native OKX public market data provider.
+
+    Execution facts (mark/index/order_book) come from the market snapshot, not
+    from the audit swarm. With provider=okx_public these points carry source
+    "okx_public" which maps to source_type=exchange_native, satisfying the
+    facts_gate so opening actions can be allowed.
+
+    The optional ``http_get`` callable lets tests inject deterministic OKX
+    responses instead of hitting the network, so the gate-unblock path is
+    verifiable in CI. When ``http_get`` is None the provider performs real
+    HTTP calls via httpx.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        http_get: Callable[[str, dict[str, str]], Mapping[str, Any]] | None = None,
+    ):
         self.config = config
         self.base_url = config.market_data.okx_base_url.rstrip("/")
         self.timeout = config.market_data.request_timeout_seconds
+        self.http_get = http_get
 
     def fetch_snapshot(self, symbol: str) -> MarketSnapshot:
         fetched_at = datetime.now(timezone.utc)
@@ -29,7 +49,12 @@ class OkxPublicMarketDataProvider:
             ("ticker", "/api/v5/market/ticker", {"instId": symbol}, self._parse_ticker),
             ("mark", "/api/v5/public/mark-price", {"instType": "SWAP", "instId": symbol}, self._parse_mark),
             ("funding_rate", "/api/v5/public/funding-rate", {"instId": symbol}, self._parse_funding),
-            ("open_interest", "/api/v5/public/open-interest", {"instType": "SWAP", "instId": symbol}, self._parse_open_interest),
+            (
+                "open_interest",
+                "/api/v5/public/open-interest",
+                {"instType": "SWAP", "instId": symbol},
+                self._parse_open_interest,
+            ),
             (
                 "order_book",
                 "/api/v5/market/books",
@@ -53,13 +78,18 @@ class OkxPublicMarketDataProvider:
         return MarketSnapshot(symbol=symbol, fetched_at=fetched_at, points=points, unavailable=unavailable)
 
     def _get(self, path: str, params: dict[str, str]) -> dict[str, Any]:
-        with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
-            response = client.get(path, params=params)
-            response.raise_for_status()
-            data = response.json()
-        if data.get("code") != "0":
-            raise RuntimeError(f"OKX returned code={data.get('code')} msg={data.get('msg')}")
-        return data
+        if self.http_get is not None:
+            payload = self.http_get(path, params)
+        else:
+            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
+                response = client.get(path, params=params)
+                response.raise_for_status()
+                payload = response.json()
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("OKX response payload must be an object")
+        if str(payload.get("code")) != "0":
+            raise RuntimeError(f"OKX returned code={payload.get('code')} msg={payload.get('msg')}")
+        return dict(payload)
 
     def _first(self, data: dict[str, Any]) -> dict[str, Any]:
         rows = data.get("data") or []

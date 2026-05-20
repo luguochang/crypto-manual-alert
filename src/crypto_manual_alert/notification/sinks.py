@@ -5,8 +5,8 @@ from urllib.parse import quote
 
 import httpx
 
-from .config import Config
-from .domain import DecisionPlan, NotificationResult, RiskVerdict
+from crypto_manual_alert.config import Config
+from crypto_manual_alert.domain import DecisionPlan, NotificationResult, RiskVerdict
 
 
 class NotificationSink:

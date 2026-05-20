@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import timedelta
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .config import ConfigError, load_config
-from .eval.cli import add_eval_subcommands, handle_eval_command
-from .journal import Journal
-from .notifier import BarkNotificationSink
-from .runner import PlanRunner, journal_path, plan_to_json
-from .scheduler import JobLock, run_scheduler
+from ..config import ConfigError, load_config
+from ..context.request import DecisionRequest
+from ..eval.cli import add_eval_subcommands, handle_eval_command
+from ..storage.journal import Journal
+from ..notification.sinks import BarkNotificationSink
+from ..workflow.executor import RunExecutor as WorkflowRunExecutor
+from ..workflow.executor import RunResult
+from ..workflow.legacy_plan_runner import journal_path
+from ..workflow.scheduler import JobLock, run_scheduler
+
+if TYPE_CHECKING:
+    from ..workflow.executor import RunExecutor
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = sub.add_parser("scheduler")
     scheduler.add_argument("--symbol", default="ETH-USDT-SWAP")
+    collect = sub.add_parser("collect-outcomes")
+    collect.add_argument("--limit", type=int, default=20)
+    collect.add_argument("--symbol", default=None)
     add_eval_subcommands(sub)
 
     args = parser.parse_args(argv)
@@ -133,18 +145,73 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "badcase-list":
         print(json.dumps(journal.list_badcases(limit=args.limit), ensure_ascii=False, indent=2, default=str))
         return 0
+    if args.command == "collect-outcomes":
+        from ..eval.outcome_collector import OutcomeCollector, PlanOutcomeInput, horizon_seconds
+        from ..eval.outcome_store import OutcomeStore
+
+        outcome_store = OutcomeStore(Path(config.app.data_dir) / "crypto-outcomes.db")
+        collector = OutcomeCollector(config, outcome_store)
+        traces = journal.list_traces(limit=args.limit)
+        collected = 0
+        skipped = 0
+        for summary in traces:
+            if args.symbol and summary.get("symbol") != args.symbol:
+                continue
+            trace_id = summary.get("trace_id")
+            if not trace_id:
+                continue
+            detail = journal.get_trace_detail(trace_id)
+            if not detail:
+                skipped += 1
+                continue
+            trace = detail.get("trace") or {}
+            plan_run = detail.get("plan_run") or {}
+            parsed = plan_run.get("parsed_plan") or {}
+            action = parsed.get("main_action")
+            h_secs = horizon_seconds(trace.get("horizon"))
+            generated_at = _parse_iso(trace.get("created_at"))
+            if not action or h_secs is None or generated_at is None:
+                skipped += 1
+                continue
+            plan_input = PlanOutcomeInput(
+                decision_ref=plan_run.get("plan_id") or trace_id,
+                evaluation_target="legacy_final",
+                symbol=trace.get("symbol") or summary.get("symbol") or "",
+                action=str(action),
+                probability=_to_float_or_none(parsed.get("probability")),
+                entry_price=_to_float_or_none(parsed.get("entry_trigger")),
+                stop_price=_to_float_or_none(parsed.get("stop_price")),
+                target_1=_to_float_or_none(parsed.get("target_1")),
+                target_2=_to_float_or_none(parsed.get("target_2")),
+                generated_at=generated_at,
+                horizon_seconds=h_secs,
+            )
+            outcome = collector.collect(plan_input)
+            if outcome is not None:
+                collected += 1
+            else:
+                skipped += 1
+        print(
+            json.dumps(
+                {"collected": collected, "skipped": skipped, "limit": args.limit},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     if args.command == "run-once":
-        runner = PlanRunner(config, journal)
-        plan, verdict = runner.run_once(args.symbol)
-        print(plan_to_json(plan, verdict))
-        return 0 if verdict.allowed else 3
+        result = _run_executor_class()(config=config, journal=journal).submit(
+            DecisionRequest(run_type="manual", symbol=args.symbol)
+        )
+        print(_run_result_to_json(result))
+        return 0 if result.verdict.get("allowed") is True else 3
     if args.command == "scheduler":
         lock = JobLock(journal, "plan-run", ttl=timedelta(seconds=config.scheduler.lock_ttl_seconds))
-        runner = PlanRunner(config, journal)
+        executor = _run_executor_class()(config=config, journal=journal)
 
         def job() -> None:
-            plan, verdict = runner.run_once(args.symbol)
-            print(plan_to_json(plan, verdict))
+            result = executor.submit(DecisionRequest(run_type="scheduled", symbol=args.symbol))
+            print(_run_result_to_json(result))
 
         run_scheduler(
             config.scheduler.interval_seconds,
@@ -157,5 +224,48 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _run_executor_class():
+    package = sys.modules.get("crypto_manual_alert.cli")
+    return getattr(package, "RunExecutor", WorkflowRunExecutor) if package is not None else WorkflowRunExecutor
+
+
+def _run_result_to_json(result: RunResult) -> str:
+    return json.dumps(
+        {
+            "plan_id": result.plan["plan_id"],
+            "instrument": result.plan["instrument"],
+            "main_action": result.plan["main_action"],
+            "allowed": result.verdict.get("allowed"),
+            "reasons": result.verdict.get("reasons") or [],
+            "warnings": result.verdict.get("warnings") or [],
+            "rule_hits": result.verdict.get("rule_hits") or [],
+            "expires_at": result.plan["expires_at"],
+            "manual_execution_required": result.plan["manual_execution_required"],
+        },
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _to_float_or_none(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
