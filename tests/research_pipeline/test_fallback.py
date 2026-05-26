@@ -6,9 +6,9 @@ import httpx
 
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.domain import DataPoint, MarketSnapshot
-from crypto_manual_alert.journal import Journal
-from crypto_manual_alert.observability import ObservabilityRecorder, record_llm_interaction, use_observability
-from crypto_manual_alert.research import (
+from crypto_manual_alert.storage.journal import Journal
+from crypto_manual_alert.telemetry.observability import ObservabilityRecorder, record_llm_interaction, use_observability
+from crypto_manual_alert.research_pipeline import (
     FixtureSearchAdapter,
     OpenAICompatibleLeaderResearchSynthesizer,
     OpenAICompatibleResearchPlanner,
