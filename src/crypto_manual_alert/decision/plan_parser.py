@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from numbers import Real
 from datetime import datetime, timezone
+from numbers import Real
 from typing import Any
 
-from .domain import ALLOWED_ACTIONS, DecisionPlan
+from crypto_manual_alert.domain import ALLOWED_ACTIONS, DecisionPlan
 
 
 class PlanParseError(ValueError):
@@ -31,6 +31,26 @@ NUMERIC_FIELDS = {
     "risk_pct",
     "expires_in_seconds",
 }
+
+
+def parse_decision_plan(raw: str, generated_at: datetime | None = None) -> DecisionPlan:
+    payload = _extract_json(raw)
+    _validate_action(payload)
+    _validate_numeric_fields(payload)
+    _validate_required_fields(payload)
+    try:
+        plan = DecisionPlan.from_payload(payload, generated_at or datetime.now(timezone.utc))
+    except (TypeError, ValueError) as exc:
+        for field in NUMERIC_FIELDS:
+            message = str(exc)
+            if field in message or field in payload:
+                raise PlanParseError(f"invalid numeric field: {field}") from exc
+        raise PlanParseError(f"invalid decision payload: {exc}") from exc
+    if not plan.instrument:
+        raise PlanParseError("instrument is required")
+    if not plan.manual_execution_required:
+        raise PlanParseError("manual_execution_required must be true")
+    return plan
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -76,23 +96,3 @@ def _validate_numeric_fields(payload: dict[str, Any]) -> None:
             raise PlanParseError(f"invalid numeric field: {field}")
         if field == "probability" and not 0 <= float(value) <= 1:
             raise PlanParseError("probability must be within [0, 1]")
-
-
-def parse_decision_plan(raw: str, generated_at: datetime | None = None) -> DecisionPlan:
-    payload = _extract_json(raw)
-    _validate_action(payload)
-    _validate_numeric_fields(payload)
-    _validate_required_fields(payload)
-    try:
-        plan = DecisionPlan.from_payload(payload, generated_at or datetime.now(timezone.utc))
-    except (TypeError, ValueError) as exc:
-        for field in NUMERIC_FIELDS:
-            message = str(exc)
-            if field in message or field in payload:
-                raise PlanParseError(f"invalid numeric field: {field}") from exc
-        raise PlanParseError(f"invalid decision payload: {exc}") from exc
-    if not plan.instrument:
-        raise PlanParseError("instrument is required")
-    if not plan.manual_execution_required:
-        raise PlanParseError("manual_execution_required must be true")
-    return plan

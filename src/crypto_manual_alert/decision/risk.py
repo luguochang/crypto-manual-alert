@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-from .config import Config
-from .domain import OPENING_ACTIONS, DecisionPlan, MarketSnapshot, RiskVerdict, RuleHit
+from crypto_manual_alert.config import Config
+from crypto_manual_alert.domain import OPENING_ACTIONS, DecisionPlan, MarketSnapshot, RiskVerdict, RuleHit
 
 
 class ConfidenceCap(NamedTuple):
@@ -17,7 +17,7 @@ CORE_EXECUTION_POINTS = ("mark", "index", "order_book")
 
 
 def check_plan(plan: DecisionPlan, snapshot: MarketSnapshot, config: Config, now: datetime | None = None) -> RiskVerdict:
-    """对模型输出做确定性风控校验，并把每条规则命中结构化记录下来。"""
+    """Run deterministic risk validation for a manual decision plan."""
 
     current = now or datetime.now(timezone.utc)
     reasons: list[str] = []
@@ -186,7 +186,6 @@ def _confidence_cap_from_snapshot(snapshot: MarketSnapshot) -> ConfidenceCap | N
         caps.append(ConfidenceCap(value=value, reason=parts[2]))
     if not caps:
         return None
-    # 多个数据缺口同时给 cap 时，采用最保守的上限。
     return min(caps, key=lambda cap: cap.value)
 
 

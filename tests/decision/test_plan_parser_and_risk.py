@@ -4,9 +4,9 @@ import pytest
 
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.domain import DataPoint, MarketSnapshot
-from crypto_manual_alert.market_data import FixtureMarketDataProvider
-from crypto_manual_alert.plan_parser import PlanParseError, parse_decision_plan
-from crypto_manual_alert.risk import check_plan
+from crypto_manual_alert.market.providers import FixtureMarketDataProvider
+from crypto_manual_alert.decision.plan_parser import PlanParseError, parse_decision_plan
+from crypto_manual_alert.decision.risk import check_plan
 
 
 def snapshot(age_seconds=0):

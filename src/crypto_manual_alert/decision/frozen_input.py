@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
+
+from crypto_manual_alert.artifacts.hashing import stable_hash
 
 
 SCHEMA_VERSION = 1
@@ -26,7 +26,7 @@ SECRET_KEY_HINTS = (
 
 @dataclass(frozen=True)
 class FrozenInput:
-    """可回放输入快照。payload 只保存送入决策模型的脱敏结构化输入。"""
+    """Replayable snapshot of the sanitized input sent to the decision model."""
 
     frozen_input_hash: str
     input_payload: dict[str, Any]
@@ -117,11 +117,6 @@ def sanitize_for_frozen_input(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize_for_frozen_input(item) for item in value]
     return copy.deepcopy(value)
-
-
-def stable_hash(payload: Any) -> str:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _public_summary(payload: dict[str, Any]) -> dict[str, Any]:
