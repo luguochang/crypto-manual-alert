@@ -4,9 +4,15 @@ import hashlib
 import json
 from typing import Any
 
-from crypto_manual_alert.frozen_input import frozen_input_from_plan_payload
-from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.decision.frozen_input import frozen_input_from_plan_payload, stable_hash
+from crypto_manual_alert.storage.journal import Journal
 
+from .candidate_artifact_snapshots import artifact_snapshot_summary
+from .context_artifact_summary import context_artifacts_summary
+from .replayable_input_summary import (
+    replayable_artifact_refs_summary,
+    replayable_coverage_summary,
+)
 from .schema import EvalCase, EvalFrozenInput
 
 
@@ -19,6 +25,7 @@ SECRET_KEY_HINTS = (
     "device_key",
     "bark",
     "raw_decision",
+    "raw_candidate_decision",
     "raw_payload",
     "request_json",
     "response_json",
@@ -201,6 +208,7 @@ def _frozen_input_from_detail(badcase: dict[str, Any], detail: dict[str, Any]) -
 def _frozen_summary(badcase: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
     trace = detail["trace"]
     plan = detail.get("plan_run") or {}
+    full_payload = _plan_payload_for_detail(badcase, detail)
     spans = detail.get("spans") or []
     llm_interactions = detail.get("llm_interactions") or []
     return {
@@ -223,6 +231,7 @@ def _frozen_summary(badcase: dict[str, Any], detail: dict[str, Any]) -> dict[str
             "verdict": _sanitize(plan.get("verdict") or {}),
             "analysis": _sanitize(detail.get("analysis") or {}),
         },
+        "candidate_audit": _candidate_audit_summary(full_payload or plan),
         "trace_summary": {
             "span_names": [span.get("span_name") for span in spans],
             "llm_interactions": [
@@ -254,6 +263,197 @@ def _frozen_summary(badcase: dict[str, Any], detail: dict[str, Any]) -> dict[str
             "actual": badcase.get("actual_behavior") or badcase.get("comment") or "",
         },
     }
+
+
+def _plan_payload_for_detail(badcase: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any] | None:
+    trace = detail["trace"]
+    plan = detail.get("plan_run") or {}
+    plan_id = badcase.get("plan_id") or plan.get("plan_id") or trace.get("final_plan_id")
+    journal = detail.get("_journal")
+    if plan_id and isinstance(journal, Journal):
+        return journal.get_plan_run_payload(str(plan_id))
+    return None
+
+
+def _candidate_audit_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    source = _candidate_audit_source(plan)
+    gate_candidate = source.get("gate_candidate") if isinstance(source.get("gate_candidate"), dict) else {}
+    plan_semantic_candidate = (
+        source.get("plan_semantic_candidate")
+        if isinstance(source.get("plan_semantic_candidate"), dict)
+        else {}
+    )
+    switch_readiness = (
+        source.get("final_decision_switch_readiness")
+        if isinstance(source.get("final_decision_switch_readiness"), dict)
+        else {}
+    )
+    decision_input = (
+        source.get("decision_input_candidate")
+        if isinstance(source.get("decision_input_candidate"), dict)
+        else {}
+    )
+    replayable_input = (
+        source.get("replayable_input_candidate")
+        if isinstance(source.get("replayable_input_candidate"), dict)
+        else {}
+    )
+    summary = {
+        "decision_input_candidate": {
+            "input_ref": decision_input.get("input_ref"),
+            "input_hash": decision_input.get("input_hash"),
+            "decision_effect": decision_input.get("decision_effect"),
+            "contribution_refs": _decision_input_contribution_refs(decision_input),
+            "execution_fact_source_violations": _execution_fact_source_violations(decision_input),
+        },
+        "replayable_input_candidate": {
+            "input_ref": replayable_input.get("input_ref"),
+            "input_hash": replayable_input.get("input_hash"),
+            "decision_effect": replayable_input.get("decision_effect"),
+            "coverage": replayable_coverage_summary(replayable_input.get("coverage")),
+            "artifact_refs": replayable_artifact_refs_summary(replayable_input.get("artifact_refs")),
+        },
+        "context_artifacts": context_artifacts_summary(plan),
+        "artifact_snapshot": artifact_snapshot_summary(source),
+        "gate_candidate": {
+            "passed": gate_candidate.get("passed"),
+            "severity": gate_candidate.get("severity"),
+            "violations": _sanitize(gate_candidate.get("violations") or []),
+            "blocked_actions": _sanitize(gate_candidate.get("blocked_actions") or []),
+            "missing_facts": _sanitize(gate_candidate.get("missing_facts") or []),
+        },
+        "plan_semantic_candidate": {
+            "passed": plan_semantic_candidate.get("passed"),
+            "severity": plan_semantic_candidate.get("severity"),
+            "violations": _sanitize(plan_semantic_candidate.get("violations") or []),
+        },
+        "final_decision_switch_readiness": {
+            "ready": switch_readiness.get("ready"),
+            "blocking_reasons": _sanitize(switch_readiness.get("blocking_reasons") or []),
+        },
+    }
+    controlled_shadow = _controlled_shadow_summary(source.get("controlled_shadow"))
+    if controlled_shadow:
+        summary["controlled_shadow"] = controlled_shadow
+    candidate_final = source.get("candidate_final_decision")
+    if isinstance(candidate_final, dict):
+        summary["candidate_final_decision"] = _candidate_final_decision_summary(candidate_final)
+    return summary
+
+
+def _candidate_audit_source(plan: dict[str, Any]) -> dict[str, Any]:
+    audit_only = plan.get("audit_only") if isinstance(plan.get("audit_only"), dict) else None
+    if isinstance(audit_only, dict) and audit_only.get("decision_effect") == "none":
+        return audit_only
+    return plan
+
+
+def _controlled_shadow_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: _sanitize(payload.get(key))
+        for key in (
+            "mode",
+            "audit_only",
+            "production_final_input",
+            "notification_input",
+            "reason",
+        )
+        if payload.get(key) is not None
+    }
+
+
+def _candidate_final_decision_summary(candidate_final: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_type": "candidate_final_decision",
+        "mode": candidate_final.get("mode"),
+        "decision_effect": candidate_final.get("decision_effect"),
+        "production_final_input": candidate_final.get("production_final_input"),
+        "input_ref": candidate_final.get("input_ref"),
+        "input_hash": candidate_final.get("input_hash"),
+        "input_gate_passed": candidate_final.get("input_gate_passed"),
+        "candidate_final_summary": _candidate_final_output_summary(candidate_final),
+        "candidate_final_output_hash": stable_hash(
+            {"raw_candidate_decision": candidate_final.get("raw_candidate_decision")}
+        )
+        if candidate_final.get("raw_candidate_decision") is not None
+        else None,
+        "error": _sanitize(candidate_final.get("error")),
+    }
+
+
+def _candidate_final_output_summary(candidate_final: dict[str, Any]) -> dict[str, Any]:
+    raw_candidate_decision = candidate_final.get("raw_candidate_decision")
+    if isinstance(candidate_final.get("candidate_final_summary"), dict):
+        parsed = candidate_final["candidate_final_summary"]
+    elif isinstance(raw_candidate_decision, dict):
+        parsed = raw_candidate_decision
+    else:
+        try:
+            parsed = json.loads(str(raw_candidate_decision))
+        except (TypeError, json.JSONDecodeError):
+            parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    return {
+        key: parsed.get(key)
+        for key in ("instrument", "main_action", "probability")
+        if parsed.get(key) is not None
+    }
+
+
+def _execution_fact_source_violations(decision_input: dict[str, Any]) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    for ref in decision_input.get("evidence_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        data_type = str(ref.get("data_type") or "")
+        source_type = str(ref.get("source_type") or "")
+        if (
+            data_type in {"mark", "index", "order_book"}
+            and source_type in {"search_derived", "web_derived"}
+            and ref.get("can_satisfy_execution_fact") is True
+        ):
+            violations.append(
+                {
+                    "evidence_id": ref.get("evidence_id"),
+                    "data_type": data_type,
+                    "source_type": source_type,
+                }
+            )
+    return violations
+
+
+def _decision_input_contribution_refs(decision_input: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = decision_input.get("contribution_refs")
+    if not isinstance(refs, list):
+        return []
+    safe_refs: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        safe_ref = {
+            key: ref.get(key)
+            for key in (
+                "contribution_id",
+                "agent_name",
+                "status",
+                "required",
+                "output_hash",
+                "input_ref",
+                "trace_ref",
+                "migration_stage",
+                "hard_block",
+            )
+            if ref.get(key) is not None
+        }
+        if ref.get("hard_block") is True:
+            safe_ref["hard_block_reasons"] = [
+                str(reason) for reason in ref.get("hard_block_reasons") or []
+            ]
+        safe_refs.append(safe_ref)
+    return safe_refs
 
 
 def _plan_summary(detail: dict[str, Any]) -> dict[str, Any]:

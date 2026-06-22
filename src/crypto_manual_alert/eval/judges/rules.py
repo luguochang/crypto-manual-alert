@@ -39,6 +39,9 @@ class RuleJudge:
             self._opening_requirements(eval_run_id, case),
             self._required_spans(eval_run_id, case),
             self._manual_only(eval_run_id, case),
+            self._candidate_gate(eval_run_id, case),
+            self._plan_semantic_candidate(eval_run_id, case),
+            self._final_switch_readiness(eval_run_id, case),
         ]
         return [score for score in scores if score is not None]
 
@@ -161,6 +164,87 @@ class RuleJudge:
                 "observed_output.parsed_plan.stop_price",
                 "observed_output.parsed_plan.invalidation",
             ],
+        )
+
+    def _candidate_gate(self, eval_run_id: str, case: EvalCase) -> EvalScore | None:
+        candidate_audit = case.input_summary.get("candidate_audit") or {}
+        gate = candidate_audit.get("gate_candidate") if isinstance(candidate_audit, dict) else None
+        if not isinstance(gate, dict):
+            return None
+        passed = gate.get("passed") is True
+        violations = gate.get("violations") or []
+        return make_score(
+            eval_run_id=eval_run_id,
+            case=case,
+            judge_name="rule.candidate_gate",
+            judge_type="rule",
+            passed=passed,
+            severity="high" if not passed else "low",
+            failure_category="candidate_gate_failed" if not passed else "none",
+            reason_summary=(
+                "candidate gate passed for the observed legacy action."
+                if passed
+                else "candidate gate flagged the observed legacy action; keep in audit until migration is reviewed."
+            ),
+            evidence_refs=["candidate_audit.gate_candidate"],
+            metadata={"violations": violations},
+        )
+
+    def _final_switch_readiness(self, eval_run_id: str, case: EvalCase) -> EvalScore | None:
+        candidate_audit = case.input_summary.get("candidate_audit") or {}
+        readiness = (
+            candidate_audit.get("final_decision_switch_readiness")
+            if isinstance(candidate_audit, dict)
+            else None
+        )
+        if not isinstance(readiness, dict):
+            return None
+        ready = readiness.get("ready") is True
+        blocking_reasons = [str(item) for item in readiness.get("blocking_reasons") or []]
+        passed = not ready or not blocking_reasons
+        return make_score(
+            eval_run_id=eval_run_id,
+            case=case,
+            judge_name="rule.final_switch_readiness",
+            judge_type="rule",
+            passed=passed,
+            severity="critical" if not passed else "low",
+            failure_category="unsafe_switch_readiness" if not passed else "none",
+            reason_summary=(
+                "switch readiness is conservative."
+                if passed
+                else "switch readiness reported ready while blocking reasons are still present."
+            ),
+            evidence_refs=["candidate_audit.final_decision_switch_readiness"],
+            metadata={"ready": ready, "blocking_reasons": blocking_reasons},
+        )
+
+    def _plan_semantic_candidate(self, eval_run_id: str, case: EvalCase) -> EvalScore | None:
+        candidate_audit = case.input_summary.get("candidate_audit") or {}
+        semantic = (
+            candidate_audit.get("plan_semantic_candidate")
+            if isinstance(candidate_audit, dict)
+            else None
+        )
+        if not isinstance(semantic, dict):
+            return None
+        passed = semantic.get("passed") is True
+        violations = semantic.get("violations") or []
+        return make_score(
+            eval_run_id=eval_run_id,
+            case=case,
+            judge_name="rule.plan_semantic_candidate",
+            judge_type="rule",
+            passed=passed,
+            severity="high" if not passed else "low",
+            failure_category="plan_semantic_candidate_failed" if not passed else "none",
+            reason_summary=(
+                "plan semantic candidate passed for entry, stop, and targets."
+                if passed
+                else "plan semantic candidate flagged entry, stop, or target geometry."
+            ),
+            evidence_refs=["candidate_audit.plan_semantic_candidate"],
+            metadata={"violations": violations},
         )
 
 

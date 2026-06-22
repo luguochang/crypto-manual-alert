@@ -6,9 +6,10 @@ import json
 from crypto_manual_alert.config import Config
 from crypto_manual_alert.eval.errors import EvalRunError
 from crypto_manual_alert.eval.guards import EvalSafetyError
-from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.storage.journal import Journal
 
-from .runner import EvalRunner, eval_store_path
+from .outcome_store import OutcomeStore
+from .runner import EvalRunner, eval_store_path, outcome_store_path
 from .store import EvalStore
 
 
@@ -37,10 +38,12 @@ def handle_eval_command(args: argparse.Namespace, *, config: Config, journal: Jo
     if args.command not in {"eval-run", "eval-report", "eval-list-runs", "eval-show-run"}:
         return None
     store = EvalStore(eval_store_path(config.app.data_dir))
+    outcome_store = OutcomeStore(outcome_store_path(config.app.data_dir))
     if args.command == "eval-run":
         runner = EvalRunner(
             journal=journal,
             store=store,
+            outcome_store=outcome_store,
             data_dir=config.app.data_dir,
             forbidden_env_names=config.security.forbidden_env_names,
             config=config,

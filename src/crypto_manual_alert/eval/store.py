@@ -1,12 +1,32 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from crypto_manual_alert.decision.frozen_input import stable_hash
+
+from .candidate_artifact_validation import (
+    CANDIDATE_ARTIFACT_TYPES,
+    candidate_artifact_ref,
+    validate_candidate_artifact,
+    validate_candidate_artifact_snapshot,
+)
+from .promotion_artifact_validation import validate_promotion_artifact
 from .schema import EvalCase, EvalFrozenInput, EvalReplayOutput, EvalRun, EvalScore
+from .store_schema import init_eval_store_schema
+from .store_rows import (
+    case_row,
+    case_to_row,
+    dump_json,
+    frozen_input_row,
+    load_json,
+    not_run_replay_result,
+    replay_row,
+    run_row,
+    score_row,
+)
 
 
 class EvalStore:
@@ -32,123 +52,7 @@ class EvalStore:
 
     def _init_db(self) -> None:
         with self.connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_cases (
-                    case_id TEXT PRIMARY KEY,
-                    dataset_name TEXT NOT NULL,
-                    source_trace_id TEXT NOT NULL,
-                    source_badcase_id INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    horizon TEXT,
-                    failure_category TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    expected_behavior TEXT NOT NULL,
-                    actual_behavior TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    frozen_input_hash TEXT NOT NULL,
-                    input_summary_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_runs (
-                    eval_run_id TEXT PRIMARY KEY,
-                    dataset_name TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    case_count INTEGER NOT NULL,
-                    pass_count INTEGER NOT NULL,
-                    fail_count INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_run_cases (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    eval_run_id TEXT NOT NULL,
-                    case_id TEXT NOT NULL,
-                    case_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_scores (
-                    score_id TEXT PRIMARY KEY,
-                    eval_run_id TEXT NOT NULL,
-                    case_id TEXT NOT NULL,
-                    source_trace_id TEXT NOT NULL DEFAULT '',
-                    source_badcase_id INTEGER NOT NULL DEFAULT 0,
-                    judge_name TEXT NOT NULL,
-                    judge_type TEXT NOT NULL,
-                    score REAL,
-                    passed INTEGER NOT NULL,
-                    severity TEXT NOT NULL,
-                    failure_category TEXT NOT NULL,
-                    reason_summary TEXT NOT NULL,
-                    evidence_refs_json TEXT NOT NULL,
-                    needs_human_review INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_frozen_inputs (
-                    frozen_input_hash TEXT PRIMARY KEY,
-                    schema_version INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    source_trace_id TEXT NOT NULL,
-                    source_badcase_id INTEGER NOT NULL,
-                    input_json TEXT NOT NULL,
-                    public_summary_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS eval_replay_outputs (
-                    replay_id TEXT PRIMARY KEY,
-                    case_id TEXT NOT NULL,
-                    source_trace_id TEXT NOT NULL,
-                    source_badcase_id INTEGER NOT NULL,
-                    frozen_input_hash TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    final_action TEXT,
-                    allowed INTEGER,
-                    output_hash TEXT,
-                    reason_summary TEXT,
-                    error_message TEXT,
-                    duration_ms INTEGER,
-                    output_json TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(dataset_name)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_run_cases_run ON eval_run_cases(eval_run_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_run ON eval_scores(eval_run_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_replay_outputs_case ON eval_replay_outputs(case_id)")
-            _ensure_columns(
-                conn,
-                "eval_scores",
-                {
-                    "source_trace_id": "TEXT NOT NULL DEFAULT ''",
-                    "source_badcase_id": "INTEGER NOT NULL DEFAULT 0",
-                },
-            )
+            init_eval_store_schema(conn)
 
     def upsert_cases(self, cases: list[EvalCase]) -> None:
         with self.connect() as conn:
@@ -178,10 +82,11 @@ class EvalStore:
                         case.summary,
                         case.status,
                         case.frozen_input_hash,
-                        _json(case.input_summary),
-                        _json(case.metadata),
+                        dump_json(case.input_summary),
+                        dump_json(case.metadata),
                     ),
                 )
+                _insert_candidate_artifacts(conn, case.case_id, case.input_summary)
 
     def upsert_frozen_inputs(self, frozen_inputs: list[EvalFrozenInput]) -> None:
         with self.connect() as conn:
@@ -200,9 +105,9 @@ class EvalStore:
                         frozen.kind,
                         frozen.source_trace_id,
                         frozen.source_badcase_id,
-                        _json(frozen.input_payload),
-                        _json(frozen.public_summary),
-                        _json(frozen.metadata),
+                        dump_json(frozen.input_payload),
+                        dump_json(frozen.public_summary),
+                        dump_json(frozen.metadata),
                     ),
                 )
 
@@ -212,7 +117,15 @@ class EvalStore:
                 "SELECT * FROM eval_frozen_inputs WHERE frozen_input_hash = ?",
                 (frozen_input_hash,),
             ).fetchone()
-        return _frozen_input_row(row) if row else None
+        return frozen_input_row(row) if row else None
+
+    def get_case(self, case_id: str) -> EvalCase | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM eval_cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+        return case_row(row) if row else None
 
     def insert_replay_output(self, output: EvalReplayOutput) -> None:
         with self.connect() as conn:
@@ -240,24 +153,29 @@ class EvalStore:
                     output.reason_summary,
                     output.error_message,
                     output.duration_ms,
-                    _json(output.output_payload),
-                    _json(output.metadata),
+                    dump_json(output.output_payload),
+                    dump_json(output.metadata),
                 ),
             )
 
-    def get_replay_output(self, case_id: str) -> dict[str, Any] | None:
+    def get_replay_output(self, case_id: str, *, mode: str | None = None) -> dict[str, Any] | None:
+        where = "case_id = ?"
+        params: tuple[Any, ...] = (case_id,)
+        if mode is not None:
+            where = "case_id = ? AND mode = ?"
+            params = (case_id, mode)
         with self.connect() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM eval_replay_outputs
-                WHERE case_id = ?
-                ORDER BY created_at DESC
+                WHERE {where}
+                ORDER BY created_at DESC, replay_id DESC
                 LIMIT 1
                 """,
-                (case_id,),
+                params,
             ).fetchone()
-        return _replay_row(row) if row else None
+        return replay_row(row) if row else None
 
     def insert_run(self, run: EvalRun, cases: list[EvalCase], scores: list[EvalScore]) -> None:
         with self.connect() as conn:
@@ -279,7 +197,7 @@ class EvalStore:
                     run.case_count,
                     run.pass_count,
                     run.fail_count,
-                    _json(run.metadata),
+                    dump_json(run.metadata),
                 ),
             )
             for case in cases:
@@ -288,7 +206,7 @@ class EvalStore:
                     INSERT INTO eval_run_cases (eval_run_id, case_id, case_json)
                     VALUES (?, ?, ?)
                     """,
-                    (run.eval_run_id, case.case_id, _json(_case_to_row(case))),
+                    (run.eval_run_id, case.case_id, dump_json(case_to_row(case))),
                 )
             for score in scores:
                 conn.execute(
@@ -314,11 +232,76 @@ class EvalStore:
                         score.severity,
                         score.failure_category,
                         score.reason_summary,
-                        _json(score.evidence_refs),
+                        dump_json(score.evidence_refs),
                         1 if score.needs_human_review else 0,
-                        _json(score.metadata),
+                        dump_json(score.metadata),
                     ),
                 )
+            _insert_promotion_artifacts(
+                conn,
+                run.eval_run_id,
+                run.metadata.get("promotion_artifacts") if isinstance(run.metadata, dict) else None,
+            )
+
+    def upsert_promotion_artifacts(self, eval_run_id: str, artifacts: dict[str, dict[str, Any]]) -> None:
+        with self.connect() as conn:
+            _insert_promotion_artifacts(conn, eval_run_id, artifacts)
+
+    def get_promotion_artifacts(self, eval_run_id: str) -> dict[str, dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT artifact_type, artifact_json
+                FROM eval_promotion_artifacts
+                WHERE eval_run_id = ?
+                ORDER BY artifact_type ASC
+                """,
+                (eval_run_id,),
+            ).fetchall()
+        artifacts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            artifact = load_json(row["artifact_json"]) or {}
+            if isinstance(artifact, dict):
+                artifacts[str(row["artifact_type"])] = artifact
+        return artifacts
+
+    def get_candidate_artifacts(
+        self,
+        case_id: str,
+        *,
+        include_store_metadata: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT artifact_type, artifact_hash, artifact_json
+                FROM eval_candidate_artifacts
+                WHERE case_id = ?
+                ORDER BY artifact_type ASC
+                """,
+                (case_id,),
+            ).fetchall()
+        artifacts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            artifact = load_json(row["artifact_json"]) or {}
+            if isinstance(artifact, dict):
+                if include_store_metadata:
+                    artifact = dict(artifact)
+                    artifact["stored_artifact_hash"] = str(row["artifact_hash"])
+                artifacts[str(row["artifact_type"])] = artifact
+        return artifacts
+
+    def get_candidate_artifact_hash(self, case_id: str, artifact_type: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT artifact_hash
+                FROM eval_candidate_artifacts
+                WHERE case_id = ? AND artifact_type = ?
+                """,
+                (case_id, artifact_type),
+            ).fetchone()
+        return str(row["artifact_hash"]) if row else None
 
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -331,7 +314,7 @@ class EvalStore:
                 """,
                 (max(1, min(int(limit), 100)),),
             ).fetchall()
-        return [_run_row(row) for row in rows]
+        return [run_row(row) for row in rows]
 
     def get_run_detail(self, eval_run_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -369,109 +352,83 @@ class EvalStore:
             ).fetchall()
         replay_by_case: dict[str, dict[str, Any]] = {}
         for row in replay_rows:
-            replay = _replay_row(row)
+            replay = replay_row(row)
             replay_by_case.setdefault(str(replay["case_id"]), replay)
         case_payloads = []
         for row in cases:
-            payload = _load_json(row["case_json"])
+            payload = load_json(row["case_json"])
             if isinstance(payload, dict):
-                payload["replay_result"] = replay_by_case.get(str(payload.get("case_id"))) or _not_run_replay_result(payload)
+                payload["replay_result"] = replay_by_case.get(str(payload.get("case_id"))) or not_run_replay_result(payload)
             case_payloads.append(payload)
         return {
-            "run": _run_row(run),
+            "run": run_row(run),
             "cases": case_payloads,
-            "scores": [_score_row(row) for row in scores],
+            "scores": [score_row(row) for row in scores],
         }
 
 
-def _json(payload: Any) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+def _insert_promotion_artifacts(
+    conn: sqlite3.Connection,
+    eval_run_id: str,
+    artifacts: dict[str, dict[str, Any]] | None,
+) -> None:
+    if not artifacts:
+        return
+    if not isinstance(artifacts, dict):
+        raise ValueError("promotion artifacts must be a mapping")
+    for artifact_type, artifact in artifacts.items():
+        validate_promotion_artifact(eval_run_id, str(artifact_type), artifact)
+        conn.execute(
+            """
+            INSERT INTO eval_promotion_artifacts (
+                eval_run_id, artifact_type, artifact_ref, artifact_json
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(eval_run_id, artifact_type) DO UPDATE SET
+                artifact_ref = excluded.artifact_ref,
+                artifact_json = excluded.artifact_json
+            """,
+            (
+                eval_run_id,
+                str(artifact_type),
+                str(artifact["artifact_ref"]),
+                dump_json(artifact),
+            ),
+        )
 
 
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    for name, definition in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
-
-
-def _load_json(text: str | None) -> Any:
-    if not text:
-        return None
-    return json.loads(text)
-
-
-def _run_row(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    data["metadata"] = _load_json(data.pop("metadata_json"))
-    return data
-
-
-def _case_to_row(case: EvalCase) -> dict[str, Any]:
-    return {
-        "case_id": case.case_id,
-        "dataset_name": case.dataset_name,
-        "source_trace_id": case.source_trace_id,
-        "source_badcase_id": case.source_badcase_id,
-        "created_at": case.created_at,
-        "symbol": case.symbol,
-        "horizon": case.horizon,
-        "failure_category": case.failure_category,
-        "severity": case.severity,
-        "expected_behavior": case.expected_behavior,
-        "actual_behavior": case.actual_behavior,
-        "summary": case.summary,
-        "status": case.status,
-        "frozen_input_hash": case.frozen_input_hash,
-        "input_summary": case.input_summary,
-        "metadata": case.metadata,
-    }
-
-
-def _frozen_input_row(row: sqlite3.Row) -> EvalFrozenInput:
-    return EvalFrozenInput(
-        frozen_input_hash=str(row["frozen_input_hash"]),
-        schema_version=int(row["schema_version"]),
-        kind=str(row["kind"]),
-        source_trace_id=str(row["source_trace_id"]),
-        source_badcase_id=int(row["source_badcase_id"]),
-        input_payload=_load_json(row["input_json"]) or {},
-        public_summary=_load_json(row["public_summary_json"]) or {},
-        metadata=_load_json(row["metadata_json"]) or {},
-    )
-
-
-def _replay_row(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    data["allowed"] = None if data.get("allowed") is None else bool(data["allowed"])
-    data["output_payload"] = _load_json(data.pop("output_json")) or {}
-    data["metadata"] = _load_json(data.pop("metadata_json")) or {}
-    data.pop("created_at", None)
-    return data
-
-
-def _not_run_replay_result(case_payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "status": "not_run",
-        "mode": "none",
-        "case_id": case_payload.get("case_id"),
-        "source_trace_id": case_payload.get("source_trace_id"),
-        "source_badcase_id": case_payload.get("source_badcase_id"),
-        "frozen_input_hash": case_payload.get("frozen_input_hash"),
-        "final_action": None,
-        "allowed": None,
-        "output_hash": None,
-        "reason_summary": None,
-        "error_message": None,
-        "duration_ms": None,
-        "metadata": {},
-    }
-
-
-def _score_row(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    data["passed"] = bool(data["passed"])
-    data["needs_human_review"] = bool(data["needs_human_review"])
-    data["evidence_refs"] = _load_json(data.pop("evidence_refs_json")) or []
-    data["metadata"] = _load_json(data.pop("metadata_json"))
-    return data
+def _insert_candidate_artifacts(
+    conn: sqlite3.Connection,
+    case_id: str,
+    input_summary: dict[str, Any],
+) -> None:
+    if not isinstance(input_summary, dict):
+        return
+    candidate_audit = input_summary.get("candidate_audit")
+    if not isinstance(candidate_audit, dict):
+        return
+    snapshot = candidate_audit.get("artifact_snapshot")
+    if not isinstance(snapshot, dict):
+        return
+    validate_candidate_artifact_snapshot(snapshot)
+    for artifact_type in CANDIDATE_ARTIFACT_TYPES:
+        artifact = snapshot.get(artifact_type)
+        if not isinstance(artifact, dict):
+            continue
+        validate_candidate_artifact(case_id, artifact_type, artifact)
+        artifact_ref = candidate_artifact_ref(artifact)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO eval_candidate_artifacts (
+                case_id, artifact_type, artifact_ref, artifact_hash, artifact_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                case_id,
+                artifact_type,
+                artifact_ref,
+                stable_hash(artifact),
+                dump_json(artifact),
+            ),
+        )

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from crypto_manual_alert.eval.schema import EvalCase, EvalScore
-from crypto_manual_alert.llm_telemetry import extract_chat_completion_telemetry
+from crypto_manual_alert.telemetry.llm import extract_chat_completion_telemetry
 
 from .common import make_score
 

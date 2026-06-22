@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from crypto_manual_alert.api.app import create_app
 from crypto_manual_alert.eval.errors import EvalRunError
 from crypto_manual_alert.eval.runner import EvalRunner
-from crypto_manual_alert.observability import ObservabilityRecorder
+from crypto_manual_alert.telemetry.observability import ObservabilityRecorder
 
 
 def test_eval_candidates_expose_badcases_with_trace_context(tmp_path):
@@ -34,6 +34,59 @@ def test_eval_candidates_expose_badcases_with_trace_context(tmp_path):
     assert "response_json" not in rendered
 
 
+def test_eval_outcomes_endpoint_exposes_collected_samples(tmp_path):
+    """GET /api/eval/outcomes 返回 OutcomeStore 中已收集的 outcome（脱敏 public dict）。"""
+    from crypto_manual_alert.eval.outcome_store import OutcomeStore
+    from crypto_manual_alert.eval.outcomes import DecisionOutcome, OutcomeWindow
+
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    store = app.state.outcome_store
+    window = OutcomeWindow(
+        name="ETH-USDT-SWAP:21600s",
+        symbol="ETH-USDT-SWAP",
+        interval="1H",
+        source_type="exchange_native",
+        window_start="2026-07-06T00:00:00+00:00",
+        window_end="2026-07-06T06:00:00+00:00",
+        collected_at="2026-07-06T06:01:00+00:00",
+        open_price=3450.0,
+        high_price=3550.0,
+        low_price=3440.0,
+        close_price=3540.0,
+        matured=True,
+    )
+    store.upsert_outcomes(
+        [
+            DecisionOutcome(
+                decision_ref="plan-1",
+                evaluation_target="legacy_final",
+                symbol="ETH-USDT-SWAP",
+                action="trigger long",
+                probability=0.6,
+                entry_price=3460.0,
+                stop_price=3400.0,
+                target_1=3600.0,
+                target_2=3700.0,
+                window=window,
+            )
+        ]
+    )
+
+    response = client.get("/api/eval/outcomes?evaluation_target=legacy_final")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    items = body["data"]["items"]
+    assert len(items) == 1
+    assert items[0]["decision_ref"] == "plan-1"
+    assert items[0]["evaluation_target"] == "legacy_final"
+    assert items[0]["window"]["close_price"] == 3540.0
+    assert items[0]["window"]["source_type"] == "exchange_native"
+    assert items[0]["can_score"] is True
+
+
 def test_eval_run_scores_cases_without_prod_side_effects(tmp_path):
     """Eval run 只能写 eval sidecar，不能新增生产 plan_runs、notifications 或 manual_outcomes。"""
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
@@ -52,12 +105,19 @@ def test_eval_run_scores_cases_without_prod_side_effects(tmp_path):
     run_summary = body["data"]
     assert run_summary["case_count"] == 1
     assert run_summary["fail_count"] >= 1
+    financial_quality_gate = run_summary["metadata"]["financial_quality_gate"]
+    assert financial_quality_gate["status"] == "not_enough_samples"
+    assert financial_quality_gate["decision_effect"] == "none"
+    assert financial_quality_gate["structural_release_gate_blocking"] is False
+    assert financial_quality_gate["blocking"] is False
+    assert "financial_quality" not in run_summary["metadata"]["release_gate"]["hard_gate_results"]
     assert _prod_table_counts(app.state.journal.path) == before
 
     detail_response = client.get(f"/api/eval/runs/{run_summary['eval_run_id']}")
     assert detail_response.status_code == 200
     detail = detail_response.json()["data"]
     assert detail["run"]["eval_run_id"] == run_summary["eval_run_id"]
+    assert detail["run"]["metadata"]["financial_quality_gate"] == financial_quality_gate
     assert detail["cases"][0]["source_badcase_id"] == badcase_id
     assert detail["cases"][0]["frozen_input_hash"]
     assert detail["cases"][0]["replay_result"]["status"] in {"completed", "failed"}
