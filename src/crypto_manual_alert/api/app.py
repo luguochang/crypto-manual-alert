@@ -9,12 +9,13 @@ from fastapi.responses import JSONResponse
 
 from crypto_manual_alert.config import Config, load_config
 from crypto_manual_alert.eval.case_builder import EvalCaseBuilder
-from crypto_manual_alert.eval.runner import EvalRunner, eval_store_path
+from crypto_manual_alert.eval.outcome_store import OutcomeStore
+from crypto_manual_alert.eval.runner import EvalRunner, eval_store_path, outcome_store_path
 from crypto_manual_alert.eval.store import EvalStore
-from crypto_manual_alert.journal import Journal
-from crypto_manual_alert.runner import journal_path
+from crypto_manual_alert.storage.journal import Journal
 from crypto_manual_alert.storage.query_repository import JournalQueryRepository
 from crypto_manual_alert.workflow.executor import RunExecutor
+from crypto_manual_alert.workflow.legacy_plan_runner import journal_path
 
 from .routes_eval import router as eval_router
 from .routes_runs import router as runs_router
@@ -30,6 +31,7 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
     config = _load_app_config(config_paths or [], data_dir=data_dir)
     journal = Journal(journal_path(config))
     eval_store = EvalStore(eval_store_path(config.app.data_dir))
+    outcome_store = OutcomeStore(outcome_store_path(config.app.data_dir))
     app = FastAPI(title="crypto-manual-alert", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -47,10 +49,12 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
     app.state.query_repository = JournalQueryRepository(journal)
     app.state.executor = RunExecutor(config=config, journal=journal)
     app.state.eval_store = eval_store
+    app.state.outcome_store = outcome_store
     app.state.eval_case_builder = EvalCaseBuilder(journal)
     app.state.eval_runner = EvalRunner(
         journal=journal,
         store=eval_store,
+        outcome_store=outcome_store,
         data_dir=config.app.data_dir,
         forbidden_env_names=config.security.forbidden_env_names,
         config=config,

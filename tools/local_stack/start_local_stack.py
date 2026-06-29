@@ -10,7 +10,7 @@ from pathlib import Path
 import smoke_local_stack as smoke
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = ROOT / "data" / "dev-server"
 PID_FILE = LOG_DIR / "pids.json"
 

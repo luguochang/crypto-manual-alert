@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 TMP_DIR = ROOT / ".tmp" / "local-checks" / f"run-{os.getpid()}-{int(time.time())}"
 PYTEST_BASETEMP = TMP_DIR / "pytest"
@@ -25,7 +25,7 @@ def main() -> int:
 
     for port in LOCAL_PORTS:
         if not _is_port_free(port):
-            print(f"Port {port} is already in use. Run tests/stop_local_stack.py or stop the local server first.")
+            print(f"Port {port} is already in use. Run tools/local_stack/stop_local_stack.py or stop the local server first.")
             return 1
 
     npm = "npm.cmd" if os.name == "nt" else "npm"
@@ -33,7 +33,7 @@ def main() -> int:
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--basetemp", str(PYTEST_BASETEMP)],
         [npm, "run", "typecheck"],
         [npm, "run", "build"],
-        [sys.executable, "tests/smoke_local_stack.py"],
+        [sys.executable, "tools/local_stack/smoke_local_stack.py"],
     ]
     workdirs = [ROOT, FRONTEND, FRONTEND, ROOT]
 

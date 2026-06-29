@@ -38,6 +38,24 @@ def list_eval_runs(request: Request, limit: int = 20) -> dict:
     return success({"items": request.app.state.eval_store.list_runs(limit=limit)})
 
 
+@router.get("/outcomes")
+def list_eval_outcomes(
+    request: Request,
+    evaluation_target: str | None = None,
+) -> dict:
+    """列出已收集的市场 outcome，供金融质量面板展示真实样本。
+
+    outcome 来自 `crypto-alert collect-outcomes` 写入的 OutcomeStore（旁路 eval
+    sidecar），不影响生产决策。未收集时返回空列表，金融质量 gate 仍为
+    not_enough_samples。
+    """
+
+    outcomes = request.app.state.outcome_store.list_outcomes(
+        evaluation_target=evaluation_target
+    )
+    return success({"items": [outcome.to_public_dict() for outcome in outcomes]})
+
+
 @router.post("/runs")
 def create_eval_run(payload: EvalRunRequest, request: Request) -> dict:
     """运行一次 fixture judge eval。

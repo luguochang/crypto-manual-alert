@@ -5,7 +5,7 @@
 ## 一键完整检查
 
 ```powershell
-python tests\run_local_checks.py
+python tools\local_stack\run_local_checks.py
 ```
 
 执行内容：
@@ -20,7 +20,7 @@ python tests\run_local_checks.py
 ## 只跑本地栈烟测
 
 ```powershell
-python tests\smoke_local_stack.py
+python tools\local_stack\smoke_local_stack.py
 ```
 
 默认会自动启动 API 和前端，检查完成后自动关闭。
@@ -29,7 +29,7 @@ python tests\smoke_local_stack.py
 
 ```powershell
 $env:BARK_DEVICE_KEY="你的BarkKey"
-python tests\smoke_local_stack.py --with-bark
+python tools\local_stack\smoke_local_stack.py --with-bark
 ```
 
 该命令会从手动运行接口触发真实 Bark，并检查本地 SQLite `notifications` 表里是否记录了发送成功。
@@ -37,7 +37,7 @@ python tests\smoke_local_stack.py --with-bark
 ## 启动给人工测试
 
 ```powershell
-python tests\start_local_stack.py
+python tools\local_stack\start_local_stack.py
 ```
 
 启动后访问：
@@ -48,12 +48,12 @@ python tests\start_local_stack.py
 停止服务：
 
 ```powershell
-python tests\stop_local_stack.py
+python tools\local_stack\stop_local_stack.py
 ```
 
 如果你希望从页面点击“生成手动操作计划”后真实推送到手机，用：
 
 ```powershell
 $env:BARK_DEVICE_KEY="你的BarkKey"
-python tests\start_local_stack.py --with-bark
+python tools\local_stack\start_local_stack.py --with-bark
 ```

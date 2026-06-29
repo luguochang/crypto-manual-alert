@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
 LOG_DIR = ROOT / "data" / "dev-server"
 TMP_DIR = ROOT / ".tmp" / "smoke"
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         _assert_run_list_contains(trace_id)
         _assert_run_detail(trace_id)
         notification_result = _assert_notification_sent(trace_id) if args.with_bark else {"enabled": False}
-        _assert_frontend_page(f"/runs/{trace_id}")
+        _assert_frontend_agent_audit_page(trace_id)
 
         print(
             json.dumps(
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         if args.keep_running:
-            print("Servers are still running. Stop them with Ctrl+C in this terminal or run tests/stop_local_stack.py.")
+            print("Servers are still running. Stop them with Ctrl+C in this terminal or run tools/local_stack/stop_local_stack.py.")
             print(json.dumps({"api_pid": api_process.pid, "frontend_pid": frontend_process.pid}, indent=2))
             while True:
                 time.sleep(3600)
@@ -143,6 +143,8 @@ def _assert_frontend_page(path: str) -> None:
     body = _wait_for_text(f"{FRONTEND_BASE}{path}", f"frontend {path}")
     if "__next" not in body and "Crypto" not in body:
         raise AssertionError(f"Frontend page {path} did not look like a Next.js page")
+    if path == "/eval" and "Financial Quality" not in body:
+        raise AssertionError("Frontend eval page missing Financial Quality panel")
 
 
 def _assert_manual_run() -> str:
@@ -184,6 +186,99 @@ def _assert_run_detail(trace_id: str) -> None:
         raise AssertionError(f"run detail failed: {body}")
     if body.get("data", {}).get("trace", {}).get("trace_id") != trace_id:
         raise AssertionError(f"run detail trace mismatch: {body}")
+    _assert_agent_audit_view(body)
+
+
+def _assert_agent_audit_view(body: dict[str, Any]) -> None:
+    audit = body.get("data", {}).get("plan_run", {}).get("agent_audit_view")
+    if not isinstance(audit, dict) or audit.get("available") is not True:
+        raise AssertionError(f"run detail missing available agent_audit_view: {body}")
+
+    lead_tasks = audit.get("lead_plan", {}).get("tasks", [])
+    if not isinstance(lead_tasks, list) or len(lead_tasks) < 7:
+        raise AssertionError(f"agent_audit_view LeadPlan does not expose 7 tasks: {audit}")
+
+    workers = audit.get("workers", [])
+    if not isinstance(workers, list) or len(workers) < 7:
+        raise AssertionError(f"agent_audit_view does not expose 7 worker results: {audit}")
+    worker_names = {str(worker.get("agent_name")) for worker in workers if isinstance(worker, dict)}
+    if "ExecutionRiskAgent" not in worker_names:
+        raise AssertionError(f"agent_audit_view missing ExecutionRiskAgent: {worker_names}")
+
+    decision_input = audit.get("decision_input")
+    if not isinstance(decision_input, dict) or decision_input.get("mode") != "pre_final_candidate":
+        raise AssertionError(f"agent_audit_view missing pre_final_candidate DecisionInput: {audit}")
+
+    query_semantics = audit.get("query_semantics")
+    if not isinstance(query_semantics, dict) or query_semantics.get("mode") != "audit_note":
+        raise AssertionError(f"agent_audit_view missing audit_note query_semantics: {audit}")
+    if query_semantics.get("drives_final_input") is not False:
+        raise AssertionError(f"agent_audit_view query_semantics must not claim final input control: {audit}")
+
+    gates = audit.get("gates")
+    if not isinstance(gates, dict) or "production_control_gate" not in gates:
+        raise AssertionError(f"agent_audit_view missing production_control_gate: {audit}")
+
+    for key in (
+        "tool_calls",
+        "evidence_sources",
+        "source_freshness",
+        "conflict_edges",
+    ):
+        if not isinstance(audit.get(key), list):
+            raise AssertionError(f"agent_audit_view missing list field {key}: {audit}")
+
+    root_cause_graph = audit.get("root_cause_graph")
+    if not isinstance(root_cause_graph, dict) or not isinstance(root_cause_graph.get("nodes"), list):
+        raise AssertionError(f"agent_audit_view missing root_cause_graph nodes: {audit}")
+    if not isinstance(root_cause_graph.get("edges"), list):
+        raise AssertionError(f"agent_audit_view missing root_cause_graph edges: {audit}")
+
+    input_lineage = audit.get("input_lineage")
+    if not isinstance(input_lineage, dict) or input_lineage.get("production_final_input_mode") != "legacy_prompt":
+        raise AssertionError(f"agent_audit_view missing legacy input_lineage: {audit}")
+
+    release_eval_gate = audit.get("release_eval_gate")
+    financial_gate = release_eval_gate.get("financial_quality_gate") if isinstance(release_eval_gate, dict) else None
+    if not isinstance(financial_gate, dict) or financial_gate.get("status") != "not_configured":
+        raise AssertionError(f"agent_audit_view missing financial quality gate status: {audit}")
+
+    flow_names = [
+        str(step.get("name"))
+        for step in audit.get("runtime_flow", [])
+        if isinstance(step, dict) and step.get("name")
+    ]
+    for expected in ("manual_api", "legacy_baseline", "shadow_swarm_audit"):
+        if expected not in flow_names:
+            raise AssertionError(f"agent_audit_view runtime_flow missing {expected}: {flow_names}")
+
+
+def _assert_frontend_agent_audit_page(trace_id: str) -> None:
+    body = _wait_for_text(f"{FRONTEND_BASE}/runs/{trace_id}", f"frontend run detail {trace_id}")
+    if "__next" not in body and "Crypto" not in body:
+        raise AssertionError(f"Frontend run detail {trace_id} did not look like a Next.js page")
+    _assert_frontend_agent_audit_html(body)
+
+
+def _assert_frontend_agent_audit_html(body: str) -> None:
+    for text in (
+        "Agent Swarm Audit",
+        "LeadPlan",
+        "Worker Matrix",
+        "Skill Tool Calls",
+        "Source Freshness",
+        "Root Cause Graph",
+        "Conflict Matrix",
+        "Candidate Comparison",
+        "Input Lineage",
+        "Release And Gates",
+        "ExecutionRiskAgent",
+        "DecisionInput",
+        "production_control_gate",
+        "audit_note",
+    ):
+        if text not in body:
+            raise AssertionError(f"Frontend agent audit page missing {text}")
 
 
 def _assert_notification_sent(trace_id: str) -> dict[str, Any]:
