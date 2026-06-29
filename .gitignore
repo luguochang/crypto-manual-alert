@@ -16,6 +16,7 @@ venv/
 
 # Local runtime data
 data/tmp/
+data/dev-server/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
