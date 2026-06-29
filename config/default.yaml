@@ -1,0 +1,80 @@
+app:
+  mode: SHADOW
+  timezone: Asia/Shanghai
+  data_dir: data
+  log_level: INFO
+
+trading:
+  auto_order_enabled: false
+  manual_execution_required: true
+  allowed_symbols:
+    - BTC-USDT-SWAP
+    - ETH-USDT-SWAP
+    - SOL-USDT-SWAP
+  max_risk_per_trade_pct: 0.25
+  max_leverage: 2
+  daily_loss_stop_pct: 1
+  stop_after_consecutive_losses: 2
+  plan_ttl_seconds: 90
+
+market_data:
+  provider: fixture
+  okx_base_url: https://www.okx.com
+  request_timeout_seconds: 8
+  aggregate_timeout_seconds: 25
+  stale_market_data_seconds: 120
+  order_book_depth: 20
+  candle_bar: 1H
+  candle_limit: 60
+
+decision:
+  engine: fixture
+  skill_path: third_party/skills/crypto-macro-decision
+  command: ""
+  timeout_seconds: 900
+  fixture_plan_path: tests/fixtures/decision_plan_valid.json
+  openai_base_url: ""
+  openai_api_key_env: OPENAI_API_KEY
+  openai_model: ""
+  openai_temperature: 0.1
+  openai_max_tokens: 1800
+
+notification:
+  provider: bark
+  enabled: false
+  bark_base_url: https://api.day.app
+  bark_device_key_env: BARK_DEVICE_KEY
+  timeout_seconds: 8
+  retry_count: 1
+  max_body_chars: 900
+  send_failure_alerts: true
+
+scheduler:
+  enabled: false
+  interval_seconds: 1800
+  run_on_start: true
+  lock_ttl_seconds: 1800
+  max_iterations: 0
+  job_timeout_seconds: 1800
+
+research:
+  enabled: false
+  planner: static
+  leader_mode: static
+  search_provider: disabled
+  max_queries: 6
+  max_workers: 4
+  max_results_per_query: 3
+  request_timeout_seconds: 300
+
+security:
+  forbid_trade_keys: true
+  secret_env_names:
+    - BARK_DEVICE_KEY
+    - OPENAI_API_KEY
+    - OKX_API_KEY
+    - OKX_API_SECRET
+    - OKX_API_PASSPHRASE
+  forbidden_env_names:
+    - OKX_TRADE_API_KEY
+    - OKX_WITHDRAW_API_KEY

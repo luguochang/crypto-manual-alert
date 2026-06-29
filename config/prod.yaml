@@ -1,0 +1,28 @@
+app:
+  mode: SHADOW
+  data_dir: /app/data
+
+market_data:
+  provider: okx_public
+
+decision:
+  engine: openai_compatible
+  timeout_seconds: 1200
+
+notification:
+  enabled: true
+
+scheduler:
+  enabled: true
+  interval_seconds: 1800
+  run_on_start: true
+  lock_ttl_seconds: 1800
+  job_timeout_seconds: 1800
+
+research:
+  enabled: true
+  planner: llm
+  leader_mode: llm
+  search_provider: responses_web_search
+  max_workers: 4
+  request_timeout_seconds: 300

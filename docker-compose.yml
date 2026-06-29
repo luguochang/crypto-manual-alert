@@ -1,0 +1,24 @@
+name: jiami-manual-alert
+
+services:
+  manual-alert:
+    build:
+      context: .
+    image: jiami-manual-alert:0.1.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+      APP_MODE: ${APP_MODE:-SHADOW}
+      AUTO_ORDER_ENABLED: "false"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "jiami-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "show-config"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+

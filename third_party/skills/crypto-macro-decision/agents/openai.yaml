@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crypto Macro Decision"
+  short_description: "BTC/ETH/SOL macro event and futures decision workflow"
+  default_prompt: "Use this skill to evaluate BTC, ETH, SOL, or broader major-crypto futures decisions using macro events, exchange derivatives data, live web search, and event pools."

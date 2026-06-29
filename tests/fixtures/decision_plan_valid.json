@@ -1,0 +1,20 @@
+{
+  "instrument": "ETH-USDT-SWAP",
+  "main_action": "trigger long",
+  "horizon": "6h",
+  "reference_price": 3500.0,
+  "entry_trigger": 3510.0,
+  "stop_price": 3435.0,
+  "target_1": 3580.0,
+  "target_2": 3660.0,
+  "probability": 0.58,
+  "position_size_class": "light",
+  "max_leverage": 2,
+  "risk_pct": 0.25,
+  "expires_in_seconds": 90,
+  "why_not_opposite": "BTC structure is not confirming downside and funding is not crowded.",
+  "invalidation": "Invalid if ETH loses 3435 on fresh OKX mark price.",
+  "unavailable_data": ["precise CVD", "liquidation heatmap"],
+  "manual_execution_required": true,
+  "notes": "Open OKX manually. This service will not place orders."
+}

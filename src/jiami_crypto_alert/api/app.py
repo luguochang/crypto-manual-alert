@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from jiami_crypto_alert.config import Config, load_config
+from jiami_crypto_alert.journal import Journal
+from jiami_crypto_alert.runner import journal_path
+from jiami_crypto_alert.storage.query_repository import JournalQueryRepository
+from jiami_crypto_alert.workflow.executor import RunExecutor
+
+from .routes_runs import router as runs_router
+from .routes_system import router as system_router
+
+
+def create_app(config_paths: list[str] | None = None, data_dir: str | Path | None = None) -> FastAPI:
+    """创建 FastAPI 应用。
+
+    data_dir 只用于测试或本地覆盖数据目录，不改变 YAML 配置文件本身。
+    """
+
+    config = _load_app_config(config_paths or [], data_dir=data_dir)
+    journal = Journal(journal_path(config))
+    app = FastAPI(title="jiami-crypto-alert", version="0.1.0")
+    app.state.config = config
+    app.state.journal = journal
+    app.state.query_repository = JournalQueryRepository(journal)
+    app.state.executor = RunExecutor(config=config, journal=journal)
+    app.include_router(system_router)
+    app.include_router(runs_router)
+    app.add_exception_handler(HTTPException, _http_exception_handler)
+    app.add_exception_handler(Exception, _unhandled_exception_handler)
+    return app
+
+
+def _load_app_config(config_paths: list[str], data_dir: str | Path | None) -> Config:
+    config = load_config(*config_paths)
+    if data_dir is None:
+        return config
+    return replace(config, app=replace(config.app, data_dir=str(data_dir)))
+
+
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """兜底异常处理，避免接口返回非结构化错误。"""
+
+    status_code = getattr(exc, "status_code", 500)
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": False,
+            "data": None,
+            "error": {
+                "code": "internal_error",
+                "message": "internal server error",
+                "detail": {"type": type(exc).__name__},
+            },
+            "trace_id": None,
+        },
+    )
+
+
+async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """处理业务主动抛出的 HTTPException，保留统一 API envelope。"""
+
+    if isinstance(exc.detail, dict) and "ok" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok": False,
+            "data": None,
+            "error": {
+                "code": "http_error",
+                "message": str(exc.detail),
+                "detail": {},
+            },
+            "trace_id": None,
+        },
+    )
+
+
+app = create_app()
