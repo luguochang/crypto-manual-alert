@@ -8,11 +8,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from crypto_manual_alert.config import Config, load_config
+from crypto_manual_alert.eval.case_builder import EvalCaseBuilder
+from crypto_manual_alert.eval.runner import EvalRunner, eval_store_path
+from crypto_manual_alert.eval.store import EvalStore
 from crypto_manual_alert.journal import Journal
 from crypto_manual_alert.runner import journal_path
 from crypto_manual_alert.storage.query_repository import JournalQueryRepository
 from crypto_manual_alert.workflow.executor import RunExecutor
 
+from .routes_eval import router as eval_router
 from .routes_runs import router as runs_router
 from .routes_system import router as system_router
 
@@ -25,6 +29,7 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
 
     config = _load_app_config(config_paths or [], data_dir=data_dir)
     journal = Journal(journal_path(config))
+    eval_store = EvalStore(eval_store_path(config.app.data_dir))
     app = FastAPI(title="crypto-manual-alert", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -41,8 +46,12 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
     app.state.journal = journal
     app.state.query_repository = JournalQueryRepository(journal)
     app.state.executor = RunExecutor(config=config, journal=journal)
+    app.state.eval_store = eval_store
+    app.state.eval_case_builder = EvalCaseBuilder(journal)
+    app.state.eval_runner = EvalRunner(journal=journal, store=eval_store)
     app.include_router(system_router)
     app.include_router(runs_router)
+    app.include_router(eval_router)
     app.add_exception_handler(HTTPException, _http_exception_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)
     return app

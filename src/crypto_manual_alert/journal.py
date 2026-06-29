@@ -520,16 +520,42 @@ class Journal:
             )
             return int(cursor.lastrowid)
 
-    def list_badcases(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_badcases(
+        self,
+        limit: int = 20,
+        *,
+        ids: list[int] | None = None,
+        dataset: str | None = None,
+        status: str | None = None,
+        severity: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clean_limit = max(1, min(int(limit), 1000))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if ids:
+            placeholders = ", ".join("?" for _ in ids)
+            clauses.append(f"id IN ({placeholders})")
+            params.extend(int(item) for item in ids)
+        if dataset:
+            clauses.append("eval_dataset_name = ?")
+            params.append(dataset)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM badcases
+                {where}
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (*params, clean_limit),
             ).fetchall()
         return [_badcase_row(row) for row in rows]
 

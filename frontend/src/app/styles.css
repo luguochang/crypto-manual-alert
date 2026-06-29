@@ -137,6 +137,31 @@ textarea {
   padding: 14px;
 }
 
+.eval-run-form {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 240px) auto;
+}
+
+.eval-run-form .field {
+  gap: 4px;
+}
+
+.eval-run-form .field input {
+  min-height: 40px;
+}
+
+.eval-run-form p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.error-inline {
+  color: var(--danger);
+  font-size: 13px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -192,6 +217,10 @@ table {
   border-collapse: collapse;
   min-width: 760px;
   width: 100%;
+}
+
+.compact-table {
+  min-width: 640px;
 }
 
 th,
@@ -463,7 +492,7 @@ td {
   }
 
   .nav-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .main-panel {
@@ -483,5 +512,9 @@ td {
   .toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .eval-run-form {
+    grid-template-columns: 1fr;
   }
 }

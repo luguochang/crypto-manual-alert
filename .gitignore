@@ -18,8 +18,11 @@ venv/
 data/tmp/
 data/dev-server/
 data/*.db
+data/**/*.db
 data/*.sqlite
+data/**/*.sqlite
 data/*.sqlite3
+data/**/*.sqlite3
 data/*.log
 data/**/*.log
 logs/

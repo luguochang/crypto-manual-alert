@@ -51,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         _assert_cors_preflight()
         _assert_frontend_page("/manual-run")
         _assert_frontend_page("/runs")
+        _assert_frontend_page("/eval")
         trace_id = _assert_manual_run()
         _assert_run_list_contains(trace_id)
         _assert_run_detail(trace_id)

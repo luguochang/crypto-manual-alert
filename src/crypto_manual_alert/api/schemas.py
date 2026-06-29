@@ -39,6 +39,18 @@ class ManualRunRequest(BaseModel):
     alert_channel: str | None = "bark"
 
 
+class EvalRunRequest(BaseModel):
+    """旁路 eval 运行请求。
+
+    该请求只选择历史 badcase/case，不允许触发实时行情、Bark 或生产 plan runner。
+    """
+
+    dataset_name: str | None = None
+    badcase_ids: list[int] | None = None
+    mode: str = "judge_only_fixture"
+    limit: int = 50
+
+
 def success(data: Any, trace_id: str | None = None) -> dict[str, Any]:
     """构造成功响应，保持 FastAPI 与前端契约一致。"""
 

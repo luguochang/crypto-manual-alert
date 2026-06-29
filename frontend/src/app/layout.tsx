@@ -10,7 +10,8 @@ export const metadata: Metadata = {
 const navItems = [
   { href: "/", label: "Dashboard" },
   { href: "/manual-run", label: "Manual Run" },
-  { href: "/runs", label: "Runs" }
+  { href: "/runs", label: "Runs" },
+  { href: "/eval", label: "Eval" }
 ];
 
 export default function RootLayout({
