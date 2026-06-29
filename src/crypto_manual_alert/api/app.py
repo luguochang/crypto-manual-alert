@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from crypto_manual_alert.config import Config, load_config
@@ -25,6 +26,17 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
     config = _load_app_config(config_paths or [], data_dir=data_dir)
     journal = Journal(journal_path(config))
     app = FastAPI(title="crypto-manual-alert", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+            "http://localhost:3000",
+            "http://localhost:3001",
+        ],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["content-type"],
+    )
     app.state.config = config
     app.state.journal = journal
     app.state.query_repository = JournalQueryRepository(journal)

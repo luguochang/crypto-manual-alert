@@ -18,6 +18,24 @@ def test_health_endpoint_reports_service_status(tmp_path):
     assert body["data"]["storage"] == "sqlite"
 
 
+def test_frontend_origin_can_preflight_manual_run(tmp_path):
+    """浏览器从本地 Next.js 前端提交手动运行时，CORS 预检必须通过。"""
+    client = TestClient(create_app(config_paths=["config/default.yaml"], data_dir=tmp_path))
+
+    response = client.options(
+        "/api/runs/manual",
+        headers={
+            "Origin": "http://127.0.0.1:3001",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:3001"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
 def test_manual_run_creates_trace_and_returns_plan_summary(tmp_path):
     """手动运行接口应复用现有 PlanRunner，并返回前端轮询需要的 trace_id。"""
     client = TestClient(create_app(config_paths=["config/default.yaml"], data_dir=tmp_path))
