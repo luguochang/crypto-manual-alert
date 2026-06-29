@@ -49,6 +49,8 @@ export const llmInteractionSchema = z
     output_hash: z.string(),
     input_summary: z.unknown().optional(),
     output_summary: z.unknown().optional(),
+    request_json: z.string().optional(),
+    response_json: z.string().optional(),
     error_message: z.string().nullable().optional()
   })
   .passthrough();
@@ -56,9 +58,11 @@ export const llmInteractionSchema = z
 export const planRunSchema = z
   .object({
     plan_id: z.string(),
+    created_at: z.string().optional(),
     status: z.string(),
     parsed_plan: z.record(z.unknown()).optional(),
     verdict: z.record(z.unknown()).optional(),
+    redaction: z.record(z.unknown()).optional(),
     payload_keys: z.array(z.string()).default([])
   })
   .nullable();

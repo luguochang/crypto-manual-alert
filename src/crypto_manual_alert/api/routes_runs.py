@@ -28,10 +28,10 @@ def list_runs(request: Request, limit: int = 20) -> dict:
 
 
 @router.get("/{trace_id}")
-def get_run_detail(trace_id: str, request: Request) -> dict:
-    """查询单次运行详情，默认隐藏 raw prompt/completion payload。"""
+def get_run_detail(trace_id: str, request: Request, include_payloads: bool = False) -> dict:
+    """查询单次运行详情；include_payloads=true 时返回已脱敏的 LLM 请求/返回。"""
 
-    detail = request.app.state.query_repository.get_run_detail(trace_id)
+    detail = request.app.state.query_repository.get_run_detail(trace_id, include_payloads=include_payloads)
     if detail is None:
         raise HTTPException(
             status_code=404,

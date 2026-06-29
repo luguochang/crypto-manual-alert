@@ -20,10 +20,10 @@ class JournalQueryRepository:
 
         return self.journal.list_traces(limit=self.normalize_limit(limit))
 
-    def get_run_detail(self, trace_id: str) -> dict[str, Any] | None:
-        """返回单次运行详情，默认不包含原始 prompt/completion payload。"""
+    def get_run_detail(self, trace_id: str, *, include_payloads: bool = False) -> dict[str, Any] | None:
+        """返回单次运行详情，默认隐藏 LLM payload；复盘时可显式打开脱敏内容。"""
 
-        return self.journal.get_trace_detail(trace_id, include_payloads=False)
+        return self.journal.get_trace_detail(trace_id, include_payloads=include_payloads)
 
     @staticmethod
     def normalize_limit(limit: int) -> int:

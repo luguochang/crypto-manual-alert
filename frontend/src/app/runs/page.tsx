@@ -34,6 +34,7 @@ export default async function RunsPage() {
                 <th>交易对</th>
                 <th>最终动作</th>
                 <th>Span</th>
+                <th>LLM</th>
                 <th>创建时间</th>
                 <th>操作</th>
               </tr>
@@ -49,6 +50,7 @@ export default async function RunsPage() {
                   <td>{run.symbol}</td>
                   <td>{run.final_action ?? "-"}</td>
                   <td>{run.span_count}</td>
+                  <td>{run.llm_interaction_count}</td>
                   <td>{run.created_at}</td>
                   <td>
                     <Link href={`/runs/${encodeURIComponent(run.trace_id)}`}>详情</Link>

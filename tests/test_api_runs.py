@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from crypto_manual_alert.api.app import create_app
+from crypto_manual_alert.observability import ObservabilityRecorder
 
 
 def test_health_endpoint_reports_service_status(tmp_path):
@@ -75,6 +76,35 @@ def test_run_list_and_detail_hide_raw_payloads_by_default(tmp_path):
     assert "raw_decision" not in detail["data"]["plan_run"]
     assert all("request_json" not in item for item in detail["data"]["llm_interactions"])
     assert all("response_json" not in item for item in detail["data"]["llm_interactions"])
+
+
+def test_run_detail_can_include_sanitized_llm_payloads_for_trace_review(tmp_path):
+    """复盘页面显式请求时，应返回已脱敏的 LLM 请求/返回，方便 badcase 回放。"""
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    run_response = client.post("/api/runs/manual", json={"symbol": "ETH-USDT-SWAP"})
+    trace_id = run_response.json()["data"]["trace_id"]
+    ObservabilityRecorder(app.state.journal).record_llm_interaction(
+        trace_id=trace_id,
+        component="decision.final",
+        provider="openai_compatible",
+        model="gpt-test",
+        request_payload={"messages": [{"role": "user", "content": "分析 ETH"}], "api_key": "secret"},
+        response_payload={"choices": [{"message": {"content": "结论摘要"}}]},
+        status="ok",
+    )
+
+    response = client.get(f"/api/runs/{trace_id}?include_payloads=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    interactions = body["data"]["llm_interactions"]
+    assert interactions
+    assert "request_json" in interactions[0]
+    assert "response_json" in interactions[0]
+    rendered = str(interactions).lower()
+    assert "secret" not in rendered
+    assert "<redacted>" in rendered
 
 
 def test_unknown_trace_returns_stable_error_envelope(tmp_path):
