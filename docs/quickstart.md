@@ -25,11 +25,11 @@
 在 Windows 本机：
 
 ```powershell
-cd E:\file\project\selfproject\project\jiami
+cd <repo-root>
 pytest -q
 $env:PYTHONPATH="src"
-python -m jiami_crypto_alert.cli show-config
-python -m jiami_crypto_alert.cli run-once --symbol ETH-USDT-SWAP
+python -m crypto_manual_alert.cli show-config
+python -m crypto_manual_alert.cli run-once --symbol ETH-USDT-SWAP
 ```
 
 看到 `allowed: true/false`、`manual_execution_required: true` 就说明服务流程能跑。
@@ -39,19 +39,19 @@ python -m jiami_crypto_alert.cli run-once --symbol ETH-USDT-SWAP
 服务器建议目录：
 
 ```bash
-mkdir -p /opt/jiami-manual-alert
+mkdir -p /opt/crypto-manual-alert
 ```
 
-把整个 `project/jiami` 目录上传到服务器的：
+把整个 `project/crypto-manual-alert` 目录上传到服务器的：
 
 ```text
-/opt/jiami-manual-alert
+/opt/crypto-manual-alert
 ```
 
 进入目录：
 
 ```bash
-cd /opt/jiami-manual-alert
+cd /opt/crypto-manual-alert
 ```
 
 ## 3. 创建 .env
@@ -75,6 +75,7 @@ SCHEDULER_INTERVAL_SECONDS=1800
 SCHEDULER_JOB_TIMEOUT_SECONDS=1800
 BARK_DEVICE_KEY=
 DECISION_COMMAND=
+# DECISION_ENGINE=command 在 v1 禁用，保留该字段仅为后续兼容。
 OPENAI_BASE_URL=
 OPENAI_MODEL=
 OPENAI_API_KEY=
@@ -87,20 +88,20 @@ OPENAI_API_KEY=
 先检查 compose 配置：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env config
+docker compose -p crypto-alert-prod --env-file .env config
 ```
 
 启动：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env up -d --build
+docker compose -p crypto-alert-prod --env-file .env up -d --build
 ```
 
 查看状态：
 
 ```bash
-docker compose -p jiami-alert-prod ps
-docker compose -p jiami-alert-prod logs -f manual-alert
+docker compose -p crypto-alert-prod ps
+docker compose -p crypto-alert-prod logs -f manual-alert
 ```
 
 这个 compose 不暴露端口，不写固定容器名，不会抢你服务器上已有服务的端口。
@@ -108,8 +109,8 @@ docker compose -p jiami-alert-prod logs -f manual-alert
 ## 5. 手动跑一次测试计划
 
 ```bash
-docker compose -p jiami-alert-prod run --rm manual-alert \
-  jiami-alert --config config/default.yaml --config config/prod.yaml run-once --symbol ETH-USDT-SWAP
+docker compose -p crypto-alert-prod run --rm manual-alert \
+  crypto-alert --config config/default.yaml --config config/prod.yaml run-once --symbol ETH-USDT-SWAP
 ```
 
 如果输出 JSON，说明基础流程正常。
@@ -128,8 +129,8 @@ NOTIFICATION_ENABLED=false
 先只测 Bark，不打开正式通知：
 
 ```bash
-docker compose -p jiami-alert-prod run --rm manual-alert \
-  jiami-alert --config config/default.yaml --config config/prod.yaml test-bark
+docker compose -p crypto-alert-prod run --rm manual-alert \
+  crypto-alert --config config/default.yaml --config config/prod.yaml test-bark
 ```
 
 手机收到测试推送后，再进入下一步。
@@ -145,7 +146,7 @@ NOTIFICATION_ENABLED=true
 重启：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env up -d
+docker compose -p crypto-alert-prod --env-file .env up -d
 ```
 
 此时仍然是 fixture 测试计划，不是真实行情。
@@ -161,14 +162,14 @@ MARKET_DATA_PROVIDER=okx_public
 重启：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env up -d
+docker compose -p crypto-alert-prod --env-file .env up -d
 ```
 
 注意：OKX 公共行情不需要 OKX Key。
 
 ## 9. 接入真实模型/Skill 分析
 
-当前服务支持两种真实模型接入方式。
+当前服务推荐使用 OpenAI 兼容接口接入真实模型。
 
 方式 A：OpenAI 兼容接口，推荐先用这个。
 
@@ -210,27 +211,7 @@ RESEARCH_REQUEST_TIMEOUT_SECONDS=300
 
 方式 B：自定义命令。
 
-要求：
-
-- 命令从 stdin 读取 JSON。
-- 命令从 stdout 输出严格 JSON 操作计划。
-- 输出里必须有 `main_action`、`instrument`、`stop_price`、`manual_execution_required=true` 等字段。
-
-编辑 `.env`：
-
-```env
-DECISION_ENGINE=command
-DECISION_COMMAND=你的分析命令
-DECISION_TIMEOUT_SECONDS=1200
-```
-
-重启：
-
-```bash
-docker compose -p jiami-alert-prod --env-file .env up -d
-```
-
-如果你还没有模型命令，就先不要改 `DECISION_ENGINE=command`，继续用 fixture 跑流程。
+该方式是后续兼容设计，manual-alert v1 当前已禁用 `DECISION_ENGINE=command`。首版不要启用它，避免外部命令绕过配置、审计和风控边界。真实模型分析请使用上面的 `openai_compatible` 方式。
 
 ## 10. 切到正式提醒模式
 
@@ -251,7 +232,7 @@ APP_MODE=MANUAL_ALERT
 重启：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env up -d
+docker compose -p crypto-alert-prod --env-file .env up -d
 ```
 
 从这一步开始，收到 Bark 后你要自己打开 OKX App 手动核对和操作。
@@ -261,21 +242,21 @@ docker compose -p jiami-alert-prod --env-file .env up -d
 看日志：
 
 ```bash
-docker compose -p jiami-alert-prod logs -f manual-alert
+docker compose -p crypto-alert-prod logs -f manual-alert
 ```
 
 手动生成一次计划：
 
 ```bash
-docker compose -p jiami-alert-prod run --rm manual-alert \
-  jiami-alert --config config/default.yaml --config config/prod.yaml run-once --symbol ETH-USDT-SWAP
+docker compose -p crypto-alert-prod run --rm manual-alert \
+  crypto-alert --config config/default.yaml --config config/prod.yaml run-once --symbol ETH-USDT-SWAP
 ```
 
 记录手动执行结果：
 
 ```bash
-docker compose -p jiami-alert-prod run --rm manual-alert \
-  jiami-alert --config config/default.yaml --config config/prod.yaml record-outcome \
+docker compose -p crypto-alert-prod run --rm manual-alert \
+  crypto-alert --config config/default.yaml --config config/prod.yaml record-outcome \
   --plan-id 你的plan_id \
   --outcome executed \
   --notes "OKX manual entry, stop set"
@@ -284,13 +265,13 @@ docker compose -p jiami-alert-prod run --rm manual-alert \
 暂停服务：
 
 ```bash
-docker compose -p jiami-alert-prod stop manual-alert
+docker compose -p crypto-alert-prod stop manual-alert
 ```
 
 恢复服务：
 
 ```bash
-docker compose -p jiami-alert-prod up -d
+docker compose -p crypto-alert-prod up -d
 ```
 
 ## 12. 备份
@@ -298,26 +279,26 @@ docker compose -p jiami-alert-prod up -d
 业务数据在：
 
 ```text
-data/jiami-alert.db
+data/crypto-alert.db
 ```
 
 备份：
 
 ```bash
 mkdir -p backups
-cp data/jiami-alert.db backups/jiami-alert-$(date +%F-%H%M%S).db
+cp data/crypto-alert.db backups/crypto-alert-$(date +%F-%H%M%S).db
 cp .env backups/env-$(date +%F-%H%M%S).bak
 ```
 
 ## 13. 升级
 
 ```bash
-cd /opt/jiami-manual-alert
-cp data/jiami-alert.db backups/jiami-alert-before-upgrade.db
+cd /opt/crypto-manual-alert
+cp data/crypto-alert.db backups/crypto-alert-before-upgrade.db
 cp .env backups/env-before-upgrade.bak
-docker compose -p jiami-alert-prod --env-file .env config
-docker compose -p jiami-alert-prod --env-file .env up -d --build
-docker compose -p jiami-alert-prod logs -f manual-alert
+docker compose -p crypto-alert-prod --env-file .env config
+docker compose -p crypto-alert-prod --env-file .env up -d --build
+docker compose -p crypto-alert-prod logs -f manual-alert
 ```
 
 升级后先用 `APP_MODE=SHADOW` 跑一轮，再切回 `MANUAL_ALERT`。
@@ -344,7 +325,7 @@ docker ps
 只保留一个：
 
 ```bash
-docker compose -p jiami-alert-prod ps
+docker compose -p crypto-alert-prod ps
 ```
 
 不要再额外用宿主机 cron 同时触发。
@@ -354,13 +335,13 @@ docker compose -p jiami-alert-prod ps
 先看配置：
 
 ```bash
-docker compose -p jiami-alert-prod --env-file .env config
+docker compose -p crypto-alert-prod --env-file .env config
 ```
 
 再看日志：
 
 ```bash
-docker compose -p jiami-alert-prod logs manual-alert
+docker compose -p crypto-alert-prod logs manual-alert
 ```
 
 ### 提示计划过期

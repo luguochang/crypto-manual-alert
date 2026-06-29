@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+*.egg-info/
 .venv/
 venv/
 
@@ -13,10 +14,12 @@ venv/
 !.env.example
 
 # Local runtime data
+data/tmp/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/*.log
+data/**/*.log
 logs/
 
 # Frontend

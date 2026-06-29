@@ -3,7 +3,7 @@ import Link from "next/link";
 import "./styles.css";
 
 export const metadata: Metadata = {
-  title: "Jiami Workbench",
+  title: "Crypto Manual Alert",
   description: "FastAPI + Next.js operations workbench"
 };
 
@@ -24,9 +24,9 @@ export default function RootLayout({
         <div className="app-shell">
           <aside className="sidebar">
             <div className="brand">
-              <span className="brand-mark">J</span>
+              <span className="brand-mark">C</span>
               <div>
-                <strong>Jiami</strong>
+                <strong>Crypto</strong>
                 <span>Ops Workbench</span>
               </div>
             </div>

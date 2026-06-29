@@ -266,7 +266,7 @@ def build_notifier(config: Config) -> NotificationSink:
 
 
 def journal_path(config: Config) -> Path:
-    return Path(config.app.data_dir) / "jiami-alert.db"
+    return Path(config.app.data_dir) / "crypto-alert.db"
 
 
 def plan_to_json(plan: DecisionPlan, verdict: RiskVerdict) -> str:

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.market_data import FixtureMarketDataProvider
-from jiami_crypto_alert.skill_runtime import SkillRuntime
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.market_data import FixtureMarketDataProvider
+from crypto_manual_alert.skill_runtime import SkillRuntime
 
 
 def test_skill_runtime_loads_required_context():

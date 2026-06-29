@@ -14,7 +14,7 @@ def health(request: Request) -> dict:
 
     return success(
         {
-            "service": "jiami-crypto-alert",
+            "service": "crypto-manual-alert",
             "storage": "sqlite",
             "mode": request.app.state.config.app.mode,
         }

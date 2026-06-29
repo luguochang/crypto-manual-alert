@@ -15,7 +15,7 @@ https://github.com/luguochang/crypto-manual-alert
 - 不修改全局 Git 配置。
 - 不删除或覆盖 Windows 凭据管理器中的任何现有凭据。
 - 不影响公司内部 GitLab 仓库。
-- 只在本项目目录内写入本地仓库配置，即后续只改 `project/jiami/.git/config`。
+- 只在本项目目录内写入本地仓库配置，即后续只改 `project/crypto-manual-alert/.git/config`。
 
 ## 2. 当前本地检查结果
 
@@ -23,7 +23,7 @@ https://github.com/luguochang/crypto-manual-alert
 
 只读检查结果：
 
-- `project/jiami` 当前还不是 Git 仓库。
+- `project/crypto-manual-alert` 当前还不是 Git 仓库。
 - 因为还不是 Git 仓库，所以该项目当前没有 `origin` remote。
 - 全局 Git 配置中存在公司内部 GitLab 相关配置：
 
@@ -63,7 +63,7 @@ local: 单个仓库的 .git/config
 - Windows 凭据管理器中 `git:http://172.19.2.176:8929` 的凭据。
 - 其他已有仓库自己的 `.git/config`。
 
-如果后续只在 `project/jiami` 目录里执行本地仓库操作，例如：
+如果后续只在 `project/crypto-manual-alert` 目录里执行本地仓库操作，例如：
 
 ```powershell
 git init -b main
@@ -75,7 +75,7 @@ git config user.email "GitHub 提交邮箱"
 这些配置只会写入：
 
 ```text
-project/jiami/.git/config
+project/crypto-manual-alert/.git/config
 ```
 
 不会修改公司 GitLab 的全局配置，也不会影响其他仓库的 remote。
@@ -85,7 +85,7 @@ project/jiami/.git/config
 等确认要正式发布时，再在项目目录执行：
 
 ```powershell
-cd E:\file\project\selfproject\project\jiami
+cd E:\file\project\selfproject\project\crypto-manual-alert
 git init -b main
 git remote add origin https://github.com/luguochang/crypto-manual-alert.git
 git remote -v
@@ -151,8 +151,8 @@ crypto-manual-alert
 推荐本地 package/CLI 可暂时保持现状：
 
 ```text
-project package: jiami-crypto-alert
-CLI command: jiami-alert
+project package: crypto-manual-alert
+CLI command: crypto-alert
 ```
 
 这样 GitHub 仓库名描述产品边界，Python 包名保留项目识别度。后续如需统一命名，可以单独做一次小范围重命名，不和首次发布混在一起。

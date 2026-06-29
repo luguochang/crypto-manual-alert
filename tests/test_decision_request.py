@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiami_crypto_alert.context.request import DecisionRequest, build_manual_decision_request
+from crypto_manual_alert.context.request import DecisionRequest, build_manual_decision_request
 
 
 def test_decision_request_defaults_to_manual_btc_and_manual_only():

@@ -12,7 +12,7 @@ from .scheduler import JobLock, run_scheduler
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jiami-alert")
+    parser = argparse.ArgumentParser(prog="crypto-alert")
     parser.add_argument("--config", action="append", default=["config/default.yaml"], help="YAML config path; can be repeated")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("show-config")
 
     test_bark = sub.add_parser("test-bark")
-    test_bark.add_argument("--message", default="Jiami alert Bark test. No trading action.")
+    test_bark.add_argument("--message", default="Crypto alert Bark test. No trading action.")
 
     outcome = sub.add_parser("record-outcome")
     outcome.add_argument("--plan-id", required=True)
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         if not key:
             print(f"Missing {config.notification.bark_device_key_env}")
             return 2
-        url = f"{config.notification.bark_base_url.rstrip('/')}/{quote(key)}/{quote('Jiami alert test')}/{quote(args.message)}"
+        url = f"{config.notification.bark_base_url.rstrip('/')}/{quote(key)}/{quote('Crypto alert test')}/{quote(args.message)}"
         response = httpx.get(url, timeout=config.notification.timeout_seconds)
         print(f"Bark response: {response.status_code}")
         return 0 if response.status_code < 400 else 1

@@ -274,9 +274,9 @@ CrewAI Flow 和 LangGraph 都能表达结构化 workflow。对本项目而言，
 当前主要问题文件：
 
 ```text
-src/jiami_crypto_alert/runner.py
-src/jiami_crypto_alert/research.py
-src/jiami_crypto_alert/skill_runtime.py
+src/crypto_manual_alert/runner.py
+src/crypto_manual_alert/research.py
+src/crypto_manual_alert/skill_runtime.py
 ```
 
 问题：
@@ -419,7 +419,7 @@ agents:
 ### 6.1 总体结构
 
 ```text
-src/jiami_crypto_alert/
+src/crypto_manual_alert/
   app/
     cli.py
     scheduler.py
@@ -720,7 +720,7 @@ flowchart TD
 手动触发：
 
 ```text
-jiami-alert run-once --query "我持有 ETH 多单，6小时到3天怎么操作"
+crypto-alert run-once --query "我持有 ETH 多单，6小时到3天怎么操作"
 ```
 
 定时触发：

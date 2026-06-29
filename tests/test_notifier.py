@@ -2,9 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.domain import DecisionPlan, RiskVerdict
-from jiami_crypto_alert.notifier import BarkNotificationSink
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.domain import DecisionPlan, RiskVerdict
+from crypto_manual_alert.notifier import BarkNotificationSink
 
 
 def test_bark_notification_url_encodes_slashes(monkeypatch):
@@ -14,7 +14,7 @@ def test_bark_notification_url_encodes_slashes(monkeypatch):
         captured["url"] = url
         return httpx.Response(200, json={"code": 200, "message": "success"})
 
-    monkeypatch.setattr("jiami_crypto_alert.notifier.httpx.get", fake_get)
+    monkeypatch.setattr("crypto_manual_alert.notifier.httpx.get", fake_get)
     monkeypatch.setenv("BARK_DEVICE_KEY", "device/key")
     config = load_config("config/default.yaml")
     plan = DecisionPlan(

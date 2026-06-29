@@ -725,7 +725,7 @@ duration_ms
 建议目录：
 
 ```text
-src/jiami_crypto_alert/
+src/crypto_manual_alert/
   app/
     cli.py
     scheduler.py

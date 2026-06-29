@@ -90,7 +90,7 @@ Scheduler / CLI
 计划新增：
 
 ```text
-src/jiami_crypto_alert/
+src/crypto_manual_alert/
   core/
     skill_loader.py
     skill_registry.py
@@ -121,7 +121,7 @@ src/jiami_crypto_alert/
 后续可选新增：
 
 ```text
-src/jiami_crypto_alert/skills/
+src/crypto_manual_alert/skills/
   okx_public_tools.py
   web_search_tools.py
   skill_script_tools.py
@@ -539,7 +539,7 @@ security:
 验收：
 
 - `pytest -q` 通过。
-- `jiami-alert show-config` 通过。
+- `crypto-alert show-config` 通过。
 - fixture 模式通过。
 - 本地真实 LLM + Bark 可跑完整链路。
 - 海外服务器再测 OKX 真实 public API。

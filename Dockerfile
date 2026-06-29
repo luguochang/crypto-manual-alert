@@ -16,5 +16,5 @@ RUN pip install --upgrade pip && pip install .
 
 RUN mkdir -p /app/data
 
-CMD ["jiami-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "scheduler"]
+CMD ["crypto-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "scheduler"]
 

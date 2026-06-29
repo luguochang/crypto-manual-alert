@@ -249,7 +249,7 @@ SSE 由 FastAPI 直接提供，不需要 Redis 或消息队列。
 默认使用：
 
 ```text
-data/jiami.db
+data/crypto-alert.db
 ```
 
 适合：
@@ -462,7 +462,7 @@ masked: sk-****abcd
 建议 monorepo：
 
 ```text
-project/jiami/
+project/crypto-manual-alert/
   frontend/
     package.json
     next.config.ts
@@ -473,7 +473,7 @@ project/jiami/
       lib/api/
       lib/schemas/
 
-  src/jiami_crypto_alert/
+  src/crypto_manual_alert/
     api/
       app.py
       routes_runs.py
@@ -495,7 +495,7 @@ project/jiami/
 说明：
 
 - `frontend/` 是 TypeScript 主体。
-- Python 包仍保留在 `src/jiami_crypto_alert/`。
+- Python 包仍保留在 `src/crypto_manual_alert/`。
 - FastAPI 放在 Python 包内，不另建复杂服务目录。
 - Docker 后续可以一个 compose 起两个服务，但本轮不强制处理。
 

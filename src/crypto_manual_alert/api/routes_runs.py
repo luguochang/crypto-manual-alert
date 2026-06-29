@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from jiami_crypto_alert.context.request import build_manual_decision_request
+from crypto_manual_alert.context.request import build_manual_decision_request
 
 from .schemas import ManualRunRequest, failure, success
 

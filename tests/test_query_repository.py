@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.runner import PlanRunner
-from jiami_crypto_alert.storage.query_repository import JournalQueryRepository
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.runner import PlanRunner
+from crypto_manual_alert.storage.query_repository import JournalQueryRepository
 
 
 def test_query_repository_lists_runs_for_ui_without_raw_payloads(tmp_path):

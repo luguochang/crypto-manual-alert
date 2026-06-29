@@ -128,7 +128,7 @@ HumanReview 不应看全部样本，只看高价值样本：
 建议新增以下模块，全部在旁路 eval 子系统内：
 
 ```text
-src/jiami_crypto_alert/
+src/crypto_manual_alert/
   eval/
     __init__.py
     store.py                 # EvalStore，独立 SQLite
@@ -160,8 +160,8 @@ config/eval.yaml
 eval:
   enabled: true
   data_dir: data/eval
-  eval_db_path: data/eval/jiami-eval.db
-  source_journal_path: data/jiami-alert.db
+  eval_db_path: data/eval/crypto-eval.db
+  source_journal_path: data/crypto-alert.db
   default_dataset: failure_cases
   forbid_notifications: true
   forbid_live_market_fetch: true
@@ -194,7 +194,7 @@ ui:
 
 ## 5. 独立 Eval 数据模型
 
-eval 数据建议使用独立 SQLite：`data/eval/jiami-eval.db`。
+eval 数据建议使用独立 SQLite：`data/eval/crypto-eval.db`。
 
 ### 5.1 `eval_cases`
 
@@ -696,10 +696,11 @@ LLMJudge gate 初期只 advisory。
 
 ### 13.2 Streamlit 页面结构
 
-入口：
+后续实现入口草案：
 
 ```powershell
-streamlit run src/jiami_crypto_alert/eval_ui/streamlit_app.py
+# eval_ui 尚未在当前版本实现
+streamlit run src/crypto_manual_alert/eval_ui/streamlit_app.py
 ```
 
 页面：
@@ -773,10 +774,11 @@ queries.py -> Langfuse/Phoenix exporter
 
 ## 14. CLI 设计
 
-独立入口：
+后续实现独立入口草案：
 
 ```powershell
-python -m jiami_crypto_alert.eval_cli <command>
+# eval_cli 尚未在当前版本实现
+python -m crypto_manual_alert.eval_cli <command>
 ```
 
 命令：

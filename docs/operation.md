@@ -5,10 +5,10 @@
 ## 本地自测
 
 ```powershell
-cd E:\file\project\selfproject\project\jiami
+cd <repo-root>
 pytest -q
-jiami-alert show-config
-jiami-alert run-once --symbol ETH-USDT-SWAP
+crypto-alert show-config
+crypto-alert run-once --symbol ETH-USDT-SWAP
 ```
 
 默认配置使用 fixture 行情和 fixture 决策，不会调用模型，不会发送 Bark。
@@ -16,7 +16,7 @@ jiami-alert run-once --symbol ETH-USDT-SWAP
 ## 手动生成一次计划
 
 ```bash
-jiami-alert --config config/default.yaml run-once --symbol ETH-USDT-SWAP
+crypto-alert --config config/default.yaml run-once --symbol ETH-USDT-SWAP
 ```
 
 输出里会包含：
@@ -35,7 +35,7 @@ jiami-alert --config config/default.yaml run-once --symbol ETH-USDT-SWAP
 ## 记录手动结果
 
 ```bash
-jiami-alert record-outcome --plan-id <plan_id> --outcome executed --notes "manual OKX entry 3510 stop 3435"
+crypto-alert record-outcome --plan-id <plan_id> --outcome executed --notes "manual OKX entry 3510 stop 3435"
 ```
 
 常用 outcome：
@@ -50,7 +50,7 @@ jiami-alert record-outcome --plan-id <plan_id> --outcome executed --notes "manua
 ## Bark 测试
 
 ```bash
-BARK_DEVICE_KEY=xxx jiami-alert --config config/default.yaml --config config/prod.yaml test-bark
+BARK_DEVICE_KEY=xxx crypto-alert --config config/default.yaml --config config/prod.yaml test-bark
 ```
 
 Bark 只做提醒，不做授权。没有收到 Bark 时不要补按旧计划操作。

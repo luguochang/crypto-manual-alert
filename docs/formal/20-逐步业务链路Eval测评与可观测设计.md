@@ -659,7 +659,7 @@ Exporter 失败不影响本地 eval。
 
 内容：
 
-- 新增 `src/jiami_crypto_alert/eval/`。
+- 新增 `src/crypto_manual_alert/eval/`。
 - 新增独立 eval SQLite。
 - 新增 `EvalCaseBuilder`。
 - 新增 `RuleJudge`。

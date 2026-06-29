@@ -1,12 +1,12 @@
 import json
 from datetime import datetime, timezone
 
-from jiami_crypto_alert.cli import main
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.domain import MarketSnapshot, NotificationResult
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.runner import PlanRunner
-from jiami_crypto_alert.research import FixtureSearchAdapter
+from crypto_manual_alert.cli import main
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.domain import MarketSnapshot, NotificationResult
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.runner import PlanRunner
+from crypto_manual_alert.research import FixtureSearchAdapter
 
 
 def test_runner_fixture_flow(tmp_path):

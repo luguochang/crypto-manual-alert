@@ -1,9 +1,9 @@
 import httpx
 import pytest
 
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.observability import ObservabilityRecorder, use_observability
-from jiami_crypto_alert.skill_runtime import CommandDecisionEngine, OpenAICompatibleDecisionEngine
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.observability import ObservabilityRecorder, use_observability
+from crypto_manual_alert.skill_runtime import CommandDecisionEngine, OpenAICompatibleDecisionEngine
 
 
 def test_openai_compatible_engine_posts_chat_completion_and_returns_content():

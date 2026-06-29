@@ -223,7 +223,7 @@ class DuckDuckGoHtmlSearchAdapter:
 
     def search(self, query: ResearchQuery) -> list[SearchResult]:
         url = f"https://duckduckgo.com/html/?q={quote_plus(query.query)}"
-        response = httpx.get(url, timeout=self.timeout, headers={"User-Agent": "jiami-crypto-alert/0.1"})
+        response = httpx.get(url, timeout=self.timeout, headers={"User-Agent": "crypto-manual-alert/0.1"})
         response.raise_for_status()
         parser = _DuckDuckGoParser(max_results=self.max_results)
         parser.feed(response.text)

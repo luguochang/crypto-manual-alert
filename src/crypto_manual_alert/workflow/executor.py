@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from jiami_crypto_alert.config import Config
-from jiami_crypto_alert.context.request import DecisionRequest
-from jiami_crypto_alert.domain import DecisionPlan, RiskVerdict
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.runner import PlanRunner
+from crypto_manual_alert.config import Config
+from crypto_manual_alert.context.request import DecisionRequest
+from crypto_manual_alert.domain import DecisionPlan, RiskVerdict
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.runner import PlanRunner
 
 
 RunnerFactory = Callable[[Config, Journal], PlanRunner]

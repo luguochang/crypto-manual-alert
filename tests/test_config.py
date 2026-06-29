@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from jiami_crypto_alert.config import ConfigError, load_config
+from crypto_manual_alert.config import ConfigError, load_config
 
 
 def test_default_config_disables_auto_ordering():

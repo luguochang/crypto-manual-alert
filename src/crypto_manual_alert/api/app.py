@@ -6,11 +6,11 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from jiami_crypto_alert.config import Config, load_config
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.runner import journal_path
-from jiami_crypto_alert.storage.query_repository import JournalQueryRepository
-from jiami_crypto_alert.workflow.executor import RunExecutor
+from crypto_manual_alert.config import Config, load_config
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.runner import journal_path
+from crypto_manual_alert.storage.query_repository import JournalQueryRepository
+from crypto_manual_alert.workflow.executor import RunExecutor
 
 from .routes_runs import router as runs_router
 from .routes_system import router as system_router
@@ -24,7 +24,7 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
 
     config = _load_app_config(config_paths or [], data_dir=data_dir)
     journal = Journal(journal_path(config))
-    app = FastAPI(title="jiami-crypto-alert", version="0.1.0")
+    app = FastAPI(title="crypto-manual-alert", version="0.1.0")
     app.state.config = config
     app.state.journal = journal
     app.state.query_repository = JournalQueryRepository(journal)

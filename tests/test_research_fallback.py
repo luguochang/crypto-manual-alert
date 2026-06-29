@@ -3,9 +3,9 @@ import time
 
 import httpx
 
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.domain import DataPoint, MarketSnapshot
-from jiami_crypto_alert.research import (
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.domain import DataPoint, MarketSnapshot
+from crypto_manual_alert.research import (
     FixtureSearchAdapter,
     OpenAICompatibleLeaderResearchSynthesizer,
     OpenAICompatibleResearchPlanner,

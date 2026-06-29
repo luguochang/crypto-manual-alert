@@ -1,4 +1,4 @@
-# jiami-crypto-alert
+# crypto-manual-alert
 
 AI-assisted crypto manual alert and evaluation workbench.
 
@@ -16,15 +16,15 @@ AI-assisted crypto manual alert and evaluation workbench.
 - `POST /api/runs/manual`：提交一次手动分析，返回 `trace_id`、计划摘要和风控结论。
 - `GET /api/runs`：查询最近运行记录。
 - `GET /api/runs/{trace_id}`：查询 trace、span、LLM 摘要、badcase，默认隐藏原始 prompt/completion payload。
-- CLI 旧入口仍兼容：`jiami-alert run-once --symbol ETH-USDT-SWAP`。
+- CLI 入口：`crypto-alert run-once --symbol ETH-USDT-SWAP`。
 
 ## 本地启动
 
 ```powershell
-cd E:\file\project\selfproject\project\jiami
+cd <repo-root>
 python -m pip install -e .
 python -m pytest
-uvicorn jiami_crypto_alert.api.app:app --reload
+uvicorn crypto_manual_alert.api.app:app --reload
 ```
 
 前端工作台位于 `frontend/`，启动前先设置：
@@ -65,7 +65,7 @@ rg -n "sk-[A-Za-z0-9]{20,}|BARK_DEVICE_KEY=[A-Za-z0-9]{20,}|OKX_API_SECRET=.+|OK
 ## 目录
 
 ```text
-src/jiami_crypto_alert/
+src/crypto_manual_alert/
   api/        FastAPI 路由和响应契约
   context/    DecisionRequest 等请求语义
   workflow/   RunExecutor 受控执行入口

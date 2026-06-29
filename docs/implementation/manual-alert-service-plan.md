@@ -18,7 +18,7 @@
 - `.env.example`: safe example environment variables.
 - `config/default.yaml`: non-sensitive defaults.
 - `config/prod.yaml`: deployment override example.
-- `src/jiami_crypto_alert/`: application package.
+- `src/crypto_manual_alert/`: application package.
 - `tests/`: unit and integration-style tests.
 - `third_party/skills/crypto-macro-decision/`: vendored local skill copy.
 - `docs/operation.md`: user operation runbook.

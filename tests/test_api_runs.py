@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from jiami_crypto_alert.api.app import create_app
+from crypto_manual_alert.api.app import create_app
 
 
 def test_health_endpoint_reports_service_status(tmp_path):
@@ -14,7 +14,7 @@ def test_health_endpoint_reports_service_status(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["service"] == "jiami-crypto-alert"
+    assert body["data"]["service"] == "crypto-manual-alert"
     assert body["data"]["storage"] == "sqlite"
 
 

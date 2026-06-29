@@ -28,13 +28,13 @@
 
 | 能力 | 文件 | 说明 |
 |---|---|---|
-| Trace / Span / LLM 交互上下文 | `src/jiami_crypto_alert/observability.py` | 新增 `ObservabilityRecorder`、`use_observability()`、`record_llm_interaction()` |
-| SQLite 表 | `src/jiami_crypto_alert/journal.py` | 新增 `traces`、`trace_spans`、`trace_events`、`llm_interactions` |
-| 主链路插桩 | `src/jiami_crypto_alert/runner.py` | `market.fetch`、`skill.load`、`research.*`、`decision.final`、`parser.strict_json`、`risk.check`、`journal.write`、`notification.send` |
-| Final decision LLM 记录 | `src/jiami_crypto_alert/skill_runtime.py` | `OpenAICompatibleDecisionEngine.run()` 记录请求/响应摘要、hash、状态 |
-| Research/Leader/WebSearch LLM 记录 | `src/jiami_crypto_alert/research.py` | planner、leader synthesizer、responses web_search 记录 LLM interaction |
-| Parser 安全收紧 | `src/jiami_crypto_alert/plan_parser.py` | 严格 bool、TTL、probability |
-| RiskGate 安全收紧 | `src/jiami_crypto_alert/risk.py` | opening action 必须有 entry trigger 和 invalidation |
+| Trace / Span / LLM 交互上下文 | `src/crypto_manual_alert/observability.py` | 新增 `ObservabilityRecorder`、`use_observability()`、`record_llm_interaction()` |
+| SQLite 表 | `src/crypto_manual_alert/journal.py` | 新增 `traces`、`trace_spans`、`trace_events`、`llm_interactions` |
+| 主链路插桩 | `src/crypto_manual_alert/runner.py` | `market.fetch`、`skill.load`、`research.*`、`decision.final`、`parser.strict_json`、`risk.check`、`journal.write`、`notification.send` |
+| Final decision LLM 记录 | `src/crypto_manual_alert/skill_runtime.py` | `OpenAICompatibleDecisionEngine.run()` 记录请求/响应摘要、hash、状态 |
+| Research/Leader/WebSearch LLM 记录 | `src/crypto_manual_alert/research.py` | planner、leader synthesizer、responses web_search 记录 LLM interaction |
+| Parser 安全收紧 | `src/crypto_manual_alert/plan_parser.py` | 严格 bool、TTL、probability |
+| RiskGate 安全收紧 | `src/crypto_manual_alert/risk.py` | opening action 必须有 entry trigger 和 invalidation |
 | 生产配置修正 | `config/prod.yaml` | 显式 `market_data.provider: okx_public` |
 
 ## 3. 链路层级评估
@@ -44,8 +44,8 @@
 当前入口仍是：
 
 ```text
-jiami-alert run-once --symbol ETH-USDT-SWAP
-jiami-alert scheduler --symbol ETH-USDT-SWAP
+crypto-alert run-once --symbol ETH-USDT-SWAP
+crypto-alert scheduler --symbol ETH-USDT-SWAP
 ```
 
 已具备：

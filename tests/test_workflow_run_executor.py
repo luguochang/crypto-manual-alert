@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from jiami_crypto_alert.config import load_config
-from jiami_crypto_alert.context.request import DecisionRequest
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.workflow.executor import RunExecutor
+from crypto_manual_alert.config import load_config
+from crypto_manual_alert.context.request import DecisionRequest
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.workflow.executor import RunExecutor
 
 
 def test_run_executor_submits_manual_request_through_legacy_runner(tmp_path):

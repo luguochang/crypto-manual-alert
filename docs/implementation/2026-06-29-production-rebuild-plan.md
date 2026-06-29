@@ -16,10 +16,10 @@
 
 ```text
 frontend/                       TypeScript 工作台
-src/jiami_crypto_alert/api/      FastAPI API
-src/jiami_crypto_alert/context/  DecisionRequest / session 语义
-src/jiami_crypto_alert/workflow/ RunExecutor / facade
-src/jiami_crypto_alert/storage/  查询仓储边界
+src/crypto_manual_alert/api/      FastAPI API
+src/crypto_manual_alert/context/  DecisionRequest / session 语义
+src/crypto_manual_alert/workflow/ RunExecutor / facade
+src/crypto_manual_alert/storage/  查询仓储边界
 ```
 
 但实现必须按切片合入：
@@ -59,10 +59,10 @@ Select-String -Path .env.example, README.md -Pattern 'sk-[A-Za-z0-9]{20,}|BARK_D
 
 **Files:**
 
-- Create: `src/jiami_crypto_alert/api/__init__.py`
-- Create: `src/jiami_crypto_alert/api/schemas.py`
-- Create: `src/jiami_crypto_alert/api/app.py`
-- Create: `src/jiami_crypto_alert/api/routes_runs.py`
+- Create: `src/crypto_manual_alert/api/__init__.py`
+- Create: `src/crypto_manual_alert/api/schemas.py`
+- Create: `src/crypto_manual_alert/api/app.py`
+- Create: `src/crypto_manual_alert/api/routes_runs.py`
 - Create: `tests/test_api_runs.py`
 - Modify: `pyproject.toml`
 
@@ -95,13 +95,13 @@ python -m pytest
 
 **Files:**
 
-- Create: `src/jiami_crypto_alert/context/__init__.py`
-- Create: `src/jiami_crypto_alert/context/request.py`
-- Create: `src/jiami_crypto_alert/workflow/__init__.py`
-- Create: `src/jiami_crypto_alert/workflow/run_executor.py`
+- Create: `src/crypto_manual_alert/context/__init__.py`
+- Create: `src/crypto_manual_alert/context/request.py`
+- Create: `src/crypto_manual_alert/workflow/__init__.py`
+- Create: `src/crypto_manual_alert/workflow/run_executor.py`
 - Create: `tests/test_decision_request.py`
 - Create: `tests/test_run_executor.py`
-- Modify: `src/jiami_crypto_alert/runner.py`
+- Modify: `src/crypto_manual_alert/runner.py`
 
 **Requirements:**
 
@@ -123,10 +123,10 @@ python -m pytest
 
 **Files:**
 
-- Create: `src/jiami_crypto_alert/storage/__init__.py`
-- Create: `src/jiami_crypto_alert/storage/query_repository.py`
+- Create: `src/crypto_manual_alert/storage/__init__.py`
+- Create: `src/crypto_manual_alert/storage/query_repository.py`
 - Create: `tests/test_query_repository.py`
-- Modify: `src/jiami_crypto_alert/api/routes_runs.py`
+- Modify: `src/crypto_manual_alert/api/routes_runs.py`
 
 **Requirements:**
 
@@ -182,7 +182,7 @@ npm run build
 
 **Files:**
 
-- Create: `src/jiami_crypto_alert/api/routes_schedules.py`
+- Create: `src/crypto_manual_alert/api/routes_schedules.py`
 - Create: `tests/test_api_schedules.py`
 - Create: `frontend/src/app/schedules/page.tsx`
 - Create: `frontend/src/lib/schemas/schedules.ts`

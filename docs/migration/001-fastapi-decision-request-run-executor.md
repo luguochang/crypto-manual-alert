@@ -7,10 +7,10 @@
 ## 改动文件
 
 - `pyproject.toml`
-- `src/jiami_crypto_alert/api/*`
-- `src/jiami_crypto_alert/context/*`
-- `src/jiami_crypto_alert/workflow/*`
-- `src/jiami_crypto_alert/storage/*`
+- `src/crypto_manual_alert/api/*`
+- `src/crypto_manual_alert/context/*`
+- `src/crypto_manual_alert/workflow/*`
+- `src/crypto_manual_alert/storage/*`
 - `tests/test_api_runs.py`
 - `tests/test_decision_request.py`
 - `tests/test_workflow_run_executor.py`

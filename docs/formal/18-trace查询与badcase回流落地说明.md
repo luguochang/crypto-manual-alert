@@ -105,13 +105,13 @@ metadata_json
 查看最近 trace：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml trace-list --limit 5
+python -m crypto_manual_alert.cli --config config/default.yaml trace-list --limit 5
 ```
 
 查看某次 trace：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml trace-show --trace-id <trace_id>
+python -m crypto_manual_alert.cli --config config/default.yaml trace-show --trace-id <trace_id>
 ```
 
 默认不会输出：
@@ -123,13 +123,13 @@ python -m jiami_crypto_alert.cli --config config/default.yaml trace-show --trace
 如果本地排障确实要看已脱敏 request/response，可以显式加：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml trace-show --trace-id <trace_id> --include-payloads
+python -m crypto_manual_alert.cli --config config/default.yaml trace-show --trace-id <trace_id> --include-payloads
 ```
 
 记录 badcase，推荐使用 `plan_id`：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml record-badcase `
+python -m crypto_manual_alert.cli --config config/default.yaml record-badcase `
   --plan-id <plan_id> `
   --category execution_plan_unclear `
   --severity medium `
@@ -141,7 +141,7 @@ python -m jiami_crypto_alert.cli --config config/default.yaml record-badcase `
 记录更精确的 badcase：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml record-badcase `
+python -m crypto_manual_alert.cli --config config/default.yaml record-badcase `
   --trace-id <trace_id> `
   --span-id <span_id> `
   --llm-interaction-id <llm_id> `
@@ -155,7 +155,7 @@ python -m jiami_crypto_alert.cli --config config/default.yaml record-badcase `
 查看 badcase：
 
 ```powershell
-python -m jiami_crypto_alert.cli --config config/default.yaml badcase-list --limit 20
+python -m crypto_manual_alert.cli --config config/default.yaml badcase-list --limit 20
 ```
 
 ## 6. 安全边界

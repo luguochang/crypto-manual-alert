@@ -2,9 +2,9 @@ from datetime import timedelta
 import json
 import sqlite3
 
-from jiami_crypto_alert.journal import Journal
-from jiami_crypto_alert.observability import ObservabilityRecorder
-from jiami_crypto_alert.scheduler import JobLock, run_scheduler
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.observability import ObservabilityRecorder
+from crypto_manual_alert.scheduler import JobLock, run_scheduler
 
 
 def test_journal_connect_closes_after_context(tmp_path):

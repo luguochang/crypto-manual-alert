@@ -1,5 +1,5 @@
 [project]
-name = "jiami-crypto-alert"
+name = "crypto-manual-alert"
 version = "0.1.0"
 description = "Manual crypto operation plan and Bark alert service."
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ dev = [
 ]
 
 [project.scripts]
-jiami-alert = "jiami_crypto_alert.cli:main"
+crypto-alert = "crypto_manual_alert.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
