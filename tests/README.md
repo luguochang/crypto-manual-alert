@@ -25,6 +25,15 @@ python tests\smoke_local_stack.py
 
 默认会自动启动 API 和前端，检查完成后自动关闭。
 
+默认烟测不会给手机发 Bark，避免普通 CI/本地检查产生真实副作用。要验证真实手机推送：
+
+```powershell
+$env:BARK_DEVICE_KEY="你的BarkKey"
+python tests\smoke_local_stack.py --with-bark
+```
+
+该命令会从手动运行接口触发真实 Bark，并检查本地 SQLite `notifications` 表里是否记录了发送成功。
+
 ## 启动给人工测试
 
 ```powershell
@@ -40,4 +49,11 @@ python tests\start_local_stack.py
 
 ```powershell
 python tests\stop_local_stack.py
+```
+
+如果你希望从页面点击“生成手动操作计划”后真实推送到手机，用：
+
+```powershell
+$env:BARK_DEVICE_KEY="你的BarkKey"
+python tests\start_local_stack.py --with-bark
 ```

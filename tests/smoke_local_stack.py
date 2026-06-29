@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -26,6 +27,11 @@ FRONTEND_BASE = f"http://127.0.0.1:{FRONTEND_PORT}"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Start local API/frontend and smoke-test the manual-alert workflow.")
     parser.add_argument("--keep-running", action="store_true", help="Keep both dev servers running after checks pass.")
+    parser.add_argument(
+        "--with-bark",
+        action="store_true",
+        help="Send a real Bark notification during the manual run. Requires BARK_DEVICE_KEY.",
+    )
     args = parser.parse_args(argv)
 
     _ensure_port_free(API_PORT)
@@ -36,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     api_process: subprocess.Popen[bytes] | None = None
     frontend_process: subprocess.Popen[bytes] | None = None
     try:
-        api_process = _start_api()
+        api_process = _start_api(notification_enabled=args.with_bark)
         _wait_for_json(f"{API_BASE}/api/system/health", "API health")
 
         frontend_process = _start_frontend()
@@ -48,9 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         trace_id = _assert_manual_run()
         _assert_run_list_contains(trace_id)
         _assert_run_detail(trace_id)
+        notification_result = _assert_notification_sent(trace_id) if args.with_bark else {"enabled": False}
         _assert_frontend_page(f"/runs/{trace_id}")
 
-        print(json.dumps({"ok": True, "api": API_BASE, "frontend": FRONTEND_BASE}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"ok": True, "api": API_BASE, "frontend": FRONTEND_BASE, "notification": notification_result},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         if args.keep_running:
             print("Servers are still running. Stop them with Ctrl+C in this terminal or run tests/stop_local_stack.py.")
             print(json.dumps({"api_pid": api_process.pid, "frontend_pid": frontend_process.pid}, indent=2))
@@ -64,11 +77,8 @@ def main(argv: list[str] | None = None) -> int:
                     _stop_process(process)
 
 
-def _start_api() -> subprocess.Popen[bytes]:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "src")
-    env["TMP"] = str(TMP_DIR)
-    env["TEMP"] = str(TMP_DIR)
+def _start_api(*, notification_enabled: bool) -> subprocess.Popen[bytes]:
+    env = _build_api_env(tmp_dir=TMP_DIR, notification_enabled=notification_enabled)
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "crypto_manual_alert.api.app:app", "--host", "127.0.0.1", "--port", str(API_PORT)],
         cwd=ROOT,
@@ -76,6 +86,25 @@ def _start_api() -> subprocess.Popen[bytes]:
         stdout=(LOG_DIR / "api-smoke.out.log").open("wb"),
         stderr=(LOG_DIR / "api-smoke.err.log").open("wb"),
     )
+
+
+def _build_api_env(
+    *,
+    tmp_dir: Path,
+    notification_enabled: bool,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """构造本地 API 环境，默认关闭真实通知，只有显式测试 Bark 时才打开。"""
+    env = dict(base_env or os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["TMP"] = str(tmp_dir)
+    env["TEMP"] = str(tmp_dir)
+    env["MARKET_DATA_PROVIDER"] = "fixture"
+    env["DECISION_ENGINE"] = "fixture"
+    env["NOTIFICATION_ENABLED"] = "true" if notification_enabled else "false"
+    if notification_enabled and not env.get("BARK_DEVICE_KEY"):
+        raise RuntimeError("BARK_DEVICE_KEY is required when --with-bark is used.")
+    return env
 
 
 def _start_frontend() -> subprocess.Popen[bytes]:
@@ -154,6 +183,38 @@ def _assert_run_detail(trace_id: str) -> None:
         raise AssertionError(f"run detail failed: {body}")
     if body.get("data", {}).get("trace", {}).get("trace_id") != trace_id:
         raise AssertionError(f"run detail trace mismatch: {body}")
+
+
+def _assert_notification_sent(trace_id: str) -> dict[str, Any]:
+    detail = _wait_for_json(f"{API_BASE}/api/runs/{trace_id}", "API run detail for notification")
+    plan_id = detail.get("data", {}).get("trace", {}).get("final_plan_id")
+    if not plan_id:
+        raise AssertionError(f"run detail missing final_plan_id: {detail}")
+
+    db_path = ROOT / "data" / "crypto-alert.db"
+    deadline = time.time() + 20
+    last_row: dict[str, Any] | None = None
+    while time.time() < deadline:
+        if db_path.exists():
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT ok, status_code, error
+                    FROM notifications
+                    WHERE plan_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (plan_id,),
+                ).fetchone()
+            if row:
+                last_row = dict(row)
+                if row["ok"] == 1:
+                    return {"enabled": True, "ok": True, "status_code": row["status_code"], "plan_id": plan_id}
+                raise AssertionError(f"Bark notification failed: {dict(row)}")
+        time.sleep(1)
+    raise AssertionError(f"Timed out waiting for Bark notification row. plan_id={plan_id}, last_row={last_row}")
 
 
 def _wait_for_json(url: str, name: str, timeout_seconds: int = 45) -> dict[str, Any]:

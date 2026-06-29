@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import argparse
 from pathlib import Path
 
 import smoke_local_stack as smoke
@@ -15,13 +16,21 @@ PID_FILE = LOG_DIR / "pids.json"
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Start local API/frontend for manual testing.")
+    parser.add_argument(
+        "--with-bark",
+        action="store_true",
+        help="Enable real Bark notifications for manual runs. Requires BARK_DEVICE_KEY.",
+    )
+    args = parser.parse_args()
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     (ROOT / ".tmp" / "dev-server").mkdir(parents=True, exist_ok=True)
 
     smoke._ensure_port_free(smoke.API_PORT)
     smoke._ensure_port_free(smoke.FRONTEND_PORT)
 
-    api_process = _start_api_detached()
+    api_process = _start_api_detached(notification_enabled=args.with_bark)
     frontend_process: subprocess.Popen[bytes] | None = None
     try:
         smoke._wait_for_json(f"{smoke.API_BASE}/api/system/health", "API health")
@@ -39,6 +48,7 @@ def main() -> int:
                     "frontend_pid": frontend_process.pid,
                     "api": smoke.API_BASE,
                     "frontend": smoke.FRONTEND_BASE,
+                    "notification_enabled": args.with_bark,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -54,11 +64,8 @@ def main() -> int:
         raise
 
 
-def _start_api_detached() -> subprocess.Popen[bytes]:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "src")
-    env["TMP"] = str(ROOT / ".tmp" / "dev-server")
-    env["TEMP"] = str(ROOT / ".tmp" / "dev-server")
+def _start_api_detached(*, notification_enabled: bool) -> subprocess.Popen[bytes]:
+    env = smoke._build_api_env(tmp_dir=ROOT / ".tmp" / "dev-server", notification_enabled=notification_enabled)
     return _popen_detached(
         [sys.executable, "-m", "uvicorn", "crypto_manual_alert.api.app:app", "--host", "127.0.0.1", "--port", "8010"],
         cwd=ROOT,
