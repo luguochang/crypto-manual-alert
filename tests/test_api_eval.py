@@ -6,6 +6,8 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from crypto_manual_alert.api.app import create_app
+from crypto_manual_alert.eval.errors import EvalRunError
+from crypto_manual_alert.eval.runner import EvalRunner
 from crypto_manual_alert.observability import ObservabilityRecorder
 
 
@@ -143,6 +145,169 @@ def test_eval_explicit_badcase_ids_can_select_older_cases_beyond_limit(tmp_path)
     detail = client.get(f"/api/eval/runs/{body['data']['eval_run_id']}").json()["data"]
     assert detail["cases"][0]["source_badcase_id"] == older_badcase_id
     assert all(score["source_trace_id"] for score in detail["scores"])
+
+
+def test_eval_run_persists_json_and_markdown_report_artifacts(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
+
+    response = client.post(
+        "/api/eval/runs",
+        json={"dataset_name": "failure_cases", "badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    )
+
+    assert response.status_code == 200
+    run = response.json()["data"]
+    metadata = run["metadata"]
+    assert metadata["report_json_ref"]
+    assert metadata["report_markdown_ref"]
+    report_json = tmp_path / metadata["report_json_ref"]
+    report_markdown = tmp_path / metadata["report_markdown_ref"]
+    assert report_json.exists()
+    assert report_markdown.exists()
+    assert run["eval_run_id"] in report_markdown.read_text(encoding="utf-8")
+    assert "failure_cases" in report_json.read_text(encoding="utf-8")
+
+
+def test_eval_run_detail_keeps_case_snapshot_for_historical_runs(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="first expected behavior")
+
+    first = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    ).json()["data"]
+    app.state.journal.record_badcase(
+        trace_id=_trace_id,
+        plan_id="plan_eval_seed",
+        category="grounding_error",
+        severity="high",
+        summary="same source changed later",
+        expected_behavior="second expected behavior",
+        actual_behavior="changed",
+        eval_dataset_name="failure_cases",
+    )
+    second = client.post(
+        "/api/eval/runs",
+        json={"dataset_name": "failure_cases", "mode": "judge_only_fixture"},
+    ).json()["data"]
+
+    first_detail = client.get(f"/api/eval/runs/{first['eval_run_id']}").json()["data"]
+    second_detail = client.get(f"/api/eval/runs/{second['eval_run_id']}").json()["data"]
+    assert first_detail["cases"][0]["expected_behavior"] == "first expected behavior"
+    assert any(case["expected_behavior"] == "second expected behavior" for case in second_detail["cases"])
+
+
+def test_eval_rule_judge_covers_action_schema_and_opening_requirements(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(
+        app,
+        expected_behavior="opening plan must have manual flag, entry, stop and invalidation",
+        parsed_plan_extra={
+            "main_action": "market buy now",
+            "manual_execution_required": False,
+            "entry_trigger": None,
+            "stop_price": None,
+            "invalidation": "",
+        },
+    )
+
+    response = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    )
+
+    assert response.status_code == 200
+    detail = client.get(f"/api/eval/runs/{response.json()['data']['eval_run_id']}").json()["data"]
+    scores = {score["judge_name"]: score for score in detail["scores"]}
+    assert scores["rule.action_enum"]["passed"] is False
+    assert scores["rule.manual_only"]["passed"] is False
+    assert scores["rule.opening_requirements"]["passed"] is False
+
+
+def test_eval_cheap_mode_skips_fixture_llm_and_keeps_side_effect_guard(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
+    before = _prod_table_counts(app.state.journal.path)
+
+    response = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "cheap"},
+    )
+
+    assert response.status_code == 200
+    assert _prod_table_counts(app.state.journal.path) == before
+    detail = client.get(f"/api/eval/runs/{response.json()['data']['eval_run_id']}").json()["data"]
+    judge_names = {score["judge_name"] for score in detail["scores"]}
+    assert "llm.fixture_grounding" not in judge_names
+    assert "rule.action_enum" in judge_names
+    assert "eval.side_effect_guard" in judge_names
+    assert detail["run"]["metadata"]["judge_provider"] == "disabled"
+
+
+def test_eval_run_rejects_forbidden_trade_secret_env(tmp_path, monkeypatch):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
+    monkeypatch.setenv("OKX_TRADE_API_KEY", "must-not-be-visible-to-eval")
+
+    response = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "cheap"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "eval_forbidden_secret_env"
+    assert app.state.eval_store.list_runs() == []
+
+
+def test_eval_run_returns_stable_error_when_runner_fails(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+
+    class FailingRunner:
+        def run(self, **kwargs: Any):
+            raise EvalRunError("failed to persist eval run: OperationalError")
+
+    app.state.eval_runner = FailingRunner()
+
+    response = client.post("/api/eval/runs", json={"mode": "cheap"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "eval_run_failed"
+
+
+def test_eval_runner_cleans_report_artifacts_when_store_insert_fails(tmp_path):
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
+
+    class FailingStore:
+        path = tmp_path / "eval" / "crypto-eval.db"
+
+        def upsert_cases(self, cases: list[Any]) -> None:
+            return None
+
+        def insert_run(self, run: Any, cases: list[Any], scores: list[Any]) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+    runner = EvalRunner(journal=app.state.journal, store=FailingStore(), data_dir=tmp_path)
+
+    try:
+        runner.run(badcase_ids=[badcase_id], mode="cheap")
+    except EvalRunError as exc:
+        assert exc.code == "eval_run_failed"
+    else:
+        raise AssertionError("EvalRunError was not raised")
+    report_dir = tmp_path / "eval" / "reports"
+    assert not report_dir.exists() or list(report_dir.iterdir()) == []
 
 
 def _seed_badcase(app: Any, *, expected_behavior: str, **kwargs: Any) -> tuple[str, int]:

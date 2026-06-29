@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from crypto_manual_alert.eval.errors import EvalRunError
+from crypto_manual_alert.eval.guards import EvalSafetyError
+from crypto_manual_alert.eval.runner import SUPPORTED_MODES
+
 from .schemas import EvalRunRequest, failure, success
 
 
@@ -41,12 +45,12 @@ def create_eval_run(payload: EvalRunRequest, request: Request) -> dict:
     首版只支持 judge_only_fixture，避免默认访问真实 LLM 或外部网络。
     """
 
-    if payload.mode != "judge_only_fixture":
+    if payload.mode not in SUPPORTED_MODES:
         raise HTTPException(
             status_code=400,
             detail=failure(
                 code="eval_mode_not_supported",
-                message="only judge_only_fixture is supported in local eval workbench v1",
+                message=f"supported eval modes: {', '.join(sorted(SUPPORTED_MODES))}",
             ),
         )
     try:
@@ -56,10 +60,21 @@ def create_eval_run(payload: EvalRunRequest, request: Request) -> dict:
             mode=payload.mode,
             limit=payload.limit,
         )
-    except ValueError as exc:
+    except EvalSafetyError as exc:
         raise HTTPException(
             status_code=400,
-            detail=failure(code="eval_no_cases", message=str(exc)),
+            detail=failure(code=exc.code, message=str(exc)),
+        ) from exc
+    except ValueError as exc:
+        code = "eval_no_cases" if str(exc) == "no eval cases selected" else "eval_run_failed"
+        raise HTTPException(
+            status_code=400,
+            detail=failure(code=code, message=str(exc)),
+        ) from exc
+    except EvalRunError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=failure(code=exc.code, message=str(exc)),
         ) from exc
     return success(run.__dict__)
 
@@ -75,4 +90,3 @@ def get_eval_run_detail(eval_run_id: str, request: Request) -> dict:
             detail=failure(code="eval_run_not_found", message="eval run not found"),
         )
     return success(detail)
-

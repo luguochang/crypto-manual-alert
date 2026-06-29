@@ -5,6 +5,7 @@ import json
 from datetime import timedelta
 
 from .config import ConfigError, load_config
+from .eval.cli import add_eval_subcommands, handle_eval_command
 from .journal import Journal
 from .notifier import BarkNotificationSink
 from .runner import PlanRunner, journal_path, plan_to_json
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = sub.add_parser("scheduler")
     scheduler.add_argument("--symbol", default="ETH-USDT-SWAP")
+    add_eval_subcommands(sub)
 
     args = parser.parse_args(argv)
     try:
@@ -65,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     journal = Journal(journal_path(config))
+    eval_exit_code = handle_eval_command(args, config=config, journal=journal)
+    if eval_exit_code is not None:
+        return eval_exit_code
 
     if args.command == "show-config":
         print(json.dumps(config.safe_dict(), ensure_ascii=False, indent=2, default=str))

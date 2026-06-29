@@ -41,6 +41,15 @@ function truncate(value: string | null | undefined, max = 96) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function metadataText(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" && value ? value : "-";
+}
+
+function evidenceText(score: EvalScore) {
+  return score.evidence_refs.length > 0 ? score.evidence_refs.join(", ") : "-";
+}
+
 export default async function EvalPage() {
   const [candidatesResult, runsResult] = await Promise.all([
     listEvalCandidates({ limit: 50 }),
@@ -164,6 +173,14 @@ export default async function EvalPage() {
                 <dt>副作用 delta</dt>
                 <dd>{JSON.stringify(latestRun.metadata.side_effect_deltas ?? {})}</dd>
               </div>
+              <div>
+                <dt>JSON 报告</dt>
+                <dd>{metadataText(latestRun.metadata, "report_json_ref")}</dd>
+              </div>
+              <div>
+                <dt>Markdown 报告</dt>
+                <dd>{metadataText(latestRun.metadata, "report_markdown_ref")}</dd>
+              </div>
             </dl>
           )}
         </section>
@@ -234,6 +251,7 @@ export default async function EvalPage() {
                   <th>严重度</th>
                   <th>分类</th>
                   <th>原因</th>
+                  <th>Evidence refs</th>
                   <th>人工复核</th>
                 </tr>
               </thead>
@@ -258,6 +276,7 @@ export default async function EvalPage() {
                     <td>{score.severity}</td>
                     <td>{score.failure_category}</td>
                     <td>{score.reason_summary}</td>
+                    <td>{evidenceText(score)}</td>
                     <td>{score.needs_human_review ? "需要" : "-"}</td>
                   </tr>
                 ))}

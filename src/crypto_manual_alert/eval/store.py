@@ -72,6 +72,16 @@ class EvalStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS eval_run_cases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    eval_run_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    case_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS eval_scores (
                     score_id TEXT PRIMARY KEY,
                     eval_run_id TEXT NOT NULL,
@@ -92,6 +102,7 @@ class EvalStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_cases_dataset ON eval_cases(dataset_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_run_cases_run ON eval_run_cases(eval_run_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eval_scores_run ON eval_scores(eval_run_id)")
             _ensure_columns(
                 conn,
@@ -135,7 +146,7 @@ class EvalStore:
                     ),
                 )
 
-    def insert_run(self, run: EvalRun, scores: list[EvalScore]) -> None:
+    def insert_run(self, run: EvalRun, cases: list[EvalCase], scores: list[EvalScore]) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
@@ -158,6 +169,14 @@ class EvalStore:
                     _json(run.metadata),
                 ),
             )
+            for case in cases:
+                conn.execute(
+                    """
+                    INSERT INTO eval_run_cases (eval_run_id, case_id, case_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (run.eval_run_id, case.case_id, _json(_case_to_row(case))),
+                )
             for score in scores:
                 conn.execute(
                     """
@@ -217,17 +236,16 @@ class EvalStore:
             ).fetchall()
             cases = conn.execute(
                 """
-                SELECT DISTINCT c.*
-                FROM eval_cases c
-                JOIN eval_scores s ON s.case_id = c.case_id
-                WHERE s.eval_run_id = ?
-                ORDER BY c.created_at DESC
+                SELECT case_json
+                FROM eval_run_cases
+                WHERE eval_run_id = ?
+                ORDER BY id ASC
                 """,
                 (eval_run_id,),
             ).fetchall()
         return {
             "run": _run_row(run),
-            "cases": [_case_row(row) for row in cases],
+            "cases": [_load_json(row["case_json"]) for row in cases],
             "scores": [_score_row(row) for row in scores],
         }
 
@@ -255,11 +273,25 @@ def _run_row(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
-def _case_row(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    data["input_summary"] = _load_json(data.pop("input_summary_json"))
-    data["metadata"] = _load_json(data.pop("metadata_json"))
-    return data
+def _case_to_row(case: EvalCase) -> dict[str, Any]:
+    return {
+        "case_id": case.case_id,
+        "dataset_name": case.dataset_name,
+        "source_trace_id": case.source_trace_id,
+        "source_badcase_id": case.source_badcase_id,
+        "created_at": case.created_at,
+        "symbol": case.symbol,
+        "horizon": case.horizon,
+        "failure_category": case.failure_category,
+        "severity": case.severity,
+        "expected_behavior": case.expected_behavior,
+        "actual_behavior": case.actual_behavior,
+        "summary": case.summary,
+        "status": case.status,
+        "frozen_input_hash": case.frozen_input_hash,
+        "input_summary": case.input_summary,
+        "metadata": case.metadata,
+    }
 
 
 def _score_row(row: sqlite3.Row) -> dict[str, Any]:

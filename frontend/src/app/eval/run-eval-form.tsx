@@ -23,6 +23,7 @@ function getApiBaseUrl() {
 export function RunEvalForm() {
   const router = useRouter();
   const [datasetName, setDatasetName] = useState("failure_cases");
+  const [mode, setMode] = useState("cheap");
   const [isRunning, setIsRunning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +40,7 @@ export function RunEvalForm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           dataset_name: datasetName.trim() || undefined,
-          mode: "judge_only_fixture"
+          mode
         })
       });
       const body = (await response.json()) as ApiEnvelope;
@@ -67,8 +68,15 @@ export function RunEvalForm() {
           placeholder="failure_cases"
         />
       </div>
+      <div className="field">
+        <label htmlFor="eval-mode">Mode</label>
+        <select id="eval-mode" value={mode} onChange={(event) => setMode(event.target.value)}>
+          <option value="cheap">cheap</option>
+          <option value="judge_only_fixture">judge_only_fixture</option>
+        </select>
+      </div>
       <button className="button" disabled={isRunning} type="submit">
-        {isRunning ? "运行中..." : "运行 fixture eval"}
+        {isRunning ? "运行中..." : "运行 eval"}
       </button>
       {message ? <p className="muted">{message}</p> : null}
       {error ? <p className="error-inline">{error}</p> : null}

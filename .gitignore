@@ -17,6 +17,8 @@ venv/
 # Local runtime data
 data/tmp/
 data/dev-server/
+data/eval/reports/
+data/eval/artifacts/
 data/*.db
 data/**/*.db
 data/*.sqlite

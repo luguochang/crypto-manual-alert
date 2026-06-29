@@ -48,7 +48,12 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
     app.state.executor = RunExecutor(config=config, journal=journal)
     app.state.eval_store = eval_store
     app.state.eval_case_builder = EvalCaseBuilder(journal)
-    app.state.eval_runner = EvalRunner(journal=journal, store=eval_store)
+    app.state.eval_runner = EvalRunner(
+        journal=journal,
+        store=eval_store,
+        data_dir=config.app.data_dir,
+        forbidden_env_names=config.security.forbidden_env_names,
+    )
     app.include_router(system_router)
     app.include_router(runs_router)
     app.include_router(eval_router)

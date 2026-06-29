@@ -9,17 +9,32 @@ from typing import Any
 from crypto_manual_alert.journal import Journal
 
 from .case_builder import EvalCaseBuilder
+from .errors import EvalRunError
+from .guards import assert_eval_environment_safe
 from .judges import FixtureLLMJudge, RuleJudge, build_side_effect_score
+from .reports import cleanup_eval_report, write_eval_report
 from .schema import EvalRun, EvalScore
 from .store import EvalStore
+
+
+SUPPORTED_MODES = {"cheap", "judge_only_fixture"}
 
 
 class EvalRunner:
     """执行旁路 eval，不调用生产 runner，不发送通知。"""
 
-    def __init__(self, *, journal: Journal, store: EvalStore):
+    def __init__(
+        self,
+        *,
+        journal: Journal,
+        store: EvalStore,
+        data_dir: str | Path | None = None,
+        forbidden_env_names: list[str] | tuple[str, ...] | None = None,
+    ):
         self.journal = journal
         self.store = store
+        self.data_dir = Path(data_dir) if data_dir is not None else store.path.parent.parent
+        self.forbidden_env_names = tuple(forbidden_env_names or ())
         self.case_builder = EvalCaseBuilder(journal)
         self.rule_judge = RuleJudge()
         self.llm_judge = FixtureLLMJudge()
@@ -32,10 +47,11 @@ class EvalRunner:
         mode: str = "judge_only_fixture",
         limit: int = 50,
     ) -> EvalRun:
+        assert_eval_environment_safe(self.forbidden_env_names)
         cases = self.case_builder.build_cases(dataset=dataset_name, badcase_ids=badcase_ids, limit=limit)
         if not cases:
             raise ValueError("no eval cases selected")
-        if mode != "judge_only_fixture":
+        if mode not in SUPPORTED_MODES:
             raise ValueError(f"unsupported eval mode: {mode}")
 
         eval_run_id = uuid.uuid4().hex
@@ -62,6 +78,11 @@ class EvalRunner:
         guard_failed = any(score.judge_name == "eval.side_effect_guard" and not score.passed for score in scores)
         fail_count = len(case_failed) + (1 if guard_failed else 0)
         pass_count = max(0, len(cases) - len(case_failed))
+        metadata = {
+            "judge_provider": "fixture" if mode == "judge_only_fixture" else "disabled",
+            "side_effect_deltas": deltas,
+            "case_ids": [case.case_id for case in cases],
+        }
         run = EvalRun(
             eval_run_id=eval_run_id,
             dataset_name=dataset_name or "selected_badcases",
@@ -72,13 +93,18 @@ class EvalRunner:
             case_count=len(cases),
             pass_count=pass_count,
             fail_count=fail_count,
-            metadata={
-                "judge_provider": "fixture",
-                "side_effect_deltas": deltas,
-                "case_ids": [case.case_id for case in cases],
-            },
+            metadata=metadata,
         )
-        self.store.insert_run(run, scores)
+        try:
+            report_refs = write_eval_report(data_dir=self.data_dir, run=run, cases=cases, scores=scores)
+        except Exception as exc:
+            raise EvalRunError(f"failed to write eval report: {type(exc).__name__}") from exc
+        run = EvalRun(**{**run.__dict__, "metadata": {**metadata, **report_refs}})
+        try:
+            self.store.insert_run(run, cases, scores)
+        except Exception as exc:
+            cleanup_eval_report(data_dir=self.data_dir, refs=report_refs)
+            raise EvalRunError(f"failed to persist eval run: {type(exc).__name__}") from exc
         return run
 
 

@@ -1,9 +1,12 @@
 import json
+import sqlite3
 from datetime import datetime, timezone
 
 from crypto_manual_alert.cli import main
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.domain import MarketSnapshot, NotificationResult
+from crypto_manual_alert.eval.errors import EvalRunError
+import crypto_manual_alert.eval.cli as eval_cli
 from crypto_manual_alert.journal import Journal
 from crypto_manual_alert.runner import PlanRunner
 from crypto_manual_alert.research import FixtureSearchAdapter
@@ -318,3 +321,111 @@ app:
     assert badcases[0]["category"] == "execution_plan_unclear"
     assert badcases[0]["summary"] == "用于回归评估"
     assert badcases[0]["eval_dataset_name"] == "failure_cases"
+
+
+def test_cli_eval_run_and_report_flow(tmp_path, capsys):
+    config_path = tmp_path / "config.yaml"
+    data_dir = tmp_path / "data"
+    config_path.write_text(
+        f"""
+app:
+  data_dir: {str(data_dir).replace("\\", "/")}
+""",
+        encoding="utf-8",
+    )
+
+    assert main(["--config", str(config_path), "run-once", "--symbol", "ETH-USDT-SWAP"]) == 0
+    capsys.readouterr()
+    with sqlite3.connect(data_dir / "crypto-alert.db") as conn:
+        conn.row_factory = sqlite3.Row
+        run = conn.execute("SELECT payload_json FROM plan_runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    assert run is not None
+    run_payload = json.loads(run["payload_json"])
+    badcase_code = main(
+        [
+            "--config",
+            str(config_path),
+            "record-badcase",
+            "--trace-id",
+            run_payload["trace_id"],
+            "--category",
+            "grounding_error",
+            "--severity",
+            "high",
+            "--summary",
+            "eval cli regression",
+            "--expected",
+            "data gap requires no trade",
+            "--actual",
+            "trigger long",
+            "--eval-dataset",
+            "failure_cases",
+        ]
+    )
+    assert badcase_code == 0
+    capsys.readouterr()
+
+    eval_code = main(["--config", str(config_path), "eval-run", "--dataset", "failure_cases", "--mode", "cheap"])
+    eval_output = capsys.readouterr().out
+
+    assert eval_code == 0
+    eval_payload = json.loads(eval_output)
+    assert eval_payload["mode"] == "cheap"
+    assert eval_payload["metadata"]["report_json_ref"]
+    assert (data_dir / eval_payload["metadata"]["report_json_ref"]).exists()
+    assert (data_dir / eval_payload["metadata"]["report_markdown_ref"]).exists()
+
+    report_code = main(["--config", str(config_path), "eval-report", "--eval-run-id", eval_payload["eval_run_id"]])
+    report_output = capsys.readouterr().out
+
+    assert report_code == 0
+    report_payload = json.loads(report_output)
+    assert report_payload["eval_run_id"] == eval_payload["eval_run_id"]
+    assert report_payload["report_json_ref"] == eval_payload["metadata"]["report_json_ref"]
+
+
+def test_cli_eval_run_empty_selection_returns_stable_error(tmp_path, capsys):
+    config_path = tmp_path / "config.yaml"
+    data_dir = tmp_path / "data"
+    config_path.write_text(
+        f"""
+app:
+  data_dir: {str(data_dir).replace("\\", "/")}
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = main(["--config", str(config_path), "eval-run", "--dataset", "missing", "--mode", "cheap"])
+    output = capsys.readouterr().out
+
+    assert exit_code == 2
+    payload = json.loads(output)
+    assert payload["error"] == "eval_no_cases"
+
+
+def test_cli_eval_run_runtime_error_returns_json(tmp_path, capsys, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    data_dir = tmp_path / "data"
+    config_path.write_text(
+        f"""
+app:
+  data_dir: {str(data_dir).replace("\\", "/")}
+""",
+        encoding="utf-8",
+    )
+
+    class FailingRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, **kwargs):
+            raise EvalRunError("failed to write eval report: PermissionError")
+
+    monkeypatch.setattr(eval_cli, "EvalRunner", FailingRunner)
+
+    exit_code = main(["--config", str(config_path), "eval-run", "--dataset", "failure_cases", "--mode", "cheap"])
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    payload = json.loads(output)
+    assert payload["error"] == "eval_run_failed"
