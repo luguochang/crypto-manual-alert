@@ -42,6 +42,8 @@ Skill 提供专业能力，Agent 负责任务分工和结构化贡献，LeadAgen
 |---|---|---|
 | 实时事实防火墙 | `LiveFactSkill` + `FactsGate` | 所有实时决策先刷新事实，缺失/陈旧/冲突不能当作中性 |
 | 来源优先级 | `SourcePriorityPolicy` | 代码化，不交给 LLM 自由判断 |
+| 会话记忆与事实隔离 | `SessionMemoryManager` + `MemoryFirewall` | 记住用户持仓和追问上下文，但不让旧行情、旧新闻、旧结论污染实时判断 |
+| Harness 约束系统 | `HarnessPolicy` + runtime validator | 用 YAML/规则文件显式定义 Agent 能力边界、schema、tool policy、timeout、修复和拦截策略 |
 | 根因链 | `RootCauseSkill` | 从事件递归追溯到 durable root driver，并输出证伪条件 |
 | 市场情绪与拥挤 | `SentimentCrowdingSkill` | 判断事实是否已定价、仓位是否拥挤、短期是否可能反向 |
 | 宏观传导 | `MacroBridgeSkill` | 利率、DXY、VIX、油价、QQQ/NQ 如何传到 BTC/ETH/SOL |
@@ -60,12 +62,14 @@ Skill 提供专业能力，Agent 负责任务分工和结构化贡献，LeadAgen
 ```text
 Manual/Scheduled Query
   -> SessionManager
+  -> SessionMemoryManager
   -> IntentClassifier
   -> ComplexityRouter
   -> SlotFiller
   -> DecisionRequestBuilder
   -> VersionLock(skill/rule/prompt/model/config)
   -> SkillLoader + ToolPolicy
+  -> HarnessPolicyLoader
   -> MarketFactAgent
   -> FactsGate(pre)
 
@@ -91,7 +95,9 @@ Manual/Scheduled Query
        ExecutionRiskReviewer
   -> LeadAgent.synthesize
   -> DecisionInputBuilder
+  -> HarnessValidator(pre-final)
   -> FinalDecisionAgent
+  -> HarnessValidator(post-final)
   -> ParserGate
   -> PlanSemanticGate
   -> RiskGate
