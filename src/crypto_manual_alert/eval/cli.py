@@ -18,7 +18,7 @@ def add_eval_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     eval_run = subparsers.add_parser("eval-run")
     eval_run.add_argument("--dataset", dest="dataset_name")
     eval_run.add_argument("--badcase-id", dest="badcase_ids", action="append", type=int)
-    eval_run.add_argument("--mode", choices=["cheap", "judge_only_fixture"], default="cheap")
+    eval_run.add_argument("--mode", choices=["cheap", "judge_only_fixture", "judge_openai"], default="cheap")
     eval_run.add_argument("--limit", type=int, default=50)
 
     eval_report = subparsers.add_parser("eval-report")
@@ -43,6 +43,7 @@ def handle_eval_command(args: argparse.Namespace, *, config: Config, journal: Jo
             store=store,
             data_dir=config.app.data_dir,
             forbidden_env_names=config.security.forbidden_env_names,
+            config=config,
         )
         try:
             run = runner.run(

@@ -4,9 +4,10 @@ import hashlib
 import json
 from typing import Any
 
+from crypto_manual_alert.frozen_input import frozen_input_from_plan_payload
 from crypto_manual_alert.journal import Journal
 
-from .schema import EvalCase
+from .schema import EvalCase, EvalFrozenInput
 
 
 SECRET_KEY_HINTS = (
@@ -48,6 +49,7 @@ class EvalCaseBuilder:
 
     def __init__(self, journal: Journal):
         self.journal = journal
+        self.last_frozen_inputs: list[EvalFrozenInput] = []
 
     def list_candidates(
         self,
@@ -67,6 +69,7 @@ class EvalCaseBuilder:
             detail = self.journal.get_trace_detail(str(badcase["trace_id"]), include_payloads=False)
             if detail is None:
                 continue
+            detail["_journal"] = self.journal
             candidates.append(_candidate_from_detail(badcase, detail))
             if len(candidates) >= _normalize_limit(limit):
                 break
@@ -80,14 +83,21 @@ class EvalCaseBuilder:
         limit: int = 50,
     ) -> list[EvalCase]:
         cases: list[EvalCase] = []
+        frozen_inputs: list[EvalFrozenInput] = []
         clean_limit = max(_normalize_limit(limit), len(badcase_ids or []), 1)
         for badcase in self.journal.list_badcases(limit=clean_limit, ids=badcase_ids, dataset=dataset):
             detail = self.journal.get_trace_detail(str(badcase["trace_id"]), include_payloads=False)
             if detail is None:
                 continue
-            cases.append(_case_from_detail(badcase, detail))
+            detail["_journal"] = self.journal
+            case = _case_from_detail(badcase, detail)
+            cases.append(case)
+            frozen = _frozen_input_from_detail(badcase, detail)
+            if frozen:
+                frozen_inputs.append(frozen)
             if len(cases) >= _normalize_limit(limit) and not badcase_ids:
                 break
+        self.last_frozen_inputs = frozen_inputs
         return cases
 
 
@@ -132,7 +142,8 @@ def _candidate_from_detail(badcase: dict[str, Any], detail: dict[str, Any]) -> d
 def _case_from_detail(badcase: dict[str, Any], detail: dict[str, Any]) -> EvalCase:
     trace = detail["trace"]
     input_summary = _frozen_summary(badcase, detail)
-    frozen_hash = _hash(input_summary)
+    frozen = _frozen_input_from_detail(badcase, detail)
+    frozen_hash = frozen.frozen_input_hash if frozen else _hash(input_summary)
     badcase_id = int(badcase["id"])
     return EvalCase(
         case_id=f"badcase-{badcase_id}",
@@ -154,7 +165,36 @@ def _case_from_detail(badcase: dict[str, Any], detail: dict[str, Any]) -> EvalCa
             "source": "badcase",
             "input_snapshot_hash": badcase.get("input_snapshot_hash"),
             "evidence_refs": badcase.get("evidence_refs") or [],
+            "frozen_input_available": frozen is not None,
         },
+    )
+
+
+def _frozen_input_from_detail(badcase: dict[str, Any], detail: dict[str, Any]) -> EvalFrozenInput | None:
+    trace = detail["trace"]
+    plan = detail.get("plan_run") or {}
+    plan_id = badcase.get("plan_id") or plan.get("plan_id") or trace.get("final_plan_id")
+    full_payload = None
+    journal = detail.get("_journal")
+    if plan_id and isinstance(journal, Journal):
+        full_payload = journal.get_plan_run_payload(str(plan_id))
+    frozen = frozen_input_from_plan_payload(
+        full_payload or plan,
+        source_trace_id=str(trace["trace_id"]),
+        source_badcase_id=int(badcase["id"]),
+    )
+    if frozen is None:
+        return None
+    row = frozen.to_store_row()
+    return EvalFrozenInput(
+        frozen_input_hash=row["frozen_input_hash"],
+        schema_version=row["schema_version"],
+        kind=row["kind"],
+        source_trace_id=row["source_trace_id"],
+        source_badcase_id=row["source_badcase_id"],
+        input_payload=row["input_payload"],
+        public_summary=row["public_summary"],
+        metadata=row["metadata"],
     )
 
 

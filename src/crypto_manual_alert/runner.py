@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .domain import DecisionPlan, MarketSnapshot, NotificationResult, RiskVerdict
+from .domain import DecisionPlan, MarketSnapshot, NotificationResult, RiskVerdict, RuleHit
+from .frozen_input import FrozenInput, freeze_decision_prompt_packet
 from .journal import Journal
 from .market_data import FixtureMarketDataProvider, MarketDataProvider, OkxPublicMarketDataProvider
 from .notifier import BarkNotificationSink, NoopNotificationSink, NotificationSink
@@ -61,11 +62,15 @@ class PlanRunner:
         trace_id = recorder.start_trace(run_type="manual", symbol=symbol)
         snapshot: MarketSnapshot | None = None
         research_audit: ResearchAudit | None = None
-        prompt_packet: dict[str, object] = {}
+        prompt_packet: dict[str, Any] = {}
+        frozen_input: FrozenInput | None = None
+        raw_decision: str | None = None
+
         try:
             with recorder.span(trace_id, "market.fetch", "market.fetch", input_summary={"symbol": symbol}) as span:
                 snapshot = self.market_provider.fetch_snapshot(symbol)
                 span.set_output(_snapshot_summary(snapshot))
+
             with recorder.span(trace_id, "skill.load", "skill.load") as span:
                 skill_context = self.skill_runtime.load_context()
                 span.set_output(
@@ -75,6 +80,7 @@ class PlanRunner:
                         "required_references": list(skill_context.references),
                     }
                 )
+
             if self.config.research.enabled and needs_research_fallback(
                 snapshot,
                 max_age_seconds=self.config.market_data.stale_market_data_seconds,
@@ -92,6 +98,7 @@ class PlanRunner:
                     with use_observability(recorder, trace_id):
                         research_plan = self.research_planner.plan(snapshot, skill_context=skill_context.to_prompt_dict())
                     span.set_output(research_plan.to_public_dict())
+
                 with recorder.span(
                     trace_id,
                     "research.search",
@@ -107,51 +114,61 @@ class PlanRunner:
                             trace_id=trace_id,
                             parent_span_id=span.span_id,
                         )
-                    span.set_output(
-                        {
-                            "result_names": sorted(research_audit.results),
-                            "unavailable": research_audit.unavailable,
-                        }
-                    )
+                    span.set_output({"result_names": sorted(research_audit.results), "unavailable": research_audit.unavailable})
+
                 with recorder.span(trace_id, "evidence.synthesize", "evidence.synthesize") as span:
                     snapshot = synthesize_search_evidence(snapshot, research_audit)
                     span.set_output(_snapshot_summary(snapshot))
+
                 with recorder.span(trace_id, "leader.review", "leader.review") as span:
                     with use_observability(recorder, trace_id):
                         research_audit = self.leader_synthesizer.synthesize(snapshot, research_audit)
                     span.set_output({"leader_summary_keys": sorted(research_audit.leader_summary)})
+
             with recorder.span(trace_id, "prompt.build", "prompt.build") as span:
                 prompt_packet = self.skill_runtime.build_prompt_packet(snapshot, context=skill_context)
+                if research_audit:
+                    prompt_packet["research"] = research_audit.to_public_dict()
                 span.set_output({"keys": sorted(prompt_packet)})
-            if research_audit:
-                prompt_packet["research"] = research_audit.to_public_dict()
+
+            with recorder.span(trace_id, "input.freeze", "input.freeze") as span:
+                frozen_input = freeze_decision_prompt_packet(prompt_packet, source_trace_id=trace_id)
+                span.set_output(
+                    {
+                        "frozen_input_hash": frozen_input.frozen_input_hash,
+                        "schema_version": frozen_input.schema_version,
+                        "kind": frozen_input.kind,
+                        "top_level_keys": frozen_input.public_summary["top_level_keys"],
+                    }
+                )
+
             with recorder.span(trace_id, "decision.final", "decision.llm") as span:
                 with use_observability(recorder, trace_id):
-                    raw_decision = self.decision_engine.run(prompt_packet)
+                    raw_decision = self.decision_engine.run(frozen_input.input_payload)
                 span.set_output({"raw_decision_chars": len(str(raw_decision))})
+
             with recorder.span(trace_id, "parser.strict_json", "parser.strict_json") as span:
                 plan = parse_decision_plan(raw_decision)
                 span.set_output({"plan_id": plan.plan_id, "main_action": plan.main_action})
+
             with recorder.span(trace_id, "risk.check", "risk.check") as span:
                 verdict = check_plan(plan, snapshot, self.config)
-                span.set_output({"allowed": verdict.allowed, "reasons": verdict.reasons, "warnings": verdict.warnings})
-        except Exception as exc:  # noqa: BLE001 - 失败时必须生成禁止交易的 blocked plan 并留审计。
+                span.set_output(verdict.to_public_dict())
+
+        except Exception as exc:  # noqa: BLE001 - 失败时必须落一条禁止交易的审计记录。
             logger.exception("plan pipeline failed")
             plan, verdict = self._blocked_failure_plan(symbol, exc)
-            payload = {
-                    "trace_id": trace_id,
-                    "plan": plan.raw,
-                    "snapshot": snapshot.to_public_dict() if snapshot else None,
-                    "evidence_snapshot": snapshot.to_public_dict() if snapshot else None,
-                    "raw_decision": None,
-                    "parsed_plan": plan.raw,
-                    "verdict": {"allowed": verdict.allowed, "reasons": verdict.reasons, "warnings": verdict.warnings},
-                    "skill": prompt_packet.get("skill"),
-                    "research": research_audit.to_public_dict() if research_audit else None,
-                    "analysis": _analysis_summary(snapshot, research_audit, plan, verdict),
-                    "redaction": _redaction_policy(),
-                    "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()},
-                }
+            payload = _plan_payload(
+                trace_id=trace_id,
+                plan=plan,
+                snapshot=snapshot,
+                raw_decision=raw_decision,
+                verdict=verdict,
+                prompt_packet=prompt_packet,
+                research_audit=research_audit,
+                frozen_input=frozen_input,
+                error={"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()},
+            )
             with recorder.span(trace_id, "journal.write", "journal.write") as span:
                 self.journal.append_plan_run(plan.plan_id, "blocked", payload)
                 span.set_output({"plan_id": plan.plan_id, "status": "blocked"})
@@ -167,19 +184,16 @@ class PlanRunner:
                 self._send_notification(plan, verdict, recorder=recorder, trace_id=trace_id)
             return plan, verdict
 
-        payload = {
-                "trace_id": trace_id,
-                "plan": plan.raw,
-                "snapshot": snapshot.to_public_dict(),
-                "evidence_snapshot": snapshot.to_public_dict(),
-                "raw_decision": raw_decision,
-                "verdict": {"allowed": verdict.allowed, "reasons": verdict.reasons, "warnings": verdict.warnings},
-                "skill": prompt_packet["skill"],
-                "parsed_plan": plan.raw,
-                "research": research_audit.to_public_dict() if research_audit else None,
-                "analysis": _analysis_summary(snapshot, research_audit, plan, verdict),
-                "redaction": _redaction_policy(),
-            }
+        payload = _plan_payload(
+            trace_id=trace_id,
+            plan=plan,
+            snapshot=snapshot,
+            raw_decision=raw_decision,
+            verdict=verdict,
+            prompt_packet=prompt_packet,
+            research_audit=research_audit,
+            frozen_input=frozen_input,
+        )
         status = "allowed" if verdict.allowed else "blocked"
         with recorder.span(trace_id, "journal.write", "journal.write") as span:
             self.journal.append_plan_run(plan.plan_id, status, payload)
@@ -205,7 +219,7 @@ class PlanRunner:
         def send() -> NotificationResult:
             try:
                 return self.notifier.send(plan, verdict)
-            except Exception as exc:  # noqa: BLE001 - 通知失败不能改变已经计算出的风控结论。
+            except Exception as exc:  # noqa: BLE001 - 通知失败不能改变已经生成的风控结论。
                 logger.exception("notification failed")
                 return NotificationResult(ok=False, error=f"{type(exc).__name__}: {exc}")
 
@@ -232,14 +246,28 @@ class PlanRunner:
             "horizon": "unknown",
             "manual_execution_required": True,
             "expires_in_seconds": 0,
-            "why_not_opposite": "决策管线在生成可靠交易计划前失败，不能比较反向方案。",
+            "why_not_opposite": "决策流水线在生成可靠交易计划前失败，不能比较反向方案。",
             "invalidation": "只有行情、skill 上下文、模型输出和解析器全部恢复后才能重试。",
             "unavailable_data": [f"{type(exc).__name__}: {exc}"],
             "notes": "系统失败，不能执行；请不要按本次输出手动下单。",
         }
         plan = DecisionPlan.from_payload(payload, generated_at=now)
-        verdict = RiskVerdict(allowed=False, reasons=["决策管线失败，禁止按本次结果手动交易"], warnings=plan.unavailable_data)
-        return plan, verdict
+        return plan, RiskVerdict(
+            allowed=False,
+            reasons=["决策流水线失败，禁止按本次结果手动交易。"],
+            warnings=plan.unavailable_data,
+            rule_hits=[
+                RuleHit(
+                    rule_id="pipeline.decision_engine.error",
+                    passed=False,
+                    severity="critical",
+                    message="决策流水线失败，禁止按本次结果交易。",
+                    blocking=True,
+                    evidence_refs=["error.type", "error.message"],
+                    details={"error_type": type(exc).__name__, "error_message": str(exc)},
+                )
+            ],
+        )
 
 
 def build_market_provider(config: Config) -> MarketDataProvider:
@@ -281,12 +309,45 @@ def plan_to_json(plan: DecisionPlan, verdict: RiskVerdict) -> str:
             "allowed": verdict.allowed,
             "reasons": verdict.reasons,
             "warnings": verdict.warnings,
+            "rule_hits": [hit.to_public_dict() for hit in verdict.rule_hits],
             "expires_at": plan.expires_at.isoformat(),
             "manual_execution_required": plan.manual_execution_required,
         },
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _plan_payload(
+    *,
+    trace_id: str,
+    plan: DecisionPlan,
+    snapshot: MarketSnapshot | None,
+    raw_decision: str | None,
+    verdict: RiskVerdict,
+    prompt_packet: dict[str, Any],
+    research_audit: ResearchAudit | None,
+    frozen_input: FrozenInput | None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "trace_id": trace_id,
+        "plan": plan.raw,
+        "snapshot": snapshot.to_public_dict() if snapshot else None,
+        "evidence_snapshot": snapshot.to_public_dict() if snapshot else None,
+        "raw_decision": raw_decision,
+        "parsed_plan": plan.raw,
+        "verdict": verdict.to_public_dict(),
+        "skill": prompt_packet.get("skill"),
+        "research": research_audit.to_public_dict() if research_audit else None,
+        "analysis": _analysis_summary(snapshot, research_audit, plan, verdict),
+        "redaction": _redaction_policy(frozen_input),
+        "frozen_input": frozen_input.to_plan_payload() if frozen_input else None,
+        "frozen_input_hash": frozen_input.frozen_input_hash if frozen_input else None,
+    }
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _snapshot_summary(snapshot: MarketSnapshot) -> dict[str, Any]:
@@ -320,7 +381,7 @@ def _analysis_summary(
         "evidence_to_claims": _evidence_to_claims(research_audit),
         "opposing_thesis": plan.why_not_opposite,
         "data_gaps": [*(snapshot.unavailable if snapshot else []), *plan.unavailable_data],
-        "risk_rule_hits": verdict.reasons,
+        "risk_rule_hits": [hit.to_public_dict() for hit in verdict.rule_hits],
     }
 
 
@@ -342,10 +403,12 @@ def _evidence_to_claims(research_audit: ResearchAudit | None) -> list[dict[str, 
     return mappings
 
 
-def _redaction_policy() -> dict[str, Any]:
+def _redaction_policy(frozen_input: FrozenInput | None = None) -> dict[str, Any]:
     return {
-        "full_prompt_saved": False,
+        "full_prompt_saved": bool(frozen_input),
         "full_completion_saved": True,
         "llm_interactions_store": "hash_summary_and_sanitized_payload",
         "hidden_reasoning_saved": False,
+        "frozen_input_saved": bool(frozen_input),
+        "frozen_input_schema_version": frozen_input.schema_version if frozen_input else None,
     }

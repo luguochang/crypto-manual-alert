@@ -53,6 +53,7 @@ def create_app(config_paths: list[str] | None = None, data_dir: str | Path | Non
         store=eval_store,
         data_dir=config.app.data_dir,
         forbidden_env_names=config.security.forbidden_env_names,
+        config=config,
     )
     app.include_router(system_router)
     app.include_router(runs_router)

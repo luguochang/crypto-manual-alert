@@ -73,6 +73,7 @@ export function RunEvalForm() {
         <select id="eval-mode" value={mode} onChange={(event) => setMode(event.target.value)}>
           <option value="cheap">cheap</option>
           <option value="judge_only_fixture">judge_only_fixture</option>
+          <option value="judge_openai">judge_openai</option>
         </select>
       </div>
       <button className="button" disabled={isRunning} type="submit">

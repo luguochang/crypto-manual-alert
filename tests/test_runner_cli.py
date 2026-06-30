@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import hashlib
 from datetime import datetime, timezone
 
 from crypto_manual_alert.cli import main
@@ -31,6 +32,62 @@ def test_runner_fixture_flow(tmp_path):
     assert any(row["span_name"] == "decision.final" and row["status"] == "ok" for row in trace_rows)
 
 
+def test_runner_persists_exact_frozen_input_sent_to_decision_engine(tmp_path):
+    config = load_config("config/default.yaml")
+    journal = Journal(tmp_path / "journal.db")
+
+    class CapturingEngine:
+        def __init__(self):
+            self.prompt_packet = None
+
+        def run(self, prompt_packet):
+            self.prompt_packet = json.loads(json.dumps(prompt_packet, ensure_ascii=False, default=str))
+            return """
+{
+  "instrument": "ETH-USDT-SWAP",
+  "main_action": "no trade",
+  "horizon": "6h",
+  "reference_price": 3500,
+  "entry_trigger": null,
+  "stop_price": null,
+  "target_1": null,
+  "target_2": null,
+  "probability": 0.51,
+  "position_size_class": "none",
+  "max_leverage": 0,
+  "risk_pct": 0,
+  "expires_in_seconds": 90,
+  "why_not_opposite": "No confirmed short setup.",
+  "invalidation": "Re-run after market structure changes.",
+  "unavailable_data": [],
+  "manual_execution_required": true
+}
+"""
+
+    engine = CapturingEngine()
+    runner = PlanRunner(config, journal, decision_engine=engine)
+
+    _plan, verdict = runner.run_once("ETH-USDT-SWAP")
+
+    assert verdict.allowed is True
+    with journal.connect() as conn:
+        row = conn.execute("SELECT payload_json FROM plan_runs").fetchone()
+        freeze_span = conn.execute("SELECT output_summary_json FROM trace_spans WHERE span_name = 'input.freeze'").fetchone()
+    payload = json.loads(row["payload_json"])
+    frozen = payload["frozen_input"]
+    expected_hash = hashlib.sha256(
+        json.dumps(engine.prompt_packet, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    assert frozen["schema_version"] == 1
+    assert frozen["kind"] == "decision_prompt_packet"
+    assert frozen["sha256"] == expected_hash
+    assert frozen["payload"] == engine.prompt_packet
+    assert payload["frozen_input_hash"] == expected_hash
+    assert payload["verdict"]["rule_hits"]
+    assert all(hit["blocking"] is False for hit in payload["verdict"]["rule_hits"])
+    assert json.loads(freeze_span["output_summary_json"])["frozen_input_hash"] == expected_hash
+
+
 def test_runner_records_failure_when_decision_engine_raises(tmp_path):
     config = load_config("config/default.yaml")
     journal = Journal(tmp_path / "journal.db")
@@ -50,6 +107,10 @@ def test_runner_records_failure_when_decision_engine_raises(tmp_path):
     assert rows
     assert rows[0]["status"] == "blocked"
     assert "model down" in rows[0]["payload_json"]
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["frozen_input_hash"]
+    assert payload["frozen_input"]["payload"]["market_snapshot"]["symbol"] == "ETH-USDT-SWAP"
+    assert any(hit["rule_id"] == "pipeline.decision_engine.error" for hit in payload["verdict"]["rule_hits"])
 
 
 def test_runner_records_notification_failure_without_changing_verdict(tmp_path):

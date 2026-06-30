@@ -73,7 +73,21 @@ export const evalCaseSchema = z
     actual_behavior: z.string(),
     summary: z.string(),
     frozen_input_hash: z.string(),
-    input_summary: z.unknown(),
+    input_summary: z.record(z.unknown()),
+    replay_result: z
+      .object({
+        status: z.string(),
+        mode: z.string(),
+        final_action: z.string().nullable().optional(),
+        allowed: z.boolean().nullable().optional(),
+        output_hash: z.string().nullable().optional(),
+        reason_summary: z.string().nullable().optional(),
+        error_message: z.string().nullable().optional(),
+        duration_ms: z.number().nullable().optional(),
+        metadata: z.record(z.unknown()).default({})
+      })
+      .passthrough()
+      .optional(),
     metadata: z.record(z.unknown()).default({})
   })
   .passthrough();
@@ -105,6 +119,7 @@ export const evalRunDetailSchema = z.object({
 });
 
 export type EvalCandidate = z.output<typeof evalCandidateSchema>;
+export type EvalCase = z.output<typeof evalCaseSchema>;
 export type EvalRunSummary = z.output<typeof evalRunSummarySchema>;
 export type EvalRunDetail = z.output<typeof evalRunDetailSchema>;
 export type EvalScore = z.output<typeof evalScoreSchema>;

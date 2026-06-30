@@ -474,6 +474,15 @@ class Journal:
             "badcases": [_badcase_row(row) for row in badcases],
         }
 
+    def get_plan_run_payload(self, plan_id: str) -> dict[str, Any] | None:
+        """内部读取完整 plan_run payload，供 eval sidecar 构建冻结输入使用。"""
+
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM plan_runs WHERE plan_id = ?", (plan_id,)).fetchone()
+        if row is None:
+            return None
+        return _plan_payload(row)
+
     def record_badcase(
         self,
         *,

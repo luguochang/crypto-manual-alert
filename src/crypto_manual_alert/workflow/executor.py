@@ -80,8 +80,4 @@ def _plan_summary(plan: DecisionPlan) -> dict[str, Any]:
 
 
 def _verdict_summary(verdict: RiskVerdict) -> dict[str, Any]:
-    return {
-        "allowed": verdict.allowed,
-        "reasons": list(verdict.reasons),
-        "warnings": list(verdict.warnings),
-    }
+    return verdict.to_public_dict()

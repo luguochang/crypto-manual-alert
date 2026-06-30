@@ -5,6 +5,55 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class EvalFrozenInput:
+    frozen_input_hash: str
+    schema_version: int
+    kind: str
+    source_trace_id: str
+    source_badcase_id: int
+    input_payload: dict[str, Any]
+    public_summary: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvalReplayOutput:
+    replay_id: str
+    case_id: str
+    source_trace_id: str
+    source_badcase_id: int
+    frozen_input_hash: str
+    status: str
+    mode: str
+    final_action: str | None = None
+    allowed: bool | None = None
+    output_hash: str | None = None
+    reason_summary: str | None = None
+    error_message: str | None = None
+    duration_ms: int | None = None
+    output_payload: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "replay_id": self.replay_id,
+            "case_id": self.case_id,
+            "source_trace_id": self.source_trace_id,
+            "source_badcase_id": self.source_badcase_id,
+            "frozen_input_hash": self.frozen_input_hash,
+            "status": self.status,
+            "mode": self.mode,
+            "final_action": self.final_action,
+            "allowed": self.allowed,
+            "output_hash": self.output_hash,
+            "reason_summary": self.reason_summary,
+            "error_message": self.error_message,
+            "duration_ms": self.duration_ms,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass(frozen=True)
 class EvalCase:
     """一次可评估样本的冻结摘要。
 

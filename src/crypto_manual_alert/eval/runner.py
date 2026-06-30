@@ -6,18 +6,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from crypto_manual_alert.config import Config
 from crypto_manual_alert.journal import Journal
 
 from .case_builder import EvalCaseBuilder
 from .errors import EvalRunError
 from .guards import assert_eval_environment_safe
-from .judges import FixtureLLMJudge, RuleJudge, build_side_effect_score
+from .judges import FixtureLLMJudge, OpenAICompatibleLLMJudge, RuleJudge, build_side_effect_score
+from .replay import ReplayRunner
 from .reports import cleanup_eval_report, write_eval_report
 from .schema import EvalRun, EvalScore
 from .store import EvalStore
 
 
-SUPPORTED_MODES = {"cheap", "judge_only_fixture"}
+SUPPORTED_MODES = {"cheap", "judge_only_fixture", "judge_openai"}
 
 
 class EvalRunner:
@@ -30,6 +32,8 @@ class EvalRunner:
         store: EvalStore,
         data_dir: str | Path | None = None,
         forbidden_env_names: list[str] | tuple[str, ...] | None = None,
+        llm_judge: Any | None = None,
+        config: Config | None = None,
     ):
         self.journal = journal
         self.store = store
@@ -37,7 +41,10 @@ class EvalRunner:
         self.forbidden_env_names = tuple(forbidden_env_names or ())
         self.case_builder = EvalCaseBuilder(journal)
         self.rule_judge = RuleJudge()
-        self.llm_judge = FixtureLLMJudge()
+        self.fixture_llm_judge = FixtureLLMJudge()
+        self.llm_judge = llm_judge
+        self.config = config
+        self.replay_runner = ReplayRunner(store)
 
     def run(
         self,
@@ -58,12 +65,19 @@ class EvalRunner:
         started_at = _now_iso()
         before = _prod_counts(self.journal.path)
         self.store.upsert_cases(cases)
+        self.store.upsert_frozen_inputs(self.case_builder.last_frozen_inputs)
 
         scores: list[EvalScore] = []
+        replay_outputs = {}
         for case in cases:
+            replay_output = self.replay_runner.replay(case)
+            replay_outputs[case.case_id] = replay_output.to_public_dict()
             scores.extend(self.rule_judge.evaluate(eval_run_id, case))
             if mode == "judge_only_fixture":
-                scores.extend(self.llm_judge.evaluate(eval_run_id, case))
+                scores.extend(self.fixture_llm_judge.evaluate(eval_run_id, case))
+            if mode == "judge_openai":
+                judge = self.llm_judge or self._build_openai_judge()
+                scores.extend(judge.evaluate(eval_run_id, case, replay_output=replay_outputs[case.case_id]))
 
         after = _prod_counts(self.journal.path)
         deltas = {table: after[table] - before[table] for table in before}
@@ -79,9 +93,13 @@ class EvalRunner:
         fail_count = len(case_failed) + (1 if guard_failed else 0)
         pass_count = max(0, len(cases) - len(case_failed))
         metadata = {
-            "judge_provider": "fixture" if mode == "judge_only_fixture" else "disabled",
+            "judge_provider": _judge_provider(mode),
             "side_effect_deltas": deltas,
             "case_ids": [case.case_id for case in cases],
+            "replay": {
+                "completed": sum(1 for output in replay_outputs.values() if output["status"] == "completed"),
+                "failed": sum(1 for output in replay_outputs.values() if output["status"] != "completed"),
+            },
         }
         run = EvalRun(
             eval_run_id=eval_run_id,
@@ -107,6 +125,11 @@ class EvalRunner:
             raise EvalRunError(f"failed to persist eval run: {type(exc).__name__}") from exc
         return run
 
+    def _build_openai_judge(self) -> OpenAICompatibleLLMJudge:
+        if self.config is None:
+            raise ValueError("judge_openai requires EvalRunner config or injected llm_judge")
+        return OpenAICompatibleLLMJudge.from_config(self.config)
+
 
 def eval_store_path(data_dir: str | Path) -> Path:
     return Path(data_dir) / "eval" / "crypto-eval.db"
@@ -116,9 +139,17 @@ def _prod_counts(db_path: str | Path) -> dict[str, int]:
     with sqlite3.connect(db_path) as conn:
         return {
             table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("plan_runs", "notifications", "manual_outcomes")
+            for table in ("plan_runs", "notifications", "manual_outcomes", "traces", "trace_spans", "llm_interactions")
         }
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _judge_provider(mode: str) -> str:
+    if mode == "judge_only_fixture":
+        return "fixture"
+    if mode == "judge_openai":
+        return "openai_compatible"
+    return "disabled"

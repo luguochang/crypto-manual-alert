@@ -28,6 +28,10 @@ def snapshot(age_seconds=0):
     )
 
 
+def rule_ids(verdict):
+    return {hit.rule_id for hit in verdict.rule_hits}
+
+
 def test_parse_valid_plan_from_json():
     raw = """
 {
@@ -197,7 +201,7 @@ def test_risk_rejects_open_without_stop():
     verdict = check_plan(plan, snapshot(), config)
 
     assert verdict.allowed is False
-    assert any("止损价" in reason for reason in verdict.reasons)
+    assert "opening.stop_price.required" in rule_ids(verdict)
 
 
 def test_risk_rejects_opening_plan_without_entry_trigger_or_invalidation():
@@ -217,8 +221,7 @@ def test_risk_rejects_opening_plan_without_entry_trigger_or_invalidation():
     verdict = check_plan(plan, snapshot(), config)
 
     assert verdict.allowed is False
-    assert any("触发价" in reason for reason in verdict.reasons)
-    assert any("失效条件" in reason for reason in verdict.reasons)
+    assert {"opening.entry_trigger.required", "opening.invalidation.required"}.issubset(rule_ids(verdict))
 
 
 def test_risk_rejects_stale_market_data():
@@ -238,7 +241,7 @@ def test_risk_rejects_stale_market_data():
     verdict = check_plan(plan, snapshot(age_seconds=999), config)
 
     assert verdict.allowed is False
-    assert any("行情数据陈旧" in reason for reason in verdict.reasons)
+    assert "market.data.stale" in rule_ids(verdict)
 
 
 def test_risk_does_not_mark_current_hour_candle_stale_by_ticker_threshold():
@@ -269,7 +272,8 @@ def test_risk_does_not_mark_current_hour_candle_stale_by_ticker_threshold():
 
     verdict = check_plan(plan, MarketSnapshot("ETH-USDT-SWAP", now, points, []), config, now=now)
 
-    assert not any("行情数据陈旧：candles" in reason for reason in verdict.reasons)
+    stale_hit = next((hit for hit in verdict.rule_hits if hit.rule_id == "market.data.stale"), None)
+    assert stale_hit is None or "candles" not in stale_hit.details["stale_points"]
 
 
 def test_risk_rejects_opening_plan_when_core_execution_facts_missing():
@@ -292,7 +296,7 @@ def test_risk_rejects_opening_plan_when_core_execution_facts_missing():
     verdict = check_plan(plan, MarketSnapshot(snap.symbol, snap.fetched_at, points, []), config)
 
     assert verdict.allowed is False
-    assert any("核心执行行情缺失" in reason for reason in verdict.reasons)
+    assert "market.core_execution.missing" in rule_ids(verdict)
 
 
 def test_risk_rejects_probability_above_confidence_cap():
@@ -320,7 +324,43 @@ def test_risk_rejects_probability_above_confidence_cap():
     verdict = check_plan(plan, snap, config)
 
     assert verdict.allowed is False
-    assert any("置信度上限" in reason for reason in verdict.reasons)
+    assert "confidence.probability.cap" in rule_ids(verdict)
+
+
+def test_risk_verdict_exposes_structured_rule_hits_for_audit():
+    raw = """
+{
+  "instrument": "ETH-USDT-SWAP",
+  "main_action": "trigger long",
+  "horizon": "6h",
+  "probability": 0.61,
+  "manual_execution_required": true,
+  "expires_in_seconds": 90
+}
+"""
+    plan = parse_decision_plan(raw)
+    config = load_config("config/default.yaml")
+    base_snapshot = snapshot()
+    snap = MarketSnapshot(
+        symbol="ETH-USDT-SWAP",
+        fetched_at=base_snapshot.fetched_at,
+        points=base_snapshot.points,
+        unavailable=["confidence_cap:0.58:liquidation heatmap unavailable"],
+    )
+
+    verdict = check_plan(plan, snap, config)
+
+    hits = {hit.rule_id: hit for hit in verdict.rule_hits}
+    assert verdict.allowed is False
+    assert hits["opening.stop_price.required"].blocking is True
+    assert hits["opening.entry_trigger.required"].severity == "critical"
+    assert hits["opening.invalidation.required"].passed is False
+    assert hits["confidence.probability.cap"].details == {
+        "configured_cap": 0.58,
+        "plan_probability": 0.61,
+        "reason": "liquidation heatmap unavailable",
+    }
+    assert all(hit.message for hit in verdict.rule_hits)
 
 
 def test_fixture_snapshot_applies_confidence_cap_for_missing_crowding_data():
@@ -342,4 +382,4 @@ def test_fixture_snapshot_applies_confidence_cap_for_missing_crowding_data():
     verdict = check_plan(plan, snap, config)
 
     assert verdict.allowed is False
-    assert any("置信度上限" in reason for reason in verdict.reasons)
+    assert "confidence.probability.cap" in rule_ids(verdict)

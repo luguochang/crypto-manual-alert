@@ -59,6 +59,8 @@ def test_eval_run_scores_cases_without_prod_side_effects(tmp_path):
     detail = detail_response.json()["data"]
     assert detail["run"]["eval_run_id"] == run_summary["eval_run_id"]
     assert detail["cases"][0]["source_badcase_id"] == badcase_id
+    assert detail["cases"][0]["frozen_input_hash"]
+    assert detail["cases"][0]["replay_result"]["status"] in {"completed", "failed"}
     judge_names = {score["judge_name"] for score in detail["scores"]}
     assert "rule.expected_no_trade" in judge_names
     assert "llm.fixture_grounding" in judge_names
@@ -293,6 +295,15 @@ def test_eval_runner_cleans_report_artifacts_when_store_insert_fails(tmp_path):
         path = tmp_path / "eval" / "crypto-eval.db"
 
         def upsert_cases(self, cases: list[Any]) -> None:
+            return None
+
+        def upsert_frozen_inputs(self, frozen_inputs: list[Any]) -> None:
+            return None
+
+        def get_frozen_input(self, frozen_input_hash: str) -> Any:
+            return None
+
+        def insert_replay_output(self, output: Any) -> None:
             return None
 
         def insert_run(self, run: Any, cases: list[Any], scores: list[Any]) -> None:
