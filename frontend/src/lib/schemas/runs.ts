@@ -25,6 +25,7 @@ export const runListSchema = z.object({
 export const traceSpanSchema = z
   .object({
     span_id: z.string(),
+    parent_span_id: z.string().nullable().optional(),
     span_name: z.string(),
     span_type: z.string(),
     status: z.string(),
@@ -34,23 +35,37 @@ export const traceSpanSchema = z
     input_summary: z.unknown().optional(),
     output_summary: z.unknown().optional(),
     error_type: z.string().nullable().optional(),
-    error_message: z.string().nullable().optional()
+    error_message: z.string().nullable().optional(),
+    metadata: z.unknown().optional()
   })
   .passthrough();
 
 export const llmInteractionSchema = z
   .object({
     id: z.number(),
+    trace_id: z.string().optional(),
+    span_id: z.string().nullable().optional(),
+    created_at: z.string().optional(),
     component: z.string(),
     provider: z.string(),
     model: z.string(),
+    endpoint: z.string().nullable().optional(),
     status: z.string(),
+    duration_ms: z.number().nullable().optional(),
+    prompt_tokens: z.number().nullable().optional(),
+    completion_tokens: z.number().nullable().optional(),
+    total_tokens: z.number().nullable().optional(),
+    cost_usd: z.number().nullable().optional(),
+    finish_reason: z.string().nullable().optional(),
+    retry_count: z.number().default(0),
     input_hash: z.string(),
     output_hash: z.string(),
     input_summary: z.unknown().optional(),
     output_summary: z.unknown().optional(),
     request_json: z.string().optional(),
     response_json: z.string().optional(),
+    error_type: z.string().nullable().optional(),
+    metadata: z.unknown().optional(),
     error_message: z.string().nullable().optional()
   })
   .passthrough();

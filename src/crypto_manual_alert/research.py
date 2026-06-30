@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import os
+import time
 from typing import Any, Protocol
 from urllib.parse import quote_plus
 
@@ -13,7 +14,8 @@ import httpx
 
 from .config import Config
 from .domain import DataPoint, MarketSnapshot
-from .observability import record_llm_interaction
+from .llm_telemetry import extract_chat_completion_telemetry, extract_responses_telemetry
+from .observability import ObservabilityRecorder, record_llm_interaction, use_observability
 
 
 CORE_MARKET_POINTS = ("last", "mark", "index", "funding_rate", "open_interest", "order_book", "candles")
@@ -245,6 +247,7 @@ class ResponsesWebSearchAdapter:
         }
         client = self.client or httpx.Client(timeout=self.timeout)
         close_client = self.client is None
+        started_perf = time.perf_counter()
         try:
             try:
                 response = client.post(
@@ -254,6 +257,7 @@ class ResponsesWebSearchAdapter:
                 )
                 response.raise_for_status()
                 data = response.json()
+                telemetry = extract_responses_telemetry(data)
                 record_llm_interaction(
                     component="research.web_search",
                     provider="openai_compatible_responses",
@@ -262,6 +266,13 @@ class ResponsesWebSearchAdapter:
                     request_payload=payload,
                     response_payload=data,
                     status="ok",
+                    duration_ms=_duration_ms(started_perf),
+                    prompt_tokens=telemetry.prompt_tokens,
+                    completion_tokens=telemetry.completion_tokens,
+                    total_tokens=telemetry.total_tokens,
+                    cost_usd=telemetry.cost_usd,
+                    finish_reason=telemetry.finish_reason,
+                    retry_count=0,
                     metadata={"query_name": query.name},
                 )
             except Exception as exc:
@@ -274,6 +285,8 @@ class ResponsesWebSearchAdapter:
                     response_payload=None,
                     status="error",
                     error=exc,
+                    duration_ms=_duration_ms(started_perf),
+                    retry_count=0,
                     metadata={"query_name": query.name},
                 )
                 raise
@@ -422,14 +435,31 @@ class FallbackLeaderResearchSynthesizer:
             )
 
 
-def execute_research(plan: ResearchPlan, adapter: SearchAdapter, max_workers: int = 4) -> ResearchAudit:
+def execute_research(
+    plan: ResearchPlan,
+    adapter: SearchAdapter,
+    max_workers: int = 4,
+    recorder: ObservabilityRecorder | None = None,
+    trace_id: str | None = None,
+    parent_span_id: str | None = None,
+) -> ResearchAudit:
     results: dict[str, list[SearchResult]] = {}
     unavailable: list[str] = []
     if not plan.queries:
         return ResearchAudit(plan=plan)
     worker_count = max(1, min(max_workers, len(plan.queries)))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        future_to_query = {executor.submit(adapter.search, query): query for query in plan.queries}
+        future_to_query = {
+            executor.submit(
+                _run_research_query,
+                query,
+                adapter,
+                recorder,
+                trace_id,
+                parent_span_id,
+            ): query
+            for query in plan.queries
+        }
         for future in as_completed(future_to_query):
             query = future_to_query[future]
             try:
@@ -442,6 +472,33 @@ def execute_research(plan: ResearchPlan, adapter: SearchAdapter, max_workers: in
             elif query.required:
                 unavailable.append(f"{query.name}: no search results")
     return ResearchAudit(plan=plan, results=dict(sorted(results.items())), unavailable=sorted(unavailable))
+
+
+def _run_research_query(
+    query: ResearchQuery,
+    adapter: SearchAdapter,
+    recorder: ObservabilityRecorder | None,
+    trace_id: str | None,
+    parent_span_id: str | None,
+) -> list[SearchResult]:
+    if recorder is None or trace_id is None:
+        return adapter.search(query)
+    with use_observability(recorder, trace_id):
+        with recorder.span(
+            trace_id,
+            "research.search.query",
+            "research.search.query",
+            input_summary={"query_name": query.name, "query": query.query, "purpose": query.purpose},
+            parent_span_id=parent_span_id,
+            metadata={"query_name": query.name, "required": query.required},
+        ) as span:
+            try:
+                results = adapter.search(query)
+            except Exception:
+                span.set_output({"query_name": query.name, "result_count": 0, "required": query.required})
+                raise
+            span.set_output({"query_name": query.name, "result_count": len(results), "required": query.required})
+            return results
 
 
 def synthesize_search_evidence(snapshot: MarketSnapshot, audit: ResearchAudit) -> MarketSnapshot:
@@ -553,6 +610,7 @@ def _post_chat_completion(
 ) -> str:
     client = injected_client or httpx.Client(timeout=timeout_seconds)
     close_client = injected_client is None
+    started_perf = time.perf_counter()
     try:
         response = client.post(
             f"{base_url}/v1/chat/completions",
@@ -561,6 +619,7 @@ def _post_chat_completion(
         )
         response.raise_for_status()
         data = response.json()
+        telemetry = extract_chat_completion_telemetry(data)
         record_llm_interaction(
             component=component,
             provider="openai_compatible",
@@ -569,6 +628,13 @@ def _post_chat_completion(
             request_payload=payload,
             response_payload=data,
             status="ok",
+            duration_ms=_duration_ms(started_perf),
+            prompt_tokens=telemetry.prompt_tokens,
+            completion_tokens=telemetry.completion_tokens,
+            total_tokens=telemetry.total_tokens,
+            cost_usd=telemetry.cost_usd,
+            finish_reason=telemetry.finish_reason,
+            retry_count=0,
         )
         return str(data["choices"][0]["message"]["content"])
     except Exception as exc:
@@ -581,6 +647,8 @@ def _post_chat_completion(
             response_payload=None,
             status="error",
             error=exc,
+            duration_ms=_duration_ms(started_perf),
+            retry_count=0,
         )
         raise
     finally:
@@ -673,6 +741,10 @@ def _responses_output_text(data: dict[str, Any]) -> str:
             if isinstance(content, dict) and content.get("type") == "output_text":
                 chunks.append(str(content.get("text") or ""))
     return "\n".join(chunk for chunk in chunks if chunk).strip()
+
+
+def _duration_ms(started_perf: float) -> int:
+    return int((time.perf_counter() - started_perf) * 1000)
 
 
 class _DuckDuckGoParser(HTMLParser):

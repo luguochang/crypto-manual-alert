@@ -92,6 +92,11 @@ def test_run_detail_can_include_sanitized_llm_payloads_for_trace_review(tmp_path
         request_payload={"messages": [{"role": "user", "content": "分析 ETH"}], "api_key": "secret"},
         response_payload={"choices": [{"message": {"content": "结论摘要"}}]},
         status="ok",
+        duration_ms=456,
+        prompt_tokens=21,
+        completion_tokens=9,
+        total_tokens=30,
+        finish_reason="stop",
     )
 
     response = client.get(f"/api/runs/{trace_id}?include_payloads=true")
@@ -102,6 +107,11 @@ def test_run_detail_can_include_sanitized_llm_payloads_for_trace_review(tmp_path
     assert interactions
     assert "request_json" in interactions[0]
     assert "response_json" in interactions[0]
+    assert interactions[0]["duration_ms"] == 456
+    assert interactions[0]["prompt_tokens"] == 21
+    assert interactions[0]["completion_tokens"] == 9
+    assert interactions[0]["total_tokens"] == 30
+    assert interactions[0]["finish_reason"] == "stop"
     rendered = str(interactions).lower()
     assert "secret" not in rendered
     assert "<redacted>" in rendered

@@ -45,7 +45,15 @@ def test_openai_compatible_engine_records_llm_interaction_when_trace_is_active(t
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": '{"instrument":"ETH-USDT-SWAP","main_action":"no trade"}'}}]},
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": '{"instrument":"ETH-USDT-SWAP","main_action":"no trade"}'},
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+            },
         )
 
     journal = Journal(tmp_path / "journal.db")
@@ -66,13 +74,25 @@ def test_openai_compatible_engine_records_llm_interaction_when_trace_is_active(t
         span_id = span.span_id
 
     with journal.connect() as conn:
-        row = conn.execute("SELECT component, model, status, span_id, request_json FROM llm_interactions").fetchone()
+        row = conn.execute(
+            """
+            SELECT component, model, status, span_id, request_json, duration_ms,
+                   prompt_tokens, completion_tokens, total_tokens, finish_reason, retry_count
+            FROM llm_interactions
+            """
+        ).fetchone()
 
     assert row["component"] == "decision.final"
     assert row["model"] == "gpt-test"
     assert row["status"] == "ok"
     assert row["span_id"] == span_id
     assert "test-key" not in row["request_json"]
+    assert row["duration_ms"] >= 0
+    assert row["prompt_tokens"] == 12
+    assert row["completion_tokens"] == 8
+    assert row["total_tokens"] == 20
+    assert row["finish_reason"] == "stop"
+    assert row["retry_count"] == 0
 
 
 def test_command_decision_engine_rejects_shell_string_commands():

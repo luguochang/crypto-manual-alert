@@ -103,6 +103,9 @@ class PlanRunner:
                             research_plan,
                             self.search_adapter,
                             max_workers=self.config.research.max_workers,
+                            recorder=recorder,
+                            trace_id=trace_id,
+                            parent_span_id=span.span_id,
                         )
                     span.set_output(
                         {

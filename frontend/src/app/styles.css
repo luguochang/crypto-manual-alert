@@ -417,7 +417,7 @@ td {
   cursor: pointer;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) repeat(auto-fit, minmax(84px, max-content));
   list-style: none;
   padding: 12px 14px;
 }
@@ -433,6 +433,7 @@ td {
 .trace-step summary span:not(:first-child) {
   color: var(--muted);
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .trace-step[open] {

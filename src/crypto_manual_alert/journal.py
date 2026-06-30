@@ -146,9 +146,29 @@ class Journal:
                     response_json TEXT NOT NULL,
                     error_type TEXT,
                     error_message TEXT,
+                    duration_ms INTEGER,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    cost_usd REAL,
+                    finish_reason TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
                     metadata_json TEXT NOT NULL
                 )
                 """
+            )
+            _ensure_columns(
+                conn,
+                "llm_interactions",
+                {
+                    "duration_ms": "INTEGER",
+                    "prompt_tokens": "INTEGER",
+                    "completion_tokens": "INTEGER",
+                    "total_tokens": "INTEGER",
+                    "cost_usd": "REAL",
+                    "finish_reason": "TEXT",
+                    "retry_count": "INTEGER NOT NULL DEFAULT 0",
+                },
             )
             conn.execute(
                 """
@@ -347,7 +367,14 @@ class Journal:
         response_json: str,
         error_type: str | None,
         error_message: str | None,
-        metadata: dict[str, Any],
+        duration_ms: int | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cost_usd: float | None = None,
+        finish_reason: str | None = None,
+        retry_count: int = 0,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -355,9 +382,11 @@ class Journal:
                 INSERT INTO llm_interactions (
                     trace_id, span_id, created_at, component, provider, model, endpoint, status,
                     input_hash, output_hash, input_summary_json, output_summary_json,
-                    request_json, response_json, error_type, error_message, metadata_json
+                    request_json, response_json, error_type, error_message,
+                    duration_ms, prompt_tokens, completion_tokens, total_tokens,
+                    cost_usd, finish_reason, retry_count, metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -376,7 +405,14 @@ class Journal:
                     response_json,
                     error_type,
                     error_message,
-                    _json(metadata),
+                    duration_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cost_usd,
+                    finish_reason,
+                    retry_count,
+                    _json(metadata or {}),
                 ),
             )
 

@@ -52,6 +52,13 @@ def record_llm_interaction(
     status: str = "ok",
     endpoint: str = "",
     error: Exception | None = None,
+    duration_ms: int | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    cost_usd: float | None = None,
+    finish_reason: str | None = None,
+    retry_count: int = 0,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     active = _active_observability.get()
@@ -67,6 +74,13 @@ def record_llm_interaction(
         status=status,
         endpoint=endpoint,
         error=error,
+        duration_ms=duration_ms,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+        finish_reason=finish_reason,
+        retry_count=retry_count,
         metadata=metadata,
     )
 
@@ -138,6 +152,7 @@ class ObservabilityRecorder:
         span_name: str,
         span_type: str,
         input_summary: Any = None,
+        parent_span_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[SpanHandle]:
         started_at = datetime.now(timezone.utc)
@@ -159,7 +174,7 @@ class ObservabilityRecorder:
             self.journal.append_trace_span(
                 span_id=handle.span_id,
                 trace_id=trace_id,
-                parent_span_id=None,
+                parent_span_id=parent_span_id,
                 span_name=span_name,
                 span_type=span_type,
                 started_at=started_at.isoformat(),
@@ -177,7 +192,7 @@ class ObservabilityRecorder:
             self.journal.append_trace_span(
                 span_id=handle.span_id,
                 trace_id=trace_id,
-                parent_span_id=None,
+                parent_span_id=parent_span_id,
                 span_name=span_name,
                 span_type=span_type,
                 started_at=started_at.isoformat(),
@@ -206,6 +221,13 @@ class ObservabilityRecorder:
         status: str = "ok",
         endpoint: str = "",
         error: Exception | None = None,
+        duration_ms: int | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cost_usd: float | None = None,
+        finish_reason: str | None = None,
+        retry_count: int = 0,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         sanitized_request = _sanitize(request_payload)
@@ -233,6 +255,13 @@ class ObservabilityRecorder:
             response_json=response_json,
             error_type=type(error).__name__ if error else None,
             error_message=str(error) if error else None,
+            duration_ms=duration_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_usd=cost_usd,
+            finish_reason=finish_reason,
+            retry_count=retry_count,
             metadata=metadata or {},
         )
 

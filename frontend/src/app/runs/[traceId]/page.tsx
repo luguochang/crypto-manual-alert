@@ -31,6 +31,20 @@ function valueText(value: unknown) {
   return formatJson(value);
 }
 
+function metricText(value: number | null | undefined, suffix = "") {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  return `${value}${suffix}`;
+}
+
+function moneyText(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "未知";
+  }
+  return `$${value.toFixed(6)}`;
+}
+
 export default async function TraceDetailPage({ params }: TraceDetailPageProps) {
   const { traceId } = await params;
   const result = await getRunDetail(traceId, { includePayloads: true });
@@ -61,6 +75,11 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
   const spans = detail.spans ?? [];
   const llmInteractions = detail.llm_interactions ?? [];
   const badcases = detail.badcases ?? [];
+  const totalKnownTokens = llmInteractions.reduce((sum, item) => sum + (item.total_tokens ?? 0), 0);
+  const missingTokenCount = llmInteractions.filter((item) => item.total_tokens == null).length;
+  const totalKnownCost = llmInteractions.reduce((sum, item) => sum + (item.cost_usd ?? 0), 0);
+  const missingCostCount = llmInteractions.filter((item) => item.cost_usd == null).length;
+  const knownCostCount = llmInteractions.length - missingCostCount;
 
   return (
     <>
@@ -211,14 +230,62 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
           </p>
         ) : (
           <div className="timeline-list">
-            {llmInteractions.map((item) => (
-              <details className="trace-step" key={item.id} open>
+            <dl className="detail-list compact-list">
+              <div>
+                <dt>已知 Tokens</dt>
+                <dd>
+                  {totalKnownTokens}
+                  {missingTokenCount > 0 ? `（${missingTokenCount} 条未返回 usage）` : ""}
+                </dd>
+              </div>
+              <div>
+                <dt>已知成本</dt>
+                <dd>
+                  {knownCostCount > 0 ? moneyText(totalKnownCost) : "未知"}
+                  {missingCostCount > 0 ? `（${missingCostCount} 条未配置价格）` : ""}
+                </dd>
+              </div>
+            </dl>
+            {llmInteractions.map((item, index) => (
+              <details className="trace-step" key={item.id} open={index === 0 || item.status !== "ok"}>
                 <summary>
-                  <span>{item.component}</span>
+                  <span>#{item.id} {item.component}</span>
                   <span>{item.provider} / {item.model}</span>
                   <span>{item.status}</span>
+                  <span>{metricText(item.duration_ms, " ms")}</span>
+                  <span>{metricText(item.total_tokens, " tok")}</span>
                 </summary>
                 <dl className="detail-list compact-list">
+                  <div>
+                    <dt>Span</dt>
+                    <dd>{shortHash(item.span_id ?? undefined)}</dd>
+                  </div>
+                  <div>
+                    <dt>Endpoint</dt>
+                    <dd>{item.endpoint ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>创建时间</dt>
+                    <dd>{item.created_at ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Finish</dt>
+                    <dd>{item.finish_reason ?? "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Retry</dt>
+                    <dd>{item.retry_count ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Prompt / Completion</dt>
+                    <dd>
+                      {metricText(item.prompt_tokens)} / {metricText(item.completion_tokens)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>成本</dt>
+                    <dd>{moneyText(item.cost_usd)}</dd>
+                  </div>
                   <div>
                     <dt>输入 Hash</dt>
                     <dd>{shortHash(item.input_hash)}</dd>
@@ -236,6 +303,10 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
                   <div>
                     <h3>返回摘要</h3>
                     <pre className="code-box">{formatJson(item.output_summary)}</pre>
+                  </div>
+                  <div>
+                    <h3>Metadata</h3>
+                    <pre className="code-box">{formatJson(item.metadata ?? {})}</pre>
                   </div>
                   <div>
                     <h3>脱敏请求 Payload</h3>

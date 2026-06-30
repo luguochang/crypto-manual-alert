@@ -1,10 +1,13 @@
 from datetime import datetime, timezone
+import threading
 import time
 
 import httpx
 
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.domain import DataPoint, MarketSnapshot
+from crypto_manual_alert.journal import Journal
+from crypto_manual_alert.observability import ObservabilityRecorder, record_llm_interaction, use_observability
 from crypto_manual_alert.research import (
     FixtureSearchAdapter,
     OpenAICompatibleLeaderResearchSynthesizer,
@@ -142,19 +145,117 @@ def test_execute_research_with_fixture_adapter_returns_search_results():
 
 
 def test_execute_research_runs_queries_concurrently():
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
     class SlowAdapter:
         def search(self, query):
-            time.sleep(0.2)
-            return [SearchResult(title=query.name, url="https://example.test", snippet="ok")]
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.3)
+            try:
+                return [SearchResult(title=query.name, url="https://example.test", snippet="ok")]
+            finally:
+                with lock:
+                    active -= 1
 
     plan = StaticResearchPlanner(max_queries=3).plan(timeout_snapshot())
-    started = time.perf_counter()
 
     audit = execute_research(plan, SlowAdapter(), max_workers=3)
 
-    elapsed = time.perf_counter() - started
-    assert elapsed < 0.45
+    assert max_active > 1
     assert not audit.unavailable
+
+
+def test_execute_research_records_query_level_spans_without_serializing_work(tmp_path):
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    class SlowAdapter:
+        def search(self, query):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.3)
+            try:
+                return [SearchResult(title=query.name, url="https://example.test", snippet="ok")]
+            finally:
+                with lock:
+                    active -= 1
+
+    journal = Journal(tmp_path / "journal.db")
+    recorder = ObservabilityRecorder(journal)
+    trace_id = recorder.start_trace(run_type="manual", symbol="ETH-USDT-SWAP")
+    plan = StaticResearchPlanner(max_queries=3).plan(timeout_snapshot())
+
+    audit = execute_research(plan, SlowAdapter(), max_workers=3, recorder=recorder, trace_id=trace_id)
+
+    with journal.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT span_name, duration_ms, status, metadata_json, output_summary_json
+            FROM trace_spans
+            WHERE trace_id = ?
+            ORDER BY started_at ASC
+            """,
+            (trace_id,),
+        ).fetchall()
+
+    assert max_active > 1
+    assert not audit.unavailable
+    assert [row["span_name"] for row in rows] == ["research.search.query"] * 3
+    assert {__import__("json").loads(row["metadata_json"])["query_name"] for row in rows} == {
+        query.name for query in plan.queries
+    }
+    assert all(__import__("json").loads(row["output_summary_json"])["result_count"] == 1 for row in rows)
+
+
+def test_execute_research_links_threaded_llm_calls_to_query_span(tmp_path):
+    class RecordingAdapter:
+        def search(self, query):
+            record_llm_interaction(
+                component="research.web_search",
+                provider="test",
+                model="fixture",
+                endpoint="/v1/responses",
+                request_payload={"input": query.query},
+                response_payload={
+                    "usage": {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12},
+                    "output": [{"content": [{"type": "output_text", "text": "ok"}]}],
+                },
+                status="ok",
+                duration_ms=25,
+                prompt_tokens=5,
+                completion_tokens=7,
+                total_tokens=12,
+            )
+            return [SearchResult(title=query.name, url="https://example.test", snippet="ok")]
+
+    journal = Journal(tmp_path / "journal.db")
+    recorder = ObservabilityRecorder(journal)
+    trace_id = recorder.start_trace(run_type="manual", symbol="ETH-USDT-SWAP")
+    plan = StaticResearchPlanner(max_queries=1).plan(timeout_snapshot())
+
+    execute_research(plan, RecordingAdapter(), max_workers=1, recorder=recorder, trace_id=trace_id)
+
+    with journal.connect() as conn:
+        span = conn.execute("SELECT span_id FROM trace_spans WHERE trace_id = ?", (trace_id,)).fetchone()
+        llm = conn.execute(
+            "SELECT span_id, component, prompt_tokens, completion_tokens, total_tokens FROM llm_interactions WHERE trace_id = ?",
+            (trace_id,),
+        ).fetchone()
+
+    assert span is not None
+    assert llm["component"] == "research.web_search"
+    assert llm["span_id"] == span["span_id"]
+    assert llm["prompt_tokens"] == 5
+    assert llm["completion_tokens"] == 7
+    assert llm["total_tokens"] == 12
 
 
 def test_static_leader_synthesizer_outputs_four_role_summary():
@@ -288,7 +389,7 @@ def test_research_config_defaults_disabled():
     assert config.research.search_provider == "disabled"
 
 
-def test_responses_web_search_adapter_posts_web_search_tool(monkeypatch):
+def test_responses_web_search_adapter_posts_web_search_tool(monkeypatch, tmp_path):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -299,6 +400,7 @@ def test_responses_web_search_adapter_posts_web_search_tool(monkeypatch):
         return httpx.Response(
             200,
             json={
+                "usage": {"input_tokens": 13, "output_tokens": 17, "total_tokens": 30},
                 "tool_usage": {"web_search": {"num_requests": 1}},
                 "output": [
                     {
@@ -337,14 +439,23 @@ def test_responses_web_search_adapter_posts_web_search_tool(monkeypatch):
     )
     client = httpx.Client(transport=httpx.MockTransport(handler))
     adapter = ResponsesWebSearchAdapter(config, client=client)
+    journal = Journal(tmp_path / "journal.db")
+    recorder = ObservabilityRecorder(journal)
+    trace_id = recorder.start_trace(run_type="manual", symbol="ETH-USDT-SWAP")
 
-    results = adapter.search(
-        ResearchQuery(
-            name="eth_price_context",
-            query="ETH latest market headline",
-            purpose="test",
+    with use_observability(recorder, trace_id):
+        results = adapter.search(
+            ResearchQuery(
+                name="eth_price_context",
+                query="ETH latest market headline",
+                purpose="test",
+            )
         )
-    )
+    with journal.connect() as conn:
+        row = conn.execute(
+            "SELECT prompt_tokens, completion_tokens, total_tokens, duration_ms FROM llm_interactions WHERE trace_id = ?",
+            (trace_id,),
+        ).fetchone()
 
     assert captured["url"] == "https://example.test/v1/responses"
     assert captured["authorization"] == "Bearer test-key"
@@ -353,6 +464,10 @@ def test_responses_web_search_adapter_posts_web_search_tool(monkeypatch):
     assert "简体中文" in captured["payload"]["input"]
     assert results[0].source == "responses-web-search"
     assert "web_search_requests=1" in results[0].snippet
+    assert row["prompt_tokens"] == 13
+    assert row["completion_tokens"] == 17
+    assert row["total_tokens"] == 30
+    assert row["duration_ms"] >= 0
 
 
 def test_research_llm_components_use_research_request_timeout(monkeypatch):

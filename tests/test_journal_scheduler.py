@@ -62,6 +62,13 @@ def test_observability_records_trace_span_and_llm_interaction(tmp_path):
         request_payload={"messages": [{"role": "user", "content": "分析 ETH"}], "api_key": "secret"},
         response_payload={"choices": [{"message": {"content": "结论摘要"}}]},
         status="ok",
+        duration_ms=321,
+        prompt_tokens=11,
+        completion_tokens=7,
+        total_tokens=18,
+        cost_usd=0.001,
+        finish_reason="stop",
+        retry_count=2,
     )
     recorder.finish_trace(trace_id, status="ok", final_action="no trade", allowed=True)
 
@@ -79,6 +86,57 @@ def test_observability_records_trace_span_and_llm_interaction(tmp_path):
     assert "secret" not in llm["request_json"]
     assert llm["input_hash"]
     assert llm["output_hash"]
+    assert llm["duration_ms"] == 321
+    assert llm["prompt_tokens"] == 11
+    assert llm["completion_tokens"] == 7
+    assert llm["total_tokens"] == 18
+    assert llm["cost_usd"] == 0.001
+    assert llm["finish_reason"] == "stop"
+    assert llm["retry_count"] == 2
+
+
+def test_journal_migrates_existing_llm_interaction_table(tmp_path):
+    db_path = tmp_path / "journal.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE llm_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            span_id TEXT,
+            created_at TEXT NOT NULL,
+            component TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            endpoint TEXT,
+            status TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            output_hash TEXT NOT NULL,
+            input_summary_json TEXT NOT NULL,
+            output_summary_json TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            error_type TEXT,
+            error_message TEXT,
+            metadata_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    Journal(db_path)
+
+    with sqlite3.connect(db_path) as migrated:
+        columns = {row[1] for row in migrated.execute("PRAGMA table_info(llm_interactions)").fetchall()}
+
+    assert "duration_ms" in columns
+    assert "prompt_tokens" in columns
+    assert "completion_tokens" in columns
+    assert "total_tokens" in columns
+    assert "finish_reason" in columns
+    assert "retry_count" in columns
+    assert "cost_usd" in columns
 
 
 def test_journal_can_query_trace_detail_and_record_badcase(tmp_path):

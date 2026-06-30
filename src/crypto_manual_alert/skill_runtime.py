@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import httpx
 
 from .config import Config
 from .domain import ALLOWED_ACTIONS, MarketSnapshot
+from .llm_telemetry import extract_chat_completion_telemetry
 from .observability import record_llm_interaction
 
 
@@ -211,6 +213,7 @@ class OpenAICompatibleDecisionEngine(DecisionEngine):
         }
         client = self.client or httpx.Client(timeout=self.timeout_seconds)
         close_client = self.client is None
+        started_perf = time.perf_counter()
         try:
             response = client.post(
                 f"{self.base_url}/v1/chat/completions",
@@ -219,6 +222,7 @@ class OpenAICompatibleDecisionEngine(DecisionEngine):
             )
             response.raise_for_status()
             data = response.json()
+            telemetry = extract_chat_completion_telemetry(data)
             record_llm_interaction(
                 component="decision.final",
                 provider="openai_compatible",
@@ -227,6 +231,13 @@ class OpenAICompatibleDecisionEngine(DecisionEngine):
                 request_payload=payload,
                 response_payload=data,
                 status="ok",
+                duration_ms=_duration_ms(started_perf),
+                prompt_tokens=telemetry.prompt_tokens,
+                completion_tokens=telemetry.completion_tokens,
+                total_tokens=telemetry.total_tokens,
+                cost_usd=telemetry.cost_usd,
+                finish_reason=telemetry.finish_reason,
+                retry_count=0,
             )
             return data["choices"][0]["message"]["content"]
         except Exception as exc:
@@ -239,6 +250,8 @@ class OpenAICompatibleDecisionEngine(DecisionEngine):
                 response_payload=None,
                 status="error",
                 error=exc,
+                duration_ms=_duration_ms(started_perf),
+                retry_count=0,
             )
             raise
         finally:
@@ -279,3 +292,7 @@ def _compact_text(text: str, max_chars: int) -> str:
     head = max_chars // 2
     tail = max_chars - head - 80
     return f"{text[:head]}\n\n...[compact excerpt; middle omitted for runtime cost]...\n\n{text[-tail:]}"
+
+
+def _duration_ms(started_perf: float) -> int:
+    return int((time.perf_counter() - started_perf) * 1000)
