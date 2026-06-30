@@ -259,7 +259,162 @@ FinalDecisionAgent 只能消费 `DecisionInput`，不能访问工具、原始网
 }
 ```
 
-## 6. Agent 分层设计
+## 6. 记忆机制与事实隔离
+
+记忆机制需要做，但不能照搬医疗助手的双层记忆。加密货币趋势预测的实时性和资金风险更高，记忆设计必须服务上下文连续性，而不能污染 live decision。
+
+### 6.1 设计结论
+
+当前建议：
+
+```text
+短期结构化记忆：必须做
+长期过程记忆：谨慎做
+Mem0 云向量记忆：不进入首版
+历史市场事实：禁止默认回灌 live decision
+```
+
+原因：
+
+- 用户会连续追问，例如“那现在怎么办”“ETH 还拿吗”“刚才那个触发了吗”，系统必须理解上下文。
+- 用户持仓、风险偏好、关注资产和操作周期需要在会话内稳定传递给所有 Agent。
+- 但交易判断必须基于当前事实，旧价格、旧 funding、旧 OI、旧 ETF 流、旧新闻状态和旧交易结论不能作为当前证据。
+- 长期记忆可以保存用户偏好和过程教训，不能保存并召回历史行情作为实时依据。
+
+### 6.2 短期记忆
+
+短期记忆由 `SessionMemoryManager` 管理，写入 `DecisionRunContext`，供 `IntentClassifier`、`SlotFiller`、`LeadAgent` 和 `FinalDecisionAgent` 使用。
+
+短期记忆保存：
+
+- 当前会话最近消息窗口。
+- 当前用户持仓槽位：side、entry、leverage、liquidation、stop、target。
+- 当前关注资产和周期。
+- 上一次系统给出的 trigger、invalidation、next_review_at。
+- 本轮和上一轮明确缺失的事实。
+- 用户明确偏好，例如更关注短线、只做 BTC、禁止高杠杆。
+
+短期记忆不保存为当前事实：
+
+- 上一次价格。
+- 上一次 funding/OI。
+- 上一次 ETF 流。
+- 上一次新闻状态。
+- 上一次宏观数据状态。
+- 上一次模型结论。
+
+短期记忆建议 schema：
+
+```json
+{
+  "session_id": "string",
+  "recent_messages": [],
+  "conversation_summary": "string",
+  "position_slots": {
+    "symbol": "ETH-USDT-SWAP",
+    "side": "long | short | flat | unknown",
+    "entry_price": null,
+    "leverage": null,
+    "stop_price": null,
+    "target": null,
+    "updated_at": "ISO-8601",
+    "source": "user_stated | inferred | unknown"
+  },
+  "user_preferences": {
+    "default_assets": ["BTC", "ETH", "SOL"],
+    "risk_style": "conservative | normal | aggressive | unknown",
+    "preferred_horizon": "1h | 4h | 1d | unknown"
+  },
+  "last_plan_summary": {
+    "main_action": "trigger long",
+    "trigger": null,
+    "invalidation": "string",
+    "next_review_at": "ISO-8601",
+    "expired": true
+  },
+  "memory_warnings": [
+    "last_plan_summary is context only, not live market evidence"
+  ]
+}
+```
+
+短期记忆压缩：
+
+- 可以对重复消息做 hash 去重。
+- 可以把早期对话压缩成结构化摘要。
+- 最近消息窗口不建议固定只取最近 5 轮，而应使用“最近窗口 + 结构化槽位 + 当前任务摘要”。
+- 压缩不能丢失持仓、杠杆、止损、时间周期和用户显式约束。
+
+### 6.3 长期记忆
+
+长期记忆只做低权重过程记忆，不做实时事实记忆。
+
+允许保存：
+
+- 用户偏好。
+- 关注资产。
+- 常用周期。
+- 风险偏好。
+- 过程教训，例如“不要用单一 ETF 流支撑方向”。
+- badcase 标签和失败类型。
+- 用户明确要求保留的策略约束。
+
+禁止作为 live decision 证据：
+
+- 历史价格。
+- 历史资金费率。
+- 历史 OI。
+- 历史 ETF 流。
+- 历史新闻状态。
+- 历史模型预测。
+- 历史交易盈亏。
+
+长期记忆读取必须经过 `MemoryFirewall`：
+
+```text
+long_term_memory
+  -> MemoryFirewall
+  -> allowed: user preference / process lesson / badcase tag
+  -> blocked: old market fact / old decision / old price / old flow / old news
+```
+
+### 6.4 Mem0 与向量记忆
+
+首版不建议引入 Mem0 云服务。
+
+原因：
+
+- 用户持仓、风险偏好和策略记录具有隐私敏感性。
+- 向量召回容易把旧市场事实以相似案例形式带回 live decision。
+- 云服务增加数据治理、删除、审计和成本复杂度。
+- 当前项目更需要结构化 memory 和事实防火墙，而不是相似案例召回。
+
+如果未来引入向量记忆，必须满足：
+
+- 默认本地或可完全关闭。
+- 只存用户偏好、过程教训、badcase 标签。
+- 每条召回结果必须标注 `memory_type`。
+- `market_fact` 类型禁止进入 live `EvidencePacket`。
+- 召回只能作为 `context` 或 `lesson`，不能作为 `known_fact`。
+
+### 6.5 与 Agent 编排的关系
+
+记忆只进入以下位置：
+
+- `IntentClassifier`：理解用户追问。
+- `SlotFiller`：补全用户持仓、周期和偏好。
+- `LeadAgent`：理解本轮任务和用户约束。
+- `FinalDecisionAgent`：知道用户当前持仓上下文，但不能把记忆当市场事实。
+
+记忆不能进入：
+
+- `LiveFactSkill` 的事实结果。
+- `FactsGate` 的 fresh evidence。
+- `RootCauseSkill` 的 `known_fact`。
+- `SentimentCrowdingSkill` 的实时拥挤判断。
+- `RiskGate` 的行情依据。
+
+## 7. Agent 分层设计
 
 | Agent | 职责 | 输入 | 输出 | 能否调用工具 | 能否给最终动作 |
 |---|---|---|---|---:|---:|
@@ -279,7 +434,7 @@ FinalDecisionAgent 只能消费 `DecisionInput`，不能访问工具、原始网
 | `ExecutionRiskReviewer` | entry/stop/target/RR/滑点/事件 | decision input draft | ReviewContribution | 否 | 否 |
 | `FinalDecisionAgent` | 生成唯一 strict JSON DecisionPlan | DecisionInput | DecisionPlan raw JSON | 否 | 是，且必须过 gate |
 
-## 7. Skill 拆分设计
+## 8. Skill 拆分设计
 
 | Skill | 职责 | 输入 | 输出 | 工具权限 |
 |---|---|---|---|---|
@@ -316,7 +471,7 @@ Skill 不应该：
 - 直接产生副作用
 - 动态发现未知脚本
 
-## 8. LiveFactSkill / NewsSearchSkill / SourcePriorityPolicy
+## 9. LiveFactSkill / NewsSearchSkill / SourcePriorityPolicy
 
 ### 8.1 LiveFactSkill
 
@@ -418,7 +573,7 @@ Skill 不应该：
 - 地缘新闻冲突时标为 `unconfirmed scenario`。
 - ETF flows 必须看 total，不允许只看单一基金。
 
-## 9. RootCauseSkill
+## 10. RootCauseSkill
 
 ### 9.1 定位
 
@@ -502,7 +657,7 @@ market interpretation / crowding distortion
 - 最大可能路径必须有 price/event/derivatives/time 四类证伪条件。
 - RootCauseSkill 禁止输出最终交易 enum。
 
-## 10. SentimentCrowdingSkill
+## 11. SentimentCrowdingSkill
 
 ### 10.1 定位
 
@@ -608,7 +763,7 @@ ETF 总流入
 - 多源衍生品冲突时输出 `conflict` 并触发 cap。
 - 重大宏观事件或期权到期附近，options/gamma/liquidation 缺失必须降级。
 
-## 11. Reviewer 设计
+## 12. Reviewer 设计
 
 Reviewer 不是角色扮演，而是独立审查贡献。
 
@@ -628,7 +783,7 @@ Reviewer 不是角色扮演，而是独立审查贡献。
 - required reviewer 失败会触发 hard block 或 confidence cap。
 - optional reviewer 失败只写 unavailable。
 
-## 12. LeadAgent 设计
+## 13. LeadAgent 设计
 
 LeadAgent 是中心协调者，但不是交易决策者。
 
@@ -650,7 +805,7 @@ LeadAgent 不做：
 - 不修改生产规则。
 - 不把历史结论当当前事实。
 
-## 13. FinalDecisionAgent 设计
+## 14. FinalDecisionAgent 设计
 
 FinalDecisionAgent 只消费 `DecisionInput`，输出 strict JSON `DecisionPlan`。
 
@@ -681,7 +836,7 @@ trigger short
 no trade
 ```
 
-## 14. 执行模式
+## 15. 执行模式
 
 ### 14.1 simple_fast
 
@@ -775,7 +930,205 @@ complete fact pack
 - 重大事件 6-24h 内优先 trigger/hold-to-near-target。
 - 最终仍只允许一个 `main_action`。
 
-## 15. 代码 Gate
+## 16. Harness Engineering 约束系统
+
+Harness 系统是多 Agent 编排的基础设施，优先级高于“记忆系统”。它负责把 Agent 能力边界、工具权限、输出 schema、timeout、retry、fallback、自动修复和阻断策略显式化。
+
+### 16.1 设计结论
+
+必须做 Harness/YAML 约束系统。
+
+原因：
+
+- 当前项目最大风险不是“Agent 不够多”，而是“Agent 输出质量不可控、边界不清、事实和推理混在一起”。
+- 如果没有显式约束，多 Agent 最终会退化成 prompt 堆叠。
+- Harness 可以让每个 Agent 的能力、输入、输出、工具权限和失败策略在运行时被验证。
+
+### 16.2 配置边界
+
+适合 YAML 配置：
+
+- Agent 名称和启用模式。
+- 每个 Agent 的 tool policy。
+- 每个 Agent 的 input/output schema 名称。
+- timeout、retry、required/optional。
+- run mode 下启用哪些 Agent。
+- confidence cap 规则参数。
+- source freshness 阈值。
+- reviewer 是否 compact 或 independent。
+- 自动修复允许范围。
+
+必须代码硬编码：
+
+- 禁止自动下单、撤单、提现。
+- `manual_execution_required=true`。
+- `search-derived` 不能满足 mark/index/order_book。
+- FinalDecisionAgent 不能调用工具。
+- eval/replay 不发 Bark。
+- action enum 唯一性。
+- JSON schema 和字段类型。
+- 风控 hard block。
+- secret 环境变量禁止读取。
+
+### 16.3 YAML 示例
+
+```yaml
+agents:
+  RootCauseAgent:
+    required: true
+    can_call_tools: false
+    input_schema: RootCauseRequest
+    output_schema: CausalEvidenceGraph
+    timeout_seconds:
+      simple_fast: 0
+      standard: 90
+      deep_research: 300
+    failure_policy: confidence_cap
+    allowed_claim_types:
+      - known_fact
+      - consensus
+      - inference
+      - scenario
+      - rumor
+    forbidden_outputs:
+      - main_action
+      - risk_verdict
+
+  SentimentCrowdingAgent:
+    required: true
+    can_call_tools: false
+    input_schema: SentimentCrowdingRequest
+    output_schema: SentimentCrowdingContribution
+    timeout_seconds:
+      simple_fast: 45
+      standard: 90
+      deep_research: 180
+    failure_policy: soft_downgrade
+
+  FinalDecisionAgent:
+    required: true
+    can_call_tools: false
+    input_schema: DecisionInput
+    output_schema: DecisionPlan
+    timeout_seconds:
+      simple_fast: 90
+      standard: 180
+      deep_research: 240
+    allowed_actions:
+      - open long
+      - open short
+      - hold long
+      - hold short
+      - close long
+      - close short
+      - flip long to short
+      - flip short to long
+      - trigger long
+      - trigger short
+      - no trade
+
+facts:
+  execution_facts:
+    mark:
+      required_for:
+        - open long
+        - open short
+        - flip long to short
+        - flip short to long
+      acceptable_source_types:
+        - exchange_native
+      can_be_satisfied_by_search: false
+      max_age_seconds: 120
+    order_book:
+      required_for:
+        - open long
+        - open short
+      acceptable_source_types:
+        - exchange_native
+      can_be_satisfied_by_search: false
+
+repair:
+  allowed:
+    - strip_markdown_fence
+    - parse_json_object_from_text
+    - normalize_action_enum_case
+    - coerce_numeric_string
+    - fill_optional_empty_arrays
+  forbidden:
+    - invent_missing_fact
+    - choose_between_two_main_actions
+    - convert_search_derived_to_exchange_native
+    - remove_hard_block_reason
+```
+
+### 16.4 Runtime Validator
+
+每个 Agent 执行前后都要过 Harness 校验。
+
+执行前：
+
+- 校验 Agent 是否在当前 run mode 启用。
+- 校验是否拥有工具权限。
+- 校验 input schema。
+- 校验 required facts 是否已满足。
+- 校验 timeout/deadline。
+
+执行后：
+
+- 校验 output schema。
+- 校验 forbidden outputs。
+- 校验 claim 是否绑定 evidence。
+- 校验 source type 是否满足要求。
+- 校验 missing/stale/conflict 是否显式输出。
+- 校验 confidence cap 和 blocked actions 是否一致。
+
+### 16.5 自动修复机制
+
+自动修复只允许修格式，不允许修语义。
+
+允许自动修复：
+
+- 去掉 markdown code fence。
+- 从文本中提取唯一 JSON object。
+- 字段名别名映射。
+- enum 大小写/空格规范化。
+- 数字字符串转数字。
+- 缺省可为空字段补空数组。
+
+禁止自动修复：
+
+- LLM 输出两个 `main_action` 时替它选择一个。
+- 缺核心执行事实却建议开仓时替它补事实。
+- 把 `search-derived` 改成 `exchange-native`。
+- 删除 hard block reason。
+- 根据历史记忆补当前行情。
+- 根据模型解释生成缺失来源。
+
+不能修复时：
+
+```text
+repair failed
+  -> retry once with structured error
+  -> still failed: mark agent failed/partial
+  -> required agent failure: hard block or confidence cap
+  -> optional agent failure: unavailable
+```
+
+### 16.6 与现有 Gate 的关系
+
+Harness 不替代代码 Gate。
+
+```text
+HarnessValidator
+  -> 保证 Agent 输入输出和权限正确
+
+FactsGate / ParserGate / PlanSemanticGate / RiskGate
+  -> 保证业务事实、动作、语义和风控正确
+```
+
+Harness 更靠近编排层，Gate 更靠近业务安全层。
+
+## 17. 代码 Gate
 
 以下必须由代码强制，不能交给 LLM：
 
@@ -810,7 +1163,7 @@ LLM 可以判断但必须结构化输出并被 gate 约束：
 - 为什么不用相反方向。
 - 哪些证据会改变动作。
 
-## 16. Trace / Eval / FrozenInput
+## 18. Trace / Eval / FrozenInput
 
 每个 step、tool、agent、reviewer 都要有独立 trace span：
 
@@ -866,7 +1219,7 @@ Eval 不评：
 - 是否应该绕过 RiskGate。
 - 是否自动发布候选。
 
-## 17. 迁移阶段
+## 19. 迁移阶段
 
 ### P0：设计冻结
 
@@ -876,6 +1229,8 @@ Eval 不评：
 - 明确 schema。
 - 明确 gate 优先级。
 - 明确 simple_fast / standard / deep_research。
+- 明确 memory firewall。
+- 明确 Harness/YAML 约束边界。
 
 验收：
 
@@ -889,6 +1244,7 @@ Eval 不评：
 - 新增 `EvidencePacket`。
 - 新增 `AgentContribution`。
 - 新增 `DecisionInput`。
+- 新增 `SessionMemorySnapshot`。
 - `RunExecutor` 创建 context。
 
 验收：
@@ -896,6 +1252,8 @@ Eval 不评：
 - 主入口不再只传 symbol。
 - 一轮运行有唯一 context。
 - research/reviewer 输出可以记录为 contribution。
+- 用户追问可以通过结构化短期记忆补全上下文。
+- 旧市场事实不会进入 EvidencePacket。
 
 ### P2：LiveFact 与 FactsGate
 
@@ -918,12 +1276,15 @@ Eval 不评：
 - 实现 LeadAgent planning/synthesis。
 - worker agent 并发执行。
 - reviewer 独立 span/status/timeout。
+- 实现 HarnessPolicyLoader。
+- 实现 Agent 前后置 HarnessValidator。
 
 验收：
 
 - 单个 reviewer 失败不会伪装成功。
 - LeadAgent 能标记缺失 reviewer。
 - contribution 可回放。
+- Agent 工具权限和输出 schema 可被 runtime 校验。
 
 ### P4：RootCause 与 SentimentCrowding
 
@@ -964,7 +1325,21 @@ Eval 不评：
 - eval/replay 无 Bark。
 - badcase 不污染 live decision。
 
-## 18. 待确认问题
+### P7：长期记忆与候选治理
+
+内容：
+
+- 实现长期过程记忆。
+- 保存用户偏好、过程教训、badcase 标签。
+- 如需向量记忆，先做本地可关闭方案。
+
+验收：
+
+- 长期记忆不能生成 live `known_fact`。
+- 旧行情、旧资金费率、旧新闻不能进入实时证据。
+- badcase 只能进入 eval/candidate，不进入 live prompt。
+
+## 20. 待确认问题
 
 - `DecisionRunContext` 字段是否按模块拆分，避免成为新的大杂烩对象。
 - RootCauseSkill 默认最大深度是否为 4，deep_research 是否允许提高到 5。
@@ -976,8 +1351,12 @@ Eval 不评：
 - deep_research 最大运行时间是否接受 1800 秒。
 - FinalDecisionAgent 的 prompt/version 是否独立于 skill version。
 - 是否需要将 `SourcePriorityPolicy` 写入 YAML，还是先硬编码。
+- 短期记忆窗口大小是否按 token budget 动态调整。
+- 长期记忆是否首版只做 SQLite，不接 Mem0。
+- Harness YAML 首版覆盖 Agent 权限和 schema，还是同时覆盖 run mode 策略。
+- 自动修复失败后 retry 次数是否固定为 1。
 
-## 19. 当前结论
+## 21. 当前结论
 
 本项目的核心价值不是“写一个 skill 给 Codex 调”，而是把交易判断拆成可控链路：
 
