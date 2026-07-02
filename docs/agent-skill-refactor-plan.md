@@ -1,5 +1,7 @@
 # Agent-Skill 重构实施计划
 
+> 状态：本文件是早期草案，已被 `docs/formal/29-Agent与Skill拆分详细设计.md` 和 `docs/formal/30-受控AgentSwarm-MVP实施契约.md` 取代。后续实现以 29/30 为准。本文件中关于直接切换 `decision.engine=agent_skill` 或默认生产路径的描述不得作为当前执行依据。
+
 ## 目标
 
 把当前项目从“服务层直接抓行情再调用模型”的批处理结构，重构为“Agent 编排 Skill”的结构。
@@ -525,24 +527,24 @@ security:
 - 如果 provider disabled，必须明确写入 `web_search_disabled`。
 - 不允许把 search-derived 数据伪装成 exchange-native。
 
-### Phase 7: 切换默认路径并清理 legacy
+### Phase 7: Release gate 与人工发布决策
 
-目标：生产默认使用 agent-skill。
+目标：候选链路只能在 release gate、人工发布决策和配置变更审查都通过后，进入受控实验；不得直接把生产默认路径切到 agent-skill。
 
 动作：
 
-- `config/prod.yaml` 切到 `decision.engine=agent_skill`。
-- 文档更新为 agent-skill 流程。
-- `market_data.provider` 标为 legacy。
-- 旧 `PlanRunner` 保留一段时间后再删除。
+- 跑候选链路 eval/replay，并生成 release gate 报告。
+- 准备 `manual_approval`、`rollback_plan`、`impact_scope`、`shadow_candidate_comparison`。
+- 如需继续推进，再准备 `manual_release_decision`，进入单独的配置变更审查。
+- 保持 `Config` 和 `FinalInputSelector` 对生产 `DecisionInput` 的默认硬锁，直到新的正式契约明确放开。
+- 旧 `PlanRunner` 继续作为 legacy 兼容步骤，不得误称为生产级 Agent Swarm。
 
 验收：
 
-- `pytest -q` 通过。
-- `crypto-alert show-config` 通过。
-- fixture 模式通过。
-- 本地真实 LLM + Bark 可跑完整链路。
-- 海外服务器再测 OKX 真实 public API。
+- release gate `promotion_approved=false`。
+- `allowed_to_change_production_final_input=false`。
+- eval/replay 无生产 journal、notification、真实下单等副作用。
+- 配置变更审查前，生产 final input 仍是 `legacy_prompt`。
 
 ## 测试计划
 
@@ -661,4 +663,3 @@ Docker Compose 外部形态不变：
 3. 是否同意暂时保留旧 `PlanRunner` 作为 legacy，等新路径稳定后再删？
 4. 是否同意 web search 先做 provider 接口和 fixture，真实搜索源后续再接？
 5. 是否同意首版仍严格禁止自动下单，只做强提醒和手动操作计划？
-

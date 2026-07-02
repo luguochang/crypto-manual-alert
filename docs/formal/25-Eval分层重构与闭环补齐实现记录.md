@@ -1,8 +1,8 @@
-# Eval 分层重构与 P1 闭环实现记录
+# Eval 分层重构与闭环补齐实现记录
 
 ## 1. 本轮目标
 
-本轮不是继续扩大平台能力，而是把前期 P1/首版 eval 计划中已经承诺但未完全落地的部分补齐，并同步修正代码分层问题。
+本轮不是继续扩大平台能力，而是把前期 eval 计划中已经承诺但未完全落地的部分补齐，并同步修正代码分层问题。
 
 完成口径：
 
@@ -56,7 +56,7 @@ POST /api/eval/runs
 
 ### cheap
 
-用于提交前、本地回归和首版 P1 验收。
+用于提交前、本地回归和第一轮验收。
 
 特点：
 
@@ -78,9 +78,9 @@ POST /api/eval/runs
 - 不访问网络，不调用真实大模型。
 - 生成报告。
 
-真实 OpenAI-compatible LLMJudge 仍属于后续 P2+，不在本轮实现。
+真实 OpenAI-compatible LLMJudge 仍属于后续增强能力，不在本轮实现。
 
-## 4. 已补齐的 P1 能力
+## 4. 已补齐的闭环能力
 
 ### 4.1 JSON/Markdown 报告
 
@@ -196,7 +196,7 @@ CLI 返回：
 
 ## 5. 仍然后置的能力
 
-这些不是本轮 P1 闭环阻断项：
+这些不是本轮闭环补齐的阻断项：
 
 - 完整 FrozenInput 文件 artifact 和 `eval_artifacts` 表。
 - 真实 OpenAI-compatible LLMJudge。
@@ -237,4 +237,4 @@ python tests\run_local_checks.py
 - 新增报告格式时放到 `eval/reports/` 下。
 - 新增安全边界时放到 `eval/guards/` 下。
 - 新增 CLI 子命令优先放到 `eval/cli.py`，主 `cli.py` 只注册和分发。
-- 新增 P2+ 能力前先补测试，再实现。
+- 新增后续增强能力前先补测试，再实现。

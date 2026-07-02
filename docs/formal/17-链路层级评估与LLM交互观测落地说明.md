@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-本次实现先落地 P0/P1 的最小可控版本，没有做大目录搬迁。
+本次实现先落地最小可控版本，没有做大目录搬迁。
 
 已经完成：
 
@@ -327,4 +327,3 @@ pytest -q
 3. 增加 `StepSpec` / `StepResult`，统一 timeout、retry、failure_policy。
 4. 把 raw completion 改为可配置 artifact。
 5. 增加 `rules/*.yaml`，先迁移 confidence cap、required execution points、opening requirements。
-

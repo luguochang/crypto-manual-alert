@@ -19,19 +19,19 @@
 推荐顺序：
 
 ```text
-P0 业务语义和观测补齐
+业务语义和观测补齐
   -> DecisionRequest / FactsGate / query 级 span / frozen input / structured rule hit
 
-P1 旁路 RuleJudge Eval
+旁路 RuleJudge Eval
   -> EvalCase / EvalStore / RuleJudge / report / side-effect guard
 
-P2 LLMJudge + HumanReview
+LLMJudge + HumanReview
   -> grounding / 反向论证 / 数据缺口诚实度 / 执行清晰度 / 过度自信
 
-P3 UI 和发布门禁
+UI 和发布门禁
   -> Streamlit 查询页 / Review queue / release gate
 
-P4 第三方导出
+第三方导出
   -> Langfuse / Phoenix / LangSmith exporter，不作为首版强依赖
 ```
 
@@ -120,9 +120,9 @@ flowchart TD
 - 数据缺口导致 `no trade` 是合理保守，还是模型偷懒。
 - badcase 是否修复，因为 badcase 现在只是标签，不是可复跑用例。
 
-所以 P0 先补下面几层：
+所以先补下面几层：
 
-| 缺口 | 影响 | P0 处理 |
+| 缺口 | 影响 | 当前处理 |
 |---|---|---|
 | 无 `DecisionRequest` | 不知道本轮是手动、定时、什么周期、是否持仓 | 增加结构化 request，写入 trace metadata |
 | 无显式 `FactsGate` | 只能从是否出现 research span 反推数据缺口 | 增加 facts gate span 和结果 |
@@ -630,7 +630,7 @@ Exporter 失败不影响本地 eval。
 
 ## 16. 分阶段实施计划
 
-### P0：业务语义和观测补齐
+### 业务语义和观测补齐
 
 目标：让当前生产链路能被准确复盘。
 
@@ -653,7 +653,7 @@ Exporter 失败不影响本地 eval。
 - 能从 trace 生成 frozen input。
 - Rule hit 有稳定 rule_id。
 
-### P1：旁路 RuleJudge Eval
+### 旁路 RuleJudge Eval
 
 目标：先做确定性评测，不影响生产业务。
 
@@ -673,7 +673,7 @@ Exporter 失败不影响本地 eval。
 - cheap eval 不调用 LLM、不拉实时行情、不发 Bark、不写生产 `plan_runs`。
 - 生成报告并标出失败 case。
 
-### P2：ReplayRunner + LLMJudge
+### ReplayRunner + LLMJudge
 
 目标：比较 baseline/candidate，并引入语义评测。
 
@@ -693,7 +693,7 @@ Exporter 失败不影响本地 eval。
 - 每个 LLMJudge 有 evidence refs。
 - token/cost/latency 可统计。
 
-### P3：HumanReview + Streamlit UI + Release Gate
+### HumanReview + Streamlit UI + Release Gate
 
 目标：不用手查 SQLite，形成可复核闭环。
 
@@ -711,7 +711,7 @@ Exporter 失败不影响本地 eval。
 - confirmed badcase 能进入 dataset。
 - gate 能阻断有 critical regression 的 candidate。
 
-### P4：第三方 Exporter
+### 第三方 Exporter
 
 目标：本地体系稳定后，再对接外部观测平台。
 
@@ -739,7 +739,7 @@ Exporter 失败不影响本地 eval。
 
 对抗后修正：
 
-- 不把 LLMJudge 作为 P0 hard dependency。
+- 不把 LLMJudge 作为当前阶段 hard dependency。
 - 不把第三方平台作为首版强依赖。
 - 不把当前 compact reviewer 伪装成独立 agent。
 - 先做业务语义和 frozen input，再做 replay/LLMJudge/UI。
@@ -769,4 +769,3 @@ Exporter 失败不影响本地 eval。
 - Phoenix datasets: https://arize.com/docs/phoenix/datasets-and-experiments/concepts-datasets
 - Phoenix tracing: https://arize.com/docs/phoenix/tracing/llm-traces
 - OpenTelemetry GenAI semantic conventions: https://opentelemetry.io/docs/specs/semconv/gen-ai/
-

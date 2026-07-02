@@ -1336,7 +1336,7 @@ Prompt 可以提醒模型。
 
 ## 15. 迁移计划
 
-### P0：先堵生产不可控点
+### 先堵生产不可控点
 
 目标：
 
@@ -1358,7 +1358,7 @@ Prompt 可以提醒模型。
 - parser/risk 漏洞有测试覆盖。
 - 一次失败能看出失败阶段。
 
-### P1：建立最小 agent-skill 骨架
+### 建立最小 agent-skill 骨架
 
 目标：
 
@@ -1381,7 +1381,7 @@ Prompt 可以提醒模型。
 - 每个 tool call 有 trace。
 - search-derived 不会覆盖 execution facts。
 
-### P2：约束配置化
+### 约束配置化
 
 目标：
 
@@ -1402,7 +1402,7 @@ Prompt 可以提醒模型。
 - 添加 required market point 不需要改 Python。
 - 禁用风险硬边界会被代码拒绝。
 
-### P3：可控 reviewer 并发
+### 可控 reviewer 并发
 
 目标：
 
@@ -1421,7 +1421,7 @@ Prompt 可以提醒模型。
 - leader synthesis 能明确标出缺失 reviewer。
 - 成本和耗时可统计。
 
-### P4：Eval / Replay / 外部观测
+### Eval / Replay / 外部观测
 
 目标：
 
@@ -1513,10 +1513,10 @@ Prompt 可以提醒模型。
 建议顺序：
 
 ```text
-P0 先修生产不可控和 parser/risk 漏洞
-P1 拆 workflow/context/skill registry/tool policy/trace
-P2 再把硬编码约束迁到配置
-P3 最后才启用独立 reviewer 并发
+先修生产不可控和 parser/risk 漏洞
+再拆 workflow/context/skill registry/tool policy/trace
+然后把硬编码约束迁到配置
+最后才启用独立 reviewer 并发
 ```
 
 这样能保持两件事：
@@ -1534,4 +1534,3 @@ P3 最后才启用独立 reviewer 并发
 - CrewAI Flows：`https://docs.crewai.com/en/concepts/flows`
 - OpenAI Swarm：`https://github.com/openai/swarm`
 - LangGraph Swarm：`https://github.com/langchain-ai/langgraph-swarm-py`
-

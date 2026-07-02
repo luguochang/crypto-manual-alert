@@ -867,7 +867,7 @@ exporters/
 
 ## 17. 分阶段实施计划
 
-### P0：正式设计和配置
+### 正式设计和配置
 
 产出：
 
@@ -877,7 +877,7 @@ exporters/
 
 不写业务代码。
 
-### P1：EvalStore + EvalCase + RuleJudge
+### EvalStore + EvalCase + RuleJudge
 
 产出：
 
@@ -894,7 +894,7 @@ exporters/
 - 生成报告。
 - 不影响生产 journal 和 Bark。
 
-### P2：ReplayRunner
+### ReplayRunner
 
 产出：
 
@@ -908,7 +908,7 @@ exporters/
 - 不实时抓行情或 web search。
 - 报告能显示版本差异。
 
-### P3：LLMJudge
+### LLMJudge
 
 产出：
 
@@ -923,7 +923,7 @@ exporters/
 - judge 结果可追溯到 evidence refs。
 - LLMJudge 成本和耗时可统计。
 
-### P4：HumanReview + Streamlit UI
+### HumanReview + Streamlit UI
 
 产出：
 
@@ -937,7 +937,7 @@ exporters/
 - 人工确认能更新 review 状态。
 - confirmed review 可生成或更新 eval case。
 
-### P5：Release Gate + Exporter
+### Release Gate + Exporter
 
 产出：
 

@@ -800,7 +800,7 @@ src/crypto_manual_alert/
 
 ## 15. 分阶段实施计划
 
-### P0：冻结目标与基线
+### 冻结目标与基线
 
 目标：
 
@@ -813,7 +813,7 @@ src/crypto_manual_alert/
 - 有明确开发顺序和回滚策略。
 - 不再继续边写边改架构方向。
 
-### P1：DecisionRequest / Session / Memory 最小闭环
+### DecisionRequest / Session / Memory 最小闭环
 
 内容：
 
@@ -827,7 +827,7 @@ src/crypto_manual_alert/
 - 已有 `PlanRunner.run_once(symbol)` 仍可用。
 - 未知持仓不允许轻易输出 hold/close/flip。
 
-### P2：EvidencePacket / FactsGate / RuleHit
+### EvidencePacket / FactsGate / RuleHit
 
 内容：
 
@@ -841,7 +841,7 @@ src/crypto_manual_alert/
 - search-derived 不能满足 mark/index/order_book。
 - 开仓缺核心执行事实 100% 阻断。
 
-### P3：Workflow / StepSpec / 并发 research
+### Workflow / StepSpec / 并发 research
 
 内容：
 
@@ -855,7 +855,7 @@ src/crypto_manual_alert/
 - 每个 research query 有独立 span。
 - worker 超时有 unavailable 和 confidence cap。
 
-### P4：DecisionInputBuilder / PlanSemanticGate
+### DecisionInputBuilder / PlanSemanticGate
 
 内容：
 
@@ -868,7 +868,7 @@ src/crypto_manual_alert/
 - 多空价格关系、action-position、TTL-horizon、target 顺序可被检查。
 - 反方链空泛时触发 cap/advisory。
 
-### P5：前端工作台首版
+### 前端工作台第一轮
 
 内容：
 
@@ -880,7 +880,7 @@ src/crypto_manual_alert/
 - 不用手查 SQLite。
 - 能看 trace、gate、evidence refs、candidate eval。
 
-### P6：Eval / Replay / ReleaseGate
+### Eval / Replay / ReleaseGate
 
 内容：
 
@@ -898,7 +898,7 @@ src/crypto_manual_alert/
 - eval 不写生产 plan_runs。
 - baseline/candidate 可比较。
 
-### P7：自我改进候选生成
+### 自我改进候选生成
 
 内容：
 
@@ -911,7 +911,7 @@ src/crypto_manual_alert/
 - Agent 不能直接改生产。
 - 每个候选有 diff、原因、指标、回滚方式。
 
-### P8：可选外部平台与优化
+### 可选外部平台与优化
 
 内容：
 
