@@ -29,6 +29,7 @@ market_data:
 
 decision:
   engine: fixture
+  final_input_mode: legacy_prompt
   skill_path: third_party/skills/crypto-macro-decision
   command: ""
   timeout_seconds: 900
@@ -66,6 +67,30 @@ research:
   max_workers: 4
   max_results_per_query: 3
   request_timeout_seconds: 300
+
+shadow:
+  worker_mode: local_audit
+
+workflow:
+  execution_mode: legacy_baseline
+
+macro_event:
+  provider: disabled
+
+eval:
+  release_gate:
+    minimum_case_count: 20
+    schema_valid_rate_threshold: 0.95
+    required_badcase_severities:
+      - high
+      - critical
+  financial_quality:
+    evaluation_targets:
+      - legacy_final
+      - swarm_candidate_final
+    minimum_scored_count: 30
+    minimum_direction_hit_rate: 0.52
+    maximum_brier_score: 0.25
 
 security:
   forbid_trade_keys: true

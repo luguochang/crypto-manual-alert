@@ -1,0 +1,23 @@
+# Staging overlay: enables the actionable-alert path for local/staging verification.
+#
+# Use with:
+#   --config config/default.yaml --config config/staging.yaml
+# (add --config config/prod.yaml for real LLM + Bark end-to-end)
+#
+# - market_data.provider=okx_public: real exchange-native mark/index/order_book
+#   from OKX public endpoints. Source "okx_public" maps to source_type=exchange_native
+#   and satisfies the facts_gate execution-fact requirement for opening actions.
+# - macro_event.provider=no_active_event: operator asserts there is no scheduled
+#   macro event affecting the symbol's horizon window. Adds an active_event_status
+#   point (source=event_pool, fresh) so facts_gate allows opening/trigger/flip.
+#   Only enable when the operator has confirmed no active event; the assertion is
+#   recorded in the audit trail.
+#
+# Under the safe default (config/default.yaml alone: fixture market + macro_event
+# disabled) opening/trigger/flip actions are blocked by facts_gate. See
+# docs/formal/37 §5.2 H1 and docs/migration/2026-07-06-checkpoint-execution-fact-unblock.md.
+market_data:
+  provider: okx_public
+
+macro_event:
+  provider: no_active_event
