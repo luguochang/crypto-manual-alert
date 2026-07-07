@@ -1,6 +1,7 @@
 import { apiRequest } from "@/lib/api/client";
 import {
   evalCandidateListSchema,
+  evalOutcomeListSchema,
   evalRunDetailSchema,
   evalRunListSchema
 } from "@/lib/schemas/eval";
@@ -24,4 +25,11 @@ export function listEvalRuns(options?: { limit?: number }) {
 
 export function getEvalRunDetail(evalRunId: string) {
   return apiRequest(`/api/eval/runs/${encodeURIComponent(evalRunId)}`, evalRunDetailSchema);
+}
+
+export function listEvalOutcomes(options?: { evaluationTarget?: string }) {
+  const query = options?.evaluationTarget
+    ? `?evaluation_target=${encodeURIComponent(options.evaluationTarget)}`
+    : "";
+  return apiRequest(`/api/eval/outcomes${query}`, evalOutcomeListSchema);
 }

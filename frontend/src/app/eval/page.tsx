@@ -1,51 +1,16 @@
 import Link from "next/link";
-import { getEvalRunDetail, listEvalCandidates, listEvalRuns } from "@/lib/api/eval";
+import { getEvalRunDetail, listEvalCandidates, listEvalOutcomes, listEvalRuns } from "@/lib/api/eval";
+import { EvalCandidatesTable } from "@/app/eval/eval-candidates-table";
+import { EvalJudgeScoresTable } from "@/app/eval/eval-judge-scores-table";
+import { EvalReplayTable } from "@/app/eval/eval-replay-table";
+import { shortId } from "@/app/eval/eval-format";
+import { FinancialQualityPanel } from "@/app/eval/financial-quality-panel";
 import { RunEvalForm } from "@/app/eval/run-eval-form";
-import type { EvalCandidate, EvalCase, EvalScore } from "@/lib/schemas/eval";
 
 export const dynamic = "force-dynamic";
 
-function shortId(value: string | null | undefined) {
-  if (!value) {
-    return "-";
-  }
-  return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
-}
-
 function passRate(passCount: number, caseCount: number) {
   return caseCount ? `${Math.round((passCount / caseCount) * 100)}%` : "0%";
-}
-
-function severityClass(severity: string) {
-  if (severity === "critical" || severity === "high") {
-    return "badge-failed";
-  }
-  if (severity === "medium") {
-    return "badge-pending";
-  }
-  return "badge-running";
-}
-
-function resultClass(passed: boolean) {
-  return passed ? "badge-success" : "badge-failed";
-}
-
-function replayClass(status: string | undefined) {
-  if (status === "completed") {
-    return "badge-success";
-  }
-  if (status === "failed" || status === "error") {
-    return "badge-failed";
-  }
-  return "badge-pending";
-}
-
-function truncate(value: string | null | undefined, max = 96) {
-  const text = value?.trim();
-  if (!text) {
-    return "-";
-  }
-  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 function metadataText(metadata: Record<string, unknown>, key: string) {
@@ -53,36 +18,18 @@ function metadataText(metadata: Record<string, unknown>, key: string) {
   return typeof value === "string" && value ? value : "-";
 }
 
-function metadataNumber(metadata: Record<string, unknown>, key: string) {
-  const value = metadata[key];
-  return typeof value === "number" ? String(value) : "-";
-}
-
-function evidenceText(score: EvalScore) {
-  return score.evidence_refs.length > 0 ? score.evidence_refs.join(", ") : "-";
-}
-
-function observedText(item: EvalCase) {
-  const trace = item.input_summary.trace;
-  if (!trace || typeof trace !== "object") {
-    return "-";
-  }
-  const data = trace as Record<string, unknown>;
-  const action = typeof data.final_action === "string" ? data.final_action : "-";
-  const allowed = typeof data.allowed === "boolean" ? String(data.allowed) : "-";
-  return `${action} / ${allowed}`;
-}
-
 export default async function EvalPage() {
-  const [candidatesResult, runsResult] = await Promise.all([
+  const [candidatesResult, runsResult, outcomesResult] = await Promise.all([
     listEvalCandidates({ limit: 50 }),
-    listEvalRuns({ limit: 10 })
+    listEvalRuns({ limit: 10 }),
+    listEvalOutcomes()
   ]);
 
   const runs = runsResult.ok ? runsResult.data.items : [];
   const latestRunId = runs.length > 0 ? runs[0].eval_run_id : null;
   const latestDetail = latestRunId ? await getEvalRunDetail(latestRunId) : null;
   const candidates = candidatesResult.ok ? candidatesResult.data.items : [];
+  const outcomes = outcomesResult.ok ? outcomesResult.data.items : [];
   const openCases = candidates.filter((item) => item.status === "open").length;
   const highRiskCases = candidates.filter((item) => ["critical", "high"].includes(item.severity)).length;
   const datasets = new Set(candidates.map((item) => item.eval_dataset_name || "default")).size;
@@ -204,160 +151,36 @@ export default async function EvalPage() {
         </section>
       </div>
 
+      <FinancialQualityPanel
+        gate={latestRun?.metadata.financial_quality_gate}
+        outcomes={outcomes}
+        outcomesError={outcomesResult.ok ? undefined : outcomesResult.error.message}
+      />
+
       <section className="panel section-gap">
         <h2>候选 Case</h2>
-        {!candidatesResult.ok ? (
-          <div className="error-state">{candidatesResult.error.message}</div>
-        ) : candidates.length === 0 ? (
-          <p className="muted">暂无 badcase 候选。先在 trace 复盘中记录 badcase。</p>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>严重度</th>
-                  <th>类别</th>
-                  <th>Dataset</th>
-                  <th>交易对</th>
-                  <th>Trace</th>
-                  <th>期望行为</th>
-                  <th>实际行为</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {candidates.map((item: EvalCandidate) => (
-                  <tr key={item.id}>
-                    <td>
-                      <span className={`badge ${severityClass(item.severity)}`}>{item.severity}</span>
-                    </td>
-                    <td>{item.category}</td>
-                    <td>{item.eval_dataset_name ?? "default"}</td>
-                    <td>{item.trace.symbol}</td>
-                    <td>
-                      <Link href={`/runs/${encodeURIComponent(item.trace_id)}`}>{shortId(item.trace_id)}</Link>
-                    </td>
-                    <td>{truncate(item.expected_behavior)}</td>
-                    <td>{truncate(item.actual_behavior)}</td>
-                    <td>{item.status}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <EvalCandidatesTable
+          candidates={candidates}
+          errorMessage={candidatesResult.ok ? undefined : candidatesResult.error.message}
+        />
       </section>
 
       <section className="panel section-gap">
         <h2>最新 Frozen / Replay</h2>
-        {!latestDetail ? (
-          <p className="muted">暂无 replay 明细。</p>
-        ) : !latestDetail.ok ? (
-          <div className="error-state">{latestDetail.error.message}</div>
-        ) : latestDetail.data.cases.length === 0 ? (
-          <p className="muted">该 eval run 暂无 case。</p>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Case</th>
-                  <th>Frozen hash</th>
-                  <th>Trace</th>
-                  <th>Observed</th>
-                  <th>Replay</th>
-                  <th>Result</th>
-                  <th>耗时</th>
-                </tr>
-              </thead>
-              <tbody>
-                {latestDetail.data.cases.map((item: EvalCase) => (
-                  <tr key={item.case_id}>
-                    <td>{item.case_id}</td>
-                    <td title={item.frozen_input_hash}>{shortId(item.frozen_input_hash)}</td>
-                    <td>
-                      <Link href={`/runs/${encodeURIComponent(item.source_trace_id)}`}>
-                        {shortId(item.source_trace_id)}
-                      </Link>
-                    </td>
-                    <td>{observedText(item)}</td>
-                    <td>
-                      <span className={`badge ${replayClass(item.replay_result?.status)}`}>
-                        {item.replay_result?.status ?? "not_run"}
-                      </span>
-                    </td>
-                    <td>
-                      {item.replay_result?.final_action ?? "-"} /{" "}
-                      {typeof item.replay_result?.allowed === "boolean" ? String(item.replay_result.allowed) : "-"}
-                      {item.replay_result?.output_hash ? ` / ${shortId(item.replay_result.output_hash)}` : ""}
-                    </td>
-                    <td>{typeof item.replay_result?.duration_ms === "number" ? `${item.replay_result.duration_ms}ms` : "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <EvalReplayTable
+          cases={latestDetail?.ok ? latestDetail.data.cases : []}
+          errorMessage={latestDetail && !latestDetail.ok ? latestDetail.error.message : undefined}
+          hasRun={Boolean(latestDetail)}
+        />
       </section>
 
       <section className="panel section-gap">
         <h2>最新 Judge 明细</h2>
-        {!latestDetail ? (
-          <p className="muted">暂无 judge 明细。</p>
-        ) : !latestDetail.ok ? (
-          <div className="error-state">{latestDetail.error.message}</div>
-        ) : latestDetail.data.scores.length === 0 ? (
-          <p className="muted">该 eval run 暂无 score。</p>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>结果</th>
-                  <th>Case</th>
-                  <th>Trace</th>
-                  <th>Judge</th>
-                  <th>类型</th>
-                  <th>Score</th>
-                  <th>严重度</th>
-                  <th>分类</th>
-                  <th>原因</th>
-                  <th>Evidence refs</th>
-                  <th>耗时 / Token</th>
-                  <th>人工复核</th>
-                </tr>
-              </thead>
-              <tbody>
-                {latestDetail.data.scores.map((score: EvalScore) => (
-                  <tr key={score.score_id}>
-                    <td>
-                      <span className={`badge ${resultClass(score.passed)}`}>{score.passed ? "pass" : "fail"}</span>
-                    </td>
-                    <td>{score.case_id} / badcase {score.source_badcase_id || "-"}</td>
-                    <td>
-                      {score.source_trace_id ? (
-                        <Link href={`/runs/${encodeURIComponent(score.source_trace_id)}`}>
-                          {shortId(score.source_trace_id)}
-                        </Link>
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td>{score.judge_name}</td>
-                    <td>{score.judge_type}</td>
-                    <td>{typeof score.score === "number" ? score.score.toFixed(2) : "-"}</td>
-                    <td>{score.severity}</td>
-                    <td>{score.failure_category}</td>
-                    <td>{score.reason_summary}</td>
-                    <td>{evidenceText(score)}</td>
-                    <td>{metadataNumber(score.metadata, "duration_ms")}ms / {metadataNumber(score.metadata, "total_tokens")}</td>
-                    <td>{score.needs_human_review ? "需要" : "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <EvalJudgeScoresTable
+          scores={latestDetail?.ok ? latestDetail.data.scores : []}
+          errorMessage={latestDetail && !latestDetail.ok ? latestDetail.error.message : undefined}
+          hasRun={Boolean(latestDetail)}
+        />
         {failedScores.length > 0 ? (
           <p className="muted section-gap">
             当前最新 run 有 {failedScores.length} 条失败评分；优先复核 high/critical case，再决定是否加入 golden set。

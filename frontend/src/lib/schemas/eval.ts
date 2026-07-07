@@ -40,6 +40,64 @@ export const evalCandidateListSchema = z.object({
   items: z.array(evalCandidateSchema)
 });
 
+export const predictionQualityMetricsSchema = z
+  .object({
+    scored_count: z.number().default(0),
+    pending_count: z.number().default(0),
+    unscored_count: z.number().default(0),
+    no_trade_count: z.number().default(0),
+    direction_hit_rate: z.number().nullable().optional(),
+    target_hit_rate: z.number().nullable().optional(),
+    invalidation_hit_rate: z.number().nullable().optional(),
+    average_pnl_pct: z.number().nullable().optional(),
+    average_r_multiple: z.number().nullable().optional(),
+    brier_score: z.number().nullable().optional(),
+    unscored_reasons: z.record(z.number()).default({})
+  })
+  .passthrough();
+
+export const financialQualityTargetGateSchema = z
+  .object({
+    schema_version: z.number().default(1),
+    status: z.string(),
+    passed: z.boolean().optional(),
+    blocking: z.boolean().default(false),
+    decision_effect: z.string().default("none"),
+    structural_release_gate_blocking: z.boolean().default(false),
+    evaluation_target: z.string(),
+    minimum_scored_count: z.number().default(0),
+    observed_scored_count: z.number().default(0),
+    blocking_reasons: z.array(z.string()).default([]),
+    brier_event_label: z.string().optional(),
+    metrics: predictionQualityMetricsSchema
+  })
+  .passthrough();
+
+export const financialQualityGateSchema = z
+  .object({
+    schema_version: z.number().default(1),
+    status: z.string().default("not_configured"),
+    decision_effect: z.string().default("none"),
+    structural_release_gate_blocking: z.boolean().default(false),
+    blocking: z.boolean().default(false),
+    blocking_reasons: z.array(z.string()).default([]),
+    evaluation_targets: z.array(z.string()).default([]),
+    target_gates: z.array(financialQualityTargetGateSchema).default([])
+  })
+  .passthrough();
+
+export const evalRunMetadataSchema = z
+  .object({
+    judge_provider: z.string().optional(),
+    replay: z.record(z.unknown()).optional(),
+    side_effect_deltas: z.record(z.unknown()).optional(),
+    report_json_ref: z.string().optional(),
+    report_markdown_ref: z.string().optional(),
+    financial_quality_gate: financialQualityGateSchema.optional(),
+    release_gate: z.record(z.unknown()).optional()
+  })
+  .passthrough();
+
 export const evalRunSummarySchema = z
   .object({
     eval_run_id: z.string(),
@@ -51,7 +109,7 @@ export const evalRunSummarySchema = z
     case_count: z.number(),
     pass_count: z.number(),
     fail_count: z.number(),
-    metadata: z.record(z.unknown()).default({})
+    metadata: evalRunMetadataSchema.default({})
   })
   .passthrough();
 
@@ -118,8 +176,51 @@ export const evalRunDetailSchema = z.object({
   scores: z.array(evalScoreSchema).default([])
 });
 
+export const evalOutcomeWindowSchema = z
+  .object({
+    name: z.string(),
+    symbol: z.string(),
+    interval: z.string(),
+    source_type: z.string(),
+    window_start: z.string(),
+    window_end: z.string(),
+    collected_at: z.string(),
+    open_price: z.number().nullable().optional(),
+    high_price: z.number().nullable().optional(),
+    low_price: z.number().nullable().optional(),
+    close_price: z.number().nullable().optional(),
+    matured: z.boolean().default(false),
+    can_score_execution_outcome: z.boolean().default(false),
+    unscored_reason: z.string().nullable().optional()
+  })
+  .passthrough();
+
+export const evalOutcomeSchema = z
+  .object({
+    decision_ref: z.string(),
+    evaluation_target: z.string(),
+    symbol: z.string(),
+    action: z.string(),
+    probability: z.number().nullable().optional(),
+    entry_price: z.number().nullable().optional(),
+    stop_price: z.number().nullable().optional(),
+    target_1: z.number().nullable().optional(),
+    target_2: z.number().nullable().optional(),
+    window: evalOutcomeWindowSchema,
+    can_score: z.boolean().default(false),
+    unscored_reason: z.string().nullable().optional(),
+    regime: z.string().nullable().optional()
+  })
+  .passthrough();
+
+export const evalOutcomeListSchema = z.object({
+  items: z.array(evalOutcomeSchema)
+});
+
 export type EvalCandidate = z.output<typeof evalCandidateSchema>;
 export type EvalCase = z.output<typeof evalCaseSchema>;
+export type FinancialQualityGate = z.output<typeof financialQualityGateSchema>;
 export type EvalRunSummary = z.output<typeof evalRunSummarySchema>;
 export type EvalRunDetail = z.output<typeof evalRunDetailSchema>;
 export type EvalScore = z.output<typeof evalScoreSchema>;
+export type EvalOutcome = z.output<typeof evalOutcomeSchema>;
