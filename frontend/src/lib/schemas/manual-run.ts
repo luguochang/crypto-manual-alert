@@ -5,7 +5,7 @@ export const manualRunRequestSchema = z.object({
   query: z.string().min(1, "请输入分析问题"),
   horizon: z.string().optional(),
   session_id: z.string().optional(),
-  alert_channel: z.literal("bark").default("bark"),
+  alert_channel: z.string().default("bark"),
   position: z
     .object({
       side: z.enum(["long", "short", "flat", "unknown"]).default("unknown"),

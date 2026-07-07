@@ -4,6 +4,12 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { createManualRun } from "@/lib/api/system";
 import { manualRunRequestSchema, type ManualRunResponse } from "@/lib/schemas/manual-run";
+import {
+  DIRECTION_LABEL,
+  DIRECTION_TONE,
+  classifyDirection,
+  formatPrice
+} from "@/app/shared/direction";
 
 type SubmitState =
   | { status: "idle" }
@@ -11,7 +17,7 @@ type SubmitState =
   | { status: "success"; traceId: string; result: ManualRunResponse }
   | { status: "error"; message: string };
 
-const SYMBOLS = ["ETH-USDT-SWAP", "BTC-USDT-SWAP", "SOL-USDT-SWAP"];
+const SYMBOL_SUGGESTIONS = ["ETH-USDT-SWAP", "BTC-USDT-SWAP", "SOL-USDT-SWAP"];
 
 export function ManualRunForm() {
   const [symbol, setSymbol] = useState("ETH-USDT-SWAP");
@@ -64,13 +70,18 @@ export function ManualRunForm() {
       <form className="form-grid" onSubmit={handleSubmit}>
         <div className="field">
           <label htmlFor="symbol">交易对</label>
-          <select id="symbol" value={symbol} onChange={(event) => setSymbol(event.target.value)}>
-            {SYMBOLS.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
+          <input
+            id="symbol"
+            list="symbol-suggestions"
+            value={symbol}
+            onChange={(event) => setSymbol(event.target.value)}
+            placeholder="如 ETH-USDT-SWAP"
+          />
+          <datalist id="symbol-suggestions">
+            {SYMBOL_SUGGESTIONS.map((item) => (
+              <option key={item} value={item} />
             ))}
-          </select>
+          </datalist>
         </div>
 
         <div className="field">
@@ -139,20 +150,76 @@ export function ManualRunForm() {
       {submitState.status === "success" ? (
         <div className="panel result-panel">
           <h2>返回结果</h2>
-          <dl className="detail-list">
-            <div>
-              <dt>Trace ID</dt>
-              <dd>{submitState.traceId}</dd>
-            </div>
-            <div>
-              <dt>动作</dt>
-              <dd>{submitState.result.plan.main_action}</dd>
-            </div>
-            <div>
-              <dt>风控</dt>
-              <dd>{submitState.result.verdict.allowed ? "允许手动核对" : "已阻断"}</dd>
-            </div>
-          </dl>
+          {(() => {
+            const plan = submitState.result.plan;
+            const verdict = submitState.result.verdict;
+            const direction = classifyDirection(plan.main_action);
+            return (
+              <>
+                <div className={`alert-summary ${verdict.allowed ? "alert-allowed" : "alert-blocked"}`}>
+                  <span className={`direction-badge ${DIRECTION_TONE[direction]}`}>
+                    {DIRECTION_LABEL[direction]}
+                  </span>
+                  <div className="alert-summary-main">
+                    <div className="alert-action">{plan.main_action}</div>
+                    <div className="alert-meta">
+                      <span>{plan.instrument}</span>
+                      {plan.horizon ? <span> · 周期 {plan.horizon}</span> : null}
+                      {plan.probability !== null && plan.probability !== undefined ? (
+                        <span> · 概率 {(plan.probability * 100).toFixed(0)}%</span>
+                      ) : null}
+                      <span> · {verdict.allowed ? "允许手动核对" : "已阻断"}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <dl className="detail-list price-grid">
+                  <div>
+                    <dt>参考价</dt>
+                    <dd>{formatPrice(plan.reference_price)}</dd>
+                  </div>
+                  <div>
+                    <dt>触发价</dt>
+                    <dd>{formatPrice(plan.entry_trigger)}</dd>
+                  </div>
+                  <div>
+                    <dt>止损</dt>
+                    <dd>{formatPrice(plan.stop_price)}</dd>
+                  </div>
+                  <div>
+                    <dt>目标 1</dt>
+                    <dd>{formatPrice(plan.target_1)}</dd>
+                  </div>
+                  <div>
+                    <dt>目标 2</dt>
+                    <dd>{formatPrice(plan.target_2)}</dd>
+                  </div>
+                  <div>
+                    <dt>过期时间</dt>
+                    <dd>{plan.expires_at ? new Date(plan.expires_at).toLocaleString() : "—"}</dd>
+                  </div>
+                </dl>
+
+                {plan.manual_execution_required ? (
+                  <p className="hint">系统仅给建议，需人工核对后手动执行；不自动下单。</p>
+                ) : null}
+
+                {verdict.reasons.length > 0 ? (
+                  <div className="verdict-reasons">
+                    <h3>{verdict.allowed ? "提示" : "阻断理由"}</h3>
+                    <ul>
+                      {verdict.reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
+          <p className="hint">
+            Trace ID: <code>{submitState.traceId}</code>
+          </p>
           <Link className="button button-secondary" href={`/runs/${encodeURIComponent(submitState.traceId)}`}>
             查看 Trace
           </Link>

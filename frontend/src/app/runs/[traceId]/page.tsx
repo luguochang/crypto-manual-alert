@@ -1,5 +1,9 @@
 import Link from "next/link";
 import { getRunDetail } from "@/lib/api/runs";
+import { AgentAuditPanel } from "./agent-audit-panel";
+import { DecisionSummaryCard } from "./decision-summary-card";
+import { asNumber, asString } from "@/app/shared/coerce";
+import { JsonDetails, formatJson } from "@/app/shared/json-details";
 import { StatusBadge } from "@/app/shared/status-badge";
 
 export const dynamic = "force-dynamic";
@@ -10,11 +14,7 @@ type TraceDetailPageProps = {
   }>;
 };
 
-function formatJson(value: unknown) {
-  return JSON.stringify(value ?? null, null, 2);
-}
-
-function shortHash(value: string | undefined) {
+function shortHash(value: string | null | undefined) {
   if (!value) {
     return "-";
   }
@@ -40,7 +40,7 @@ function metricText(value: number | null | undefined, suffix = "") {
 
 function moneyText(value: number | null | undefined) {
   if (value === null || value === undefined) {
-    return "未知";
+    return "unknown";
   }
   return `$${value.toFixed(6)}`;
 }
@@ -54,11 +54,11 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
       <>
         <header className="page-header">
           <div>
-            <h1>Trace 详情</h1>
+            <h1>Trace Detail</h1>
             <p>Trace ID: {traceId}</p>
           </div>
           <Link className="button button-secondary" href="/runs">
-            返回列表
+            Back to Runs
           </Link>
         </header>
         <div className="error-state">{result.error.message}</div>
@@ -71,6 +71,7 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
   const planRun = detail.plan_run;
   const parsedPlan = planRun?.parsed_plan ?? {};
   const verdict = planRun?.verdict ?? {};
+  const agentAudit = planRun?.agent_audit_view;
   const analysis = detail.analysis ?? {};
   const spans = detail.spans ?? [];
   const llmInteractions = detail.llm_interactions ?? [];
@@ -85,87 +86,106 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
     <>
       <header className="page-header">
         <div>
-          <h1>Trace 详情</h1>
+          <h1>Trace Detail</h1>
           <p>Trace ID: {trace.trace_id}</p>
         </div>
         <Link className="button button-secondary" href="/runs">
-          返回列表
+          Back to Runs
         </Link>
       </header>
 
-      <section className="trace-summary-grid" aria-label="Trace 摘要">
+      <section className="trace-summary-grid" aria-label="Trace summary">
         <div className="stat-card">
-          <span>运行状态</span>
+          <span>Run Status</span>
           <strong>
             <StatusBadge status={trace.status} />
           </strong>
         </div>
         <div className="stat-card">
-          <span>最终动作</span>
+          <span>Final Action</span>
           <strong>{trace.final_action ?? "-"}</strong>
         </div>
         <div className="stat-card">
-          <span>Span 数</span>
+          <span>Spans</span>
           <strong>{spans.length}</strong>
         </div>
         <div className="stat-card">
-          <span>LLM 调用</span>
+          <span>LLM Calls</span>
           <strong>{llmInteractions.length}</strong>
         </div>
       </section>
 
+      <DecisionSummaryCard
+        mainAction={asString(parsedPlan.main_action)}
+        probability={asNumber(parsedPlan.probability)}
+        referencePrice={asNumber(parsedPlan.reference_price)}
+        entryTrigger={asNumber(parsedPlan.entry_trigger)}
+        stopPrice={asNumber(parsedPlan.stop_price)}
+        target1={asNumber(parsedPlan.target_1)}
+        target2={asNumber(parsedPlan.target_2)}
+        allowed={trace.allowed}
+        symbol={trace.symbol}
+        horizon={asString(parsedPlan.horizon)}
+        executionMode={agentAudit?.mode}
+        productionFinalInputMode={agentAudit?.input_lineage?.production_final_input_mode}
+        analysis={analysis}
+        verdictReasons={verdict.reasons}
+      />
+
+      <AgentAuditPanel agentAudit={agentAudit} />
+
       <div className="grid-2 section-gap">
         <section className="panel">
-          <h2>运行信息</h2>
+          <h2>Run Info</h2>
           <dl className="detail-list">
             <div>
-              <dt>交易对</dt>
+              <dt>Symbol</dt>
               <dd>{trace.symbol}</dd>
             </div>
             <div>
-              <dt>运行类型</dt>
+              <dt>Run Type</dt>
               <dd>{trace.run_type}</dd>
             </div>
             <div>
-              <dt>风控允许</dt>
-              <dd>{trace.allowed == null ? "-" : trace.allowed ? "是" : "否"}</dd>
+              <dt>Risk Allowed</dt>
+              <dd>{trace.allowed == null ? "-" : trace.allowed ? "yes" : "no"}</dd>
             </div>
             <div>
               <dt>Plan ID</dt>
               <dd>{trace.final_plan_id ?? planRun?.plan_id ?? "-"}</dd>
             </div>
             <div>
-              <dt>创建时间</dt>
+              <dt>Created At</dt>
               <dd>{trace.created_at}</dd>
             </div>
             <div>
-              <dt>结束时间</dt>
+              <dt>Ended At</dt>
               <dd>{trace.ended_at ?? "-"}</dd>
             </div>
           </dl>
         </section>
 
         <section className="panel">
-          <h2>结论摘要</h2>
+          <h2>Decision Summary</h2>
           <dl className="detail-list">
             <div>
-              <dt>主结论</dt>
+              <dt>Main Action</dt>
               <dd>{valueText(parsedPlan.main_action)}</dd>
             </div>
             <div>
-              <dt>概率</dt>
+              <dt>Probability</dt>
               <dd>{valueText(parsedPlan.probability)}</dd>
             </div>
             <div>
-              <dt>入场/触发</dt>
+              <dt>Entry Trigger</dt>
               <dd>{valueText(parsedPlan.entry_trigger)}</dd>
             </div>
             <div>
-              <dt>止损</dt>
+              <dt>Stop</dt>
               <dd>{valueText(parsedPlan.stop_price)}</dd>
             </div>
             <div>
-              <dt>目标</dt>
+              <dt>Targets</dt>
               <dd>
                 {valueText(parsedPlan.target_1)} / {valueText(parsedPlan.target_2)}
               </dd>
@@ -175,44 +195,46 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
       </div>
 
       <section className="panel section-gap">
-        <h2>分析过程</h2>
+        <h2>Analysis</h2>
         <div className="analysis-grid">
           <div>
-            <h3>推理摘要</h3>
+            <h3>Reasoning Summary</h3>
             <p className="analysis-text">{valueText(analysis.reasoning_summary)}</p>
           </div>
           <div>
-            <h3>反向观点</h3>
+            <h3>Opposing Thesis</h3>
             <p className="analysis-text">{valueText(analysis.opposing_thesis)}</p>
           </div>
           <div>
-            <h3>数据缺口</h3>
-            <pre className="code-box light-code">{formatJson(analysis.data_gaps ?? [])}</pre>
+            <h3>Data Gaps</h3>
+            <JsonDetails title="Data Gaps JSON" value={analysis.data_gaps ?? []} light />
           </div>
           <div>
-            <h3>风控命中</h3>
-            <pre className="code-box light-code">{formatJson(analysis.risk_rule_hits ?? verdict)}</pre>
+            <h3>Risk Rule Hits</h3>
+            <JsonDetails title="Risk Rule Hits JSON" value={analysis.risk_rule_hits ?? verdict} light />
           </div>
         </div>
       </section>
 
       <section className="panel section-gap">
-        <h2>执行时间线</h2>
+        <h2>Span Timeline</h2>
         <div className="timeline-list">
           {spans.map((span, index) => (
-            <details className="trace-step" key={span.span_id} open={index < 3}>
+            <details className="trace-step" key={span.span_id} open={span.status !== "ok"}>
               <summary>
-                <span>{index + 1}. {span.span_name}</span>
+                <span>
+                  {index + 1}. {span.span_name}
+                </span>
                 <span>{span.status}</span>
                 <span>{span.duration_ms} ms</span>
               </summary>
               <div className="step-grid">
                 <div>
-                  <h3>输入摘要</h3>
+                  <h3>Input Summary</h3>
                   <pre className="code-box">{formatJson(span.input_summary)}</pre>
                 </div>
                 <div>
-                  <h3>输出摘要</h3>
+                  <h3>Output Summary</h3>
                   <pre className="code-box">{formatJson(span.output_summary)}</pre>
                 </div>
               </div>
@@ -223,34 +245,36 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
       </section>
 
       <section className="panel section-gap">
-        <h2>LLM 请求与返回</h2>
+        <h2>LLM Requests And Responses</h2>
         {llmInteractions.length === 0 ? (
-          <p className="muted">
-            当前 trace 没有 LLM 交互记录。默认 fixture 决策不会调用真实模型；使用 openai_compatible / LLM research 后会记录。
-          </p>
+          <p className="muted">No LLM interactions were recorded for this trace.</p>
         ) : (
           <div className="timeline-list">
             <dl className="detail-list compact-list">
               <div>
-                <dt>已知 Tokens</dt>
+                <dt>Known Tokens</dt>
                 <dd>
                   {totalKnownTokens}
-                  {missingTokenCount > 0 ? `（${missingTokenCount} 条未返回 usage）` : ""}
+                  {missingTokenCount > 0 ? ` (${missingTokenCount} calls missing usage)` : ""}
                 </dd>
               </div>
               <div>
-                <dt>已知成本</dt>
+                <dt>Known Cost</dt>
                 <dd>
-                  {knownCostCount > 0 ? moneyText(totalKnownCost) : "未知"}
-                  {missingCostCount > 0 ? `（${missingCostCount} 条未配置价格）` : ""}
+                  {knownCostCount > 0 ? moneyText(totalKnownCost) : "unknown"}
+                  {missingCostCount > 0 ? ` (${missingCostCount} calls missing price config)` : ""}
                 </dd>
               </div>
             </dl>
             {llmInteractions.map((item, index) => (
-              <details className="trace-step" key={item.id} open={index === 0 || item.status !== "ok"}>
+              <details className="trace-step" key={item.id} open={item.status !== "ok"}>
                 <summary>
-                  <span>#{item.id} {item.component}</span>
-                  <span>{item.provider} / {item.model}</span>
+                  <span>
+                    #{item.id} {item.component}
+                  </span>
+                  <span>
+                    {item.provider} / {item.model}
+                  </span>
                   <span>{item.status}</span>
                   <span>{metricText(item.duration_ms, " ms")}</span>
                   <span>{metricText(item.total_tokens, " tok")}</span>
@@ -258,14 +282,14 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
                 <dl className="detail-list compact-list">
                   <div>
                     <dt>Span</dt>
-                    <dd>{shortHash(item.span_id ?? undefined)}</dd>
+                    <dd>{shortHash(item.span_id)}</dd>
                   </div>
                   <div>
                     <dt>Endpoint</dt>
                     <dd>{item.endpoint ?? "-"}</dd>
                   </div>
                   <div>
-                    <dt>创建时间</dt>
+                    <dt>Created At</dt>
                     <dd>{item.created_at ?? "-"}</dd>
                   </div>
                   <div>
@@ -283,25 +307,25 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
                     </dd>
                   </div>
                   <div>
-                    <dt>成本</dt>
+                    <dt>Cost</dt>
                     <dd>{moneyText(item.cost_usd)}</dd>
                   </div>
                   <div>
-                    <dt>输入 Hash</dt>
+                    <dt>Input Hash</dt>
                     <dd>{shortHash(item.input_hash)}</dd>
                   </div>
                   <div>
-                    <dt>输出 Hash</dt>
+                    <dt>Output Hash</dt>
                     <dd>{shortHash(item.output_hash)}</dd>
                   </div>
                 </dl>
                 <div className="step-grid">
                   <div>
-                    <h3>请求摘要</h3>
+                    <h3>Request Summary</h3>
                     <pre className="code-box">{formatJson(item.input_summary)}</pre>
                   </div>
                   <div>
-                    <h3>返回摘要</h3>
+                    <h3>Response Summary</h3>
                     <pre className="code-box">{formatJson(item.output_summary)}</pre>
                   </div>
                   <div>
@@ -309,12 +333,12 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
                     <pre className="code-box">{formatJson(item.metadata ?? {})}</pre>
                   </div>
                   <div>
-                    <h3>脱敏请求 Payload</h3>
-                    <pre className="code-box large-code">{item.request_json ?? "未请求 include_payloads"}</pre>
+                    <h3>Sanitized Request Payload</h3>
+                    <pre className="code-box large-code">{item.request_json ?? "not requested"}</pre>
                   </div>
                   <div>
-                    <h3>脱敏返回 Payload</h3>
-                    <pre className="code-box large-code">{item.response_json ?? "未请求 include_payloads"}</pre>
+                    <h3>Sanitized Response Payload</h3>
+                    <pre className="code-box large-code">{item.response_json ?? "not requested"}</pre>
                   </div>
                 </div>
                 {item.error_message ? <p className="error-state">{item.error_message}</p> : null}
@@ -325,25 +349,19 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
       </section>
 
       <section className="panel section-gap">
-        <h2>Badcase 与回流</h2>
+        <h2>Badcases And Replay</h2>
         {badcases.length === 0 ? (
-          <p className="muted">暂无人工复核 badcase。后续 eval 页面会把这里的记录沉淀为回归集。</p>
+          <p className="muted">No manual badcase review records yet.</p>
         ) : (
-          <pre className="code-box">{formatJson(badcases)}</pre>
+          <JsonDetails title="Badcase Records JSON" value={badcases} />
         )}
       </section>
 
       <section className="panel section-gap">
-        <h2>原始结构化结果</h2>
+        <h2>Structured Result</h2>
         <div className="step-grid">
-          <div>
-            <h3>Parsed Plan</h3>
-            <pre className="code-box large-code">{formatJson(parsedPlan)}</pre>
-          </div>
-          <div>
-            <h3>Verdict / Redaction</h3>
-            <pre className="code-box large-code">{formatJson({ verdict, redaction: planRun?.redaction })}</pre>
-          </div>
+          <JsonDetails title="Parsed Plan JSON" value={parsedPlan} large />
+          <JsonDetails title="Verdict / Redaction JSON" value={{ verdict, redaction: planRun?.redaction }} large />
         </div>
       </section>
     </>
