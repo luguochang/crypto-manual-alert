@@ -1,52 +1,38 @@
 import Link from "next/link";
 import { getRunDetail } from "@/lib/api/runs";
-import { AgentAuditPanel } from "./agent-audit-panel";
-import { DecisionSummaryCard } from "./decision-summary-card";
-import { asNumber, asString } from "@/app/shared/coerce";
-import { JsonDetails, formatJson } from "@/app/shared/json-details";
+import { DecisionTab } from "./decision-tab";
+import { AgentTab } from "./agent-tab";
+import { EvalTab } from "./eval-tab";
+import { RawTab } from "./raw-tab";
 import { StatusBadge } from "@/app/shared/status-badge";
+import { Icon, type IconName } from "@/app/shared/icons";
 
 export const dynamic = "force-dynamic";
 
 type TraceDetailPageProps = {
-  params: Promise<{
-    traceId: string;
-  }>;
+  params: Promise<{ traceId: string }>;
+  searchParams: Promise<{ tab?: string }>;
 };
 
-function shortHash(value: string | null | undefined) {
-  if (!value) {
-    return "-";
-  }
-  return value.length > 16 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
+// Cockpit 三屏：第一屏业务驾驶舱（管理者）、第二屏业务矩阵（工程师）、第三屏 raw 辅助。
+// 兼容旧 tab id（decision/agent/eval）以避免外链失效。
+type TabId = "cockpit" | "matrix" | "raw";
+
+const TABS: { id: TabId; label: string; icon: IconName }[] = [
+  { id: "cockpit", label: "驾驶舱", icon: "bell" },
+  { id: "matrix", label: "业务矩阵", icon: "activity" },
+  { id: "raw", label: "原始数据", icon: "database" }
+];
+
+function resolveTab(raw: string | undefined): TabId {
+  if (raw === "matrix" || raw === "agent" || raw === "eval") return "matrix";
+  if (raw === "raw") return "raw";
+  return "cockpit";
 }
 
-function valueText(value: unknown) {
-  if (value === null || value === undefined || value === "") {
-    return "-";
-  }
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return formatJson(value);
-}
-
-function metricText(value: number | null | undefined, suffix = "") {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  return `${value}${suffix}`;
-}
-
-function moneyText(value: number | null | undefined) {
-  if (value === null || value === undefined) {
-    return "unknown";
-  }
-  return `$${value.toFixed(6)}`;
-}
-
-export default async function TraceDetailPage({ params }: TraceDetailPageProps) {
+export default async function TraceDetailPage({ params, searchParams }: TraceDetailPageProps) {
   const { traceId } = await params;
+  const tab = resolveTab((await searchParams).tab);
   const result = await getRunDetail(traceId, { includePayloads: true });
 
   if (!result.ok) {
@@ -55,10 +41,10 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
         <header className="page-header">
           <div>
             <h1>Trace Detail</h1>
-            <p>Trace ID: {traceId}</p>
+            <p className="mono">Trace ID: {traceId}</p>
           </div>
           <Link className="button button-secondary" href="/runs">
-            Back to Runs
+            <Icon name="chevron-right" size={14} /> 返回
           </Link>
         </header>
         <div className="error-state">{result.error.message}</div>
@@ -76,294 +62,53 @@ export default async function TraceDetailPage({ params }: TraceDetailPageProps) 
   const spans = detail.spans ?? [];
   const llmInteractions = detail.llm_interactions ?? [];
   const badcases = detail.badcases ?? [];
-  const totalKnownTokens = llmInteractions.reduce((sum, item) => sum + (item.total_tokens ?? 0), 0);
-  const missingTokenCount = llmInteractions.filter((item) => item.total_tokens == null).length;
-  const totalKnownCost = llmInteractions.reduce((sum, item) => sum + (item.cost_usd ?? 0), 0);
-  const missingCostCount = llmInteractions.filter((item) => item.cost_usd == null).length;
-  const knownCostCount = llmInteractions.length - missingCostCount;
 
   return (
     <>
       <header className="page-header">
         <div>
           <h1>Trace Detail</h1>
-          <p>Trace ID: {trace.trace_id}</p>
+          <p className="mono">Trace ID: {trace.trace_id}</p>
         </div>
         <Link className="button button-secondary" href="/runs">
-          Back to Runs
+          <Icon name="chevron-right" size={14} /> 返回列表
         </Link>
       </header>
 
-      <section className="trace-summary-grid" aria-label="Trace summary">
-        <div className="stat-card">
-          <span>Run Status</span>
-          <strong>
-            <StatusBadge status={trace.status} />
-          </strong>
-        </div>
-        <div className="stat-card">
-          <span>Final Action</span>
-          <strong>{trace.final_action ?? "-"}</strong>
-        </div>
-        <div className="stat-card">
-          <span>Spans</span>
-          <strong>{spans.length}</strong>
-        </div>
-        <div className="stat-card">
-          <span>LLM Calls</span>
-          <strong>{llmInteractions.length}</strong>
-        </div>
-      </section>
-
-      <DecisionSummaryCard
-        mainAction={asString(parsedPlan.main_action)}
-        probability={asNumber(parsedPlan.probability)}
-        referencePrice={asNumber(parsedPlan.reference_price)}
-        entryTrigger={asNumber(parsedPlan.entry_trigger)}
-        stopPrice={asNumber(parsedPlan.stop_price)}
-        target1={asNumber(parsedPlan.target_1)}
-        target2={asNumber(parsedPlan.target_2)}
-        allowed={trace.allowed}
-        symbol={trace.symbol}
-        horizon={asString(parsedPlan.horizon)}
-        executionMode={agentAudit?.mode}
-        productionFinalInputMode={agentAudit?.input_lineage?.production_final_input_mode}
-        analysis={analysis}
-        verdictReasons={verdict.reasons}
-      />
-
-      <AgentAuditPanel agentAudit={agentAudit} />
-
-      <div className="grid-2 section-gap">
-        <section className="panel">
-          <h2>Run Info</h2>
-          <dl className="detail-list">
-            <div>
-              <dt>Symbol</dt>
-              <dd>{trace.symbol}</dd>
-            </div>
-            <div>
-              <dt>Run Type</dt>
-              <dd>{trace.run_type}</dd>
-            </div>
-            <div>
-              <dt>Risk Allowed</dt>
-              <dd>{trace.allowed == null ? "-" : trace.allowed ? "yes" : "no"}</dd>
-            </div>
-            <div>
-              <dt>Plan ID</dt>
-              <dd>{trace.final_plan_id ?? planRun?.plan_id ?? "-"}</dd>
-            </div>
-            <div>
-              <dt>Created At</dt>
-              <dd>{trace.created_at}</dd>
-            </div>
-            <div>
-              <dt>Ended At</dt>
-              <dd>{trace.ended_at ?? "-"}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <section className="panel">
-          <h2>Decision Summary</h2>
-          <dl className="detail-list">
-            <div>
-              <dt>Main Action</dt>
-              <dd>{valueText(parsedPlan.main_action)}</dd>
-            </div>
-            <div>
-              <dt>Probability</dt>
-              <dd>{valueText(parsedPlan.probability)}</dd>
-            </div>
-            <div>
-              <dt>Entry Trigger</dt>
-              <dd>{valueText(parsedPlan.entry_trigger)}</dd>
-            </div>
-            <div>
-              <dt>Stop</dt>
-              <dd>{valueText(parsedPlan.stop_price)}</dd>
-            </div>
-            <div>
-              <dt>Targets</dt>
-              <dd>
-                {valueText(parsedPlan.target_1)} / {valueText(parsedPlan.target_2)}
-              </dd>
-            </div>
-          </dl>
-        </section>
+      <div className="status-bar">
+        <span className="status-item"><StatusBadge status={trace.status} /></span>
+        <span className="status-item">交易对 <strong>{trace.symbol}</strong></span>
+        <span className="status-item">动作 <strong>{trace.final_action ?? "-"}</strong></span>
+        <span className="status-item">风险 <strong style={{ color: trace.allowed ? "var(--success)" : "var(--danger)" }}>{trace.allowed == null ? "-" : trace.allowed ? "allowed" : "blocked"}</strong></span>
+        <span className="status-item">Spans <strong>{spans.length}</strong></span>
+        <span className="status-item">LLM <strong>{llmInteractions.length}</strong></span>
+        <span className="status-item">创建 <strong className="mono">{trace.created_at}</strong></span>
       </div>
 
-      <section className="panel section-gap">
-        <h2>Analysis</h2>
-        <div className="analysis-grid">
-          <div>
-            <h3>Reasoning Summary</h3>
-            <p className="analysis-text">{valueText(analysis.reasoning_summary)}</p>
-          </div>
-          <div>
-            <h3>Opposing Thesis</h3>
-            <p className="analysis-text">{valueText(analysis.opposing_thesis)}</p>
-          </div>
-          <div>
-            <h3>Data Gaps</h3>
-            <JsonDetails title="Data Gaps JSON" value={analysis.data_gaps ?? []} light />
-          </div>
-          <div>
-            <h3>Risk Rule Hits</h3>
-            <JsonDetails title="Risk Rule Hits JSON" value={analysis.risk_rule_hits ?? verdict} light />
-          </div>
-        </div>
-      </section>
+      <nav className="tabs" aria-label="Run detail tabs">
+        {TABS.map((t) => (
+          <Link key={t.id} href={`/runs/${encodeURIComponent(trace.trace_id)}?tab=${t.id}`} className={`tab ${tab === t.id ? "active" : ""}`}>
+            <Icon name={t.icon} size={15} />
+            {t.label}
+            {t.id === "matrix" && spans.length + llmInteractions.length > 0 ? (
+              <span className="tab-count">{spans.length + llmInteractions.length}</span>
+            ) : null}
+          </Link>
+        ))}
+      </nav>
 
-      <section className="panel section-gap">
-        <h2>Span Timeline</h2>
-        <div className="timeline-list">
-          {spans.map((span, index) => (
-            <details className="trace-step" key={span.span_id} open={span.status !== "ok"}>
-              <summary>
-                <span>
-                  {index + 1}. {span.span_name}
-                </span>
-                <span>{span.status}</span>
-                <span>{span.duration_ms} ms</span>
-              </summary>
-              <div className="step-grid">
-                <div>
-                  <h3>Input Summary</h3>
-                  <pre className="code-box">{formatJson(span.input_summary)}</pre>
-                </div>
-                <div>
-                  <h3>Output Summary</h3>
-                  <pre className="code-box">{formatJson(span.output_summary)}</pre>
-                </div>
-              </div>
-              {span.error_message ? <p className="error-state">{span.error_message}</p> : null}
-            </details>
-          ))}
-        </div>
-      </section>
-
-      <section className="panel section-gap">
-        <h2>LLM Requests And Responses</h2>
-        {llmInteractions.length === 0 ? (
-          <p className="muted">No LLM interactions were recorded for this trace.</p>
-        ) : (
-          <div className="timeline-list">
-            <dl className="detail-list compact-list">
-              <div>
-                <dt>Known Tokens</dt>
-                <dd>
-                  {totalKnownTokens}
-                  {missingTokenCount > 0 ? ` (${missingTokenCount} calls missing usage)` : ""}
-                </dd>
-              </div>
-              <div>
-                <dt>Known Cost</dt>
-                <dd>
-                  {knownCostCount > 0 ? moneyText(totalKnownCost) : "unknown"}
-                  {missingCostCount > 0 ? ` (${missingCostCount} calls missing price config)` : ""}
-                </dd>
-              </div>
-            </dl>
-            {llmInteractions.map((item, index) => (
-              <details className="trace-step" key={item.id} open={item.status !== "ok"}>
-                <summary>
-                  <span>
-                    #{item.id} {item.component}
-                  </span>
-                  <span>
-                    {item.provider} / {item.model}
-                  </span>
-                  <span>{item.status}</span>
-                  <span>{metricText(item.duration_ms, " ms")}</span>
-                  <span>{metricText(item.total_tokens, " tok")}</span>
-                </summary>
-                <dl className="detail-list compact-list">
-                  <div>
-                    <dt>Span</dt>
-                    <dd>{shortHash(item.span_id)}</dd>
-                  </div>
-                  <div>
-                    <dt>Endpoint</dt>
-                    <dd>{item.endpoint ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Created At</dt>
-                    <dd>{item.created_at ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Finish</dt>
-                    <dd>{item.finish_reason ?? "-"}</dd>
-                  </div>
-                  <div>
-                    <dt>Retry</dt>
-                    <dd>{item.retry_count ?? 0}</dd>
-                  </div>
-                  <div>
-                    <dt>Prompt / Completion</dt>
-                    <dd>
-                      {metricText(item.prompt_tokens)} / {metricText(item.completion_tokens)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Cost</dt>
-                    <dd>{moneyText(item.cost_usd)}</dd>
-                  </div>
-                  <div>
-                    <dt>Input Hash</dt>
-                    <dd>{shortHash(item.input_hash)}</dd>
-                  </div>
-                  <div>
-                    <dt>Output Hash</dt>
-                    <dd>{shortHash(item.output_hash)}</dd>
-                  </div>
-                </dl>
-                <div className="step-grid">
-                  <div>
-                    <h3>Request Summary</h3>
-                    <pre className="code-box">{formatJson(item.input_summary)}</pre>
-                  </div>
-                  <div>
-                    <h3>Response Summary</h3>
-                    <pre className="code-box">{formatJson(item.output_summary)}</pre>
-                  </div>
-                  <div>
-                    <h3>Metadata</h3>
-                    <pre className="code-box">{formatJson(item.metadata ?? {})}</pre>
-                  </div>
-                  <div>
-                    <h3>Sanitized Request Payload</h3>
-                    <pre className="code-box large-code">{item.request_json ?? "not requested"}</pre>
-                  </div>
-                  <div>
-                    <h3>Sanitized Response Payload</h3>
-                    <pre className="code-box large-code">{item.response_json ?? "not requested"}</pre>
-                  </div>
-                </div>
-                {item.error_message ? <p className="error-state">{item.error_message}</p> : null}
-              </details>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="panel section-gap">
-        <h2>Badcases And Replay</h2>
-        {badcases.length === 0 ? (
-          <p className="muted">No manual badcase review records yet.</p>
-        ) : (
-          <JsonDetails title="Badcase Records JSON" value={badcases} />
-        )}
-      </section>
-
-      <section className="panel section-gap">
-        <h2>Structured Result</h2>
-        <div className="step-grid">
-          <JsonDetails title="Parsed Plan JSON" value={parsedPlan} large />
-          <JsonDetails title="Verdict / Redaction JSON" value={{ verdict, redaction: planRun?.redaction }} large />
-        </div>
-      </section>
+      {tab === "cockpit" ? (
+        <DecisionTab parsedPlan={parsedPlan} verdict={verdict} agentAudit={agentAudit} analysis={analysis} trace={trace} planRun={planRun} />
+      ) : null}
+      {tab === "matrix" ? (
+        <>
+          <AgentTab agentAudit={agentAudit} spans={spans} llmInteractions={llmInteractions} />
+          <EvalTab agentAudit={agentAudit} badcases={badcases} />
+        </>
+      ) : null}
+      {tab === "raw" ? (
+        <RawTab parsedPlan={parsedPlan} verdict={verdict} planRun={planRun} analysis={analysis} />
+      ) : null}
     </>
   );
 }

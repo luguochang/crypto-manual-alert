@@ -1,18 +1,12 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Suspense } from "react";
 import "./styles.css";
+import { Sidebar } from "./shared/sidebar";
 
 export const metadata: Metadata = {
   title: "Crypto Manual Alert",
-  description: "FastAPI + Next.js operations workbench"
+  description: "人工确认的加密货币操作提醒与可观测工作台"
 };
-
-const navItems = [
-  { href: "/", label: "Dashboard" },
-  { href: "/manual-run", label: "Manual Run" },
-  { href: "/runs", label: "Runs" },
-  { href: "/eval", label: "Eval" }
-];
 
 export default function RootLayout({
   children
@@ -31,13 +25,14 @@ export default function RootLayout({
                 <span>Ops Workbench</span>
               </div>
             </div>
-            <nav className="nav-list" aria-label="主导航">
-              {navItems.map((item) => (
-                <Link key={item.href} href={item.href}>
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
+            <Suspense fallback={null}>
+            <Sidebar />
+            </Suspense>
+            <div className="sidebar-footer">
+              人工确认 · 非自动交易
+              <br />
+              manual_execution_required
+            </div>
           </aside>
           <main className="main-panel">{children}</main>
         </div>

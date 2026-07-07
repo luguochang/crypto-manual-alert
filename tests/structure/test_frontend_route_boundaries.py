@@ -59,15 +59,21 @@ def test_run_detail_tool_call_graph_exposes_tool_error_summary():
 
 
 def test_run_detail_json_payloads_are_collapsed_auxiliary_details():
-    source = RUN_DETAIL_ROUTE.read_text(encoding="utf-8")
+    # tab 拆分后 JsonDetails 落在 decision-tab/eval-tab/raw-tab 等组件里，
+    # 扫描整个 run detail 目录以保留意图：JSON 用 JsonDetails 折叠，不用裸 <pre>。
+    sources = [
+        path.read_text(encoding="utf-8")
+        for path in RUN_DETAIL_ROUTE.parent.glob("*.tsx")
+    ]
+    combined = "\n".join(sources)
 
-    assert "JsonDetails" in source
-    assert 'open={index < 3}' not in source
-    assert 'open={index === 0 || item.status !== "ok"}' not in source
-    assert '<pre className="code-box light-code">{formatJson(analysis.data_gaps ?? [])}</pre>' not in source
-    assert '<pre className="code-box light-code">{formatJson(analysis.risk_rule_hits ?? verdict)}</pre>' not in source
-    assert '<pre className="code-box">{formatJson(badcases)}</pre>' not in source
-    assert '<pre className="code-box large-code">{formatJson(parsedPlan)}</pre>' not in source
+    assert "JsonDetails" in combined
+    assert 'open={index < 3}' not in combined
+    assert 'open={index === 0 || item.status !== "ok"}' not in combined
+    assert '<pre className="code-box light-code">{formatJson(analysis.data_gaps ?? [])}</pre>' not in combined
+    assert '<pre className="code-box light-code">{formatJson(analysis.risk_rule_hits ?? verdict)}</pre>' not in combined
+    assert '<pre className="code-box">{formatJson(badcases)}</pre>' not in combined
+    assert '<pre className="code-box large-code">{formatJson(parsedPlan)}</pre>' not in combined
 
 
 def _line_count(path: Path) -> int:

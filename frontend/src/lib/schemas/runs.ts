@@ -377,3 +377,6 @@ export type RunList = z.output<typeof runListSchema>;
 export type RunDetail = z.output<typeof runDetailSchema>;
 export type DashboardStats = z.output<typeof dashboardStatsSchema>;
 export type AgentAuditView = z.output<typeof agentAuditViewSchema>;
+export type TraceSpan = z.output<typeof traceSpanSchema>;
+export type LlmInteraction = z.output<typeof llmInteractionSchema>;
+export type PlanRun = z.output<typeof planRunSchema>;

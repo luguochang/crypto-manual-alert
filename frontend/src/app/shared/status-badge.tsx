@@ -1,3 +1,4 @@
+import { Icon, type IconName } from "./icons";
 import type { RunStatus } from "@/lib/schemas/runs";
 
 const statusText: Record<RunStatus, string> = {
@@ -16,6 +17,19 @@ const statusClass: Record<RunStatus, string> = {
   ok: "badge-success"
 };
 
+const statusIcon: Record<RunStatus, IconName> = {
+  running: "activity",
+  allowed: "check",
+  blocked: "x",
+  failed: "alert",
+  ok: "check"
+};
+
 export function StatusBadge({ status }: { status: RunStatus }) {
-  return <span className={`badge ${statusClass[status]}`}>{statusText[status]}</span>;
+  return (
+    <span className={`badge ${statusClass[status]}`}>
+      <Icon name={statusIcon[status]} size={13} />
+      {statusText[status]}
+    </span>
+  );
 }

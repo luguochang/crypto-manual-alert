@@ -43,7 +43,7 @@ export default async function EvalPage() {
           <h1>Eval 工作台</h1>
           <p>查看 badcase、FrozenInput、Replay、Judge 分数和生产副作用守卫。</p>
         </div>
-        <Link className="button button-secondary" href="/runs">
+        <Link className="button button-secondary" href="/runs?view=alerts">
           查看 Trace
         </Link>
       </header>
