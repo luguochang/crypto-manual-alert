@@ -17,8 +17,8 @@ export function classifyDirection(action: string | undefined | null): Direction 
 }
 
 export const DIRECTION_LABEL: Record<Direction, string> = {
-  long: "做多 LONG",
-  short: "做空 SHORT",
+  long: "做多",
+  short: "做空",
   wait: "观望 / 平仓",
   unknown: "未明确"
 };

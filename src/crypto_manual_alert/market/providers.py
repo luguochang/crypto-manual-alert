@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+import math
 from typing import Any, Protocol
 
 import httpx
@@ -48,6 +49,12 @@ class OkxPublicMarketDataProvider:
         for name, path, params, parser in [
             ("ticker", "/api/v5/market/ticker", {"instId": symbol}, self._parse_ticker),
             ("mark", "/api/v5/public/mark-price", {"instType": "SWAP", "instId": symbol}, self._parse_mark),
+            (
+                "index",
+                "/api/v5/market/index-tickers",
+                {"instId": _index_instrument_id(symbol)},
+                self._parse_index,
+            ),
             ("funding_rate", "/api/v5/public/funding-rate", {"instId": symbol}, self._parse_funding),
             (
                 "open_interest",
@@ -81,7 +88,14 @@ class OkxPublicMarketDataProvider:
         if self.http_get is not None:
             payload = self.http_get(path, params)
         else:
-            with httpx.Client(base_url=self.base_url, timeout=self.timeout) as client:
+            client_kwargs: dict[str, Any] = {
+                "base_url": self.base_url,
+                "timeout": self.timeout,
+                "trust_env": self.config.market_data.http_trust_env,
+            }
+            if self.config.market_data.http_proxy:
+                client_kwargs["proxy"] = self.config.market_data.http_proxy
+            with httpx.Client(**client_kwargs) as client:
                 response = client.get(path, params=params)
                 response.raise_for_status()
                 payload = response.json()
@@ -109,10 +123,12 @@ class OkxPublicMarketDataProvider:
     def _parse_mark(self, _: str, data: dict[str, Any]) -> dict[str, DataPoint]:
         row = self._first(data)
         ts = _int_or_none(row.get("ts"))
-        return {
-            "mark": DataPoint("mark", _float_or_none(row.get("markPx")), ts, "okx_public"),
-            "index": DataPoint("index", _float_or_none(row.get("idxPx")), ts, "okx_public"),
-        }
+        return {"mark": DataPoint("mark", _required_finite_float(row.get("markPx"), "markPx"), ts, "okx_public")}
+
+    def _parse_index(self, _: str, data: dict[str, Any]) -> dict[str, DataPoint]:
+        row = self._first(data)
+        ts = _int_or_none(row.get("ts"))
+        return {"index": DataPoint("index", _required_finite_float(row.get("idxPx"), "idxPx"), ts, "okx_public")}
 
     def _parse_funding(self, _: str, data: dict[str, Any]) -> dict[str, DataPoint]:
         row = self._first(data)
@@ -127,7 +143,11 @@ class OkxPublicMarketDataProvider:
     def _parse_book(self, _: str, data: dict[str, Any]) -> dict[str, DataPoint]:
         row = self._first(data)
         ts = _int_or_none(row.get("ts"))
-        value = {"asks": row.get("asks") or [], "bids": row.get("bids") or []}
+        asks = row.get("asks")
+        bids = row.get("bids")
+        if not _book_side_is_usable(asks) or not _book_side_is_usable(bids):
+            raise RuntimeError("OKX order book must contain valid ask and bid levels")
+        value = {"asks": asks, "bids": bids}
         return {"order_book": DataPoint("order_book", value, ts, "okx_public")}
 
     def _parse_candles(self, _: str, data: dict[str, Any]) -> dict[str, DataPoint]:
@@ -172,6 +192,42 @@ def _float_or_none(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _required_finite_float(value: Any, field_name: str) -> float:
+    parsed = _float_or_none(value)
+    if parsed is None or not math.isfinite(parsed):
+        raise RuntimeError(f"OKX response field {field_name} must be a finite number")
+    return parsed
+
+
+def _index_instrument_id(symbol: str) -> str:
+    normalized = symbol.strip()
+    if normalized.upper().endswith("-SWAP"):
+        return normalized[:-5]
+    return normalized
+
+
+def _book_side_is_usable(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(
+        isinstance(level, (list, tuple))
+        and len(level) >= 2
+        and _is_positive_finite_number(level[0])
+        and _is_positive_finite_number(level[1])
+        for level in value
+    )
+
+
+def _is_positive_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
 
 
 def _int_or_none(value: Any) -> int | None:

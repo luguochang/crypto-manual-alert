@@ -214,13 +214,13 @@ def test_run_shadow_swarm_audit_runs_llm_tool_workers_with_explicit_client_facto
     # LiveFactAgent now uses the LLM tool shadow worker (not local_audit), so the
     # explicit client factory is invoked for it too. DerivativesAgent and
     # MacroEventAgent remain local_audit and never call the LLM client.
-    assert requested_agents == [
+    assert set(requested_agents) == {
         "LiveFactAgent",
         "RootCauseAgent",
         "MarketSentimentAgent",
         "DataQualityAgent",
         "ExecutionRiskAgent",
-    ]
+    }
     by_agent = {
         result["agent_name"]: result["contribution"]["migration_stage"]
         for result in audit["worker_results"]

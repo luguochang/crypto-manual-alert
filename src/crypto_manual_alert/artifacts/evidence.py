@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from crypto_manual_alert.research_pipeline import ResearchAudit
 EXECUTION_FACT_TYPES = {"mark", "index", "order_book"}
 AUXILIARY_FACT_TYPES = {"funding", "open_interest", "liquidation"}
 EVENT_FACT_TYPES = {"active_event_status"}
+EVENT_STATUS_VALUES = {"active_market_reaction", "no_active_event", "released"}
 MACRO_FACT_TYPES = {"macro_event"}
 MACRO_REQUIRED_FIELDS = ("actual", "consensus", "market_reaction", "released_at", "surprise", "event_name")
 FALLBACK_SOURCE_TYPES = {"aggregator_api", "web_derived", "search_derived"}
@@ -157,6 +159,7 @@ def from_market_snapshot(snapshot: MarketSnapshot) -> list[EvidencePacket]:
             data_type in EXECUTION_FACT_TYPES
             and source_type == "exchange_native"
             and freshness_status == "fresh"
+            and _has_usable_execution_value(data_type, point.value)
         )
         fallback_used = _fallback_used(data_type, source_type)
         packets.append(
@@ -309,7 +312,27 @@ def _reason_for_missing_fact(
     if freshness and all(status != "fresh" for status in freshness):
         return f"{name}: {','.join(freshness)}"
     source_types = sorted({packet.source_type for packet in candidates})
+    if name in EVENT_FACT_TYPES:
+        if not any(_has_usable_event_value(packet) for packet in candidates):
+            return f"{name}: unusable value"
+        return f"{name}: present but not event fact source; source_types={','.join(source_types)}"
+    if not any(packet.source_type == "exchange_native" for packet in candidates):
+        return f"{name}: present but not execution fact source; source_types={','.join(source_types)}"
+    if not any(_has_usable_execution_value(packet.data_type, packet.value) for packet in candidates):
+        return f"{name}: unusable value"
     return f"{name}: present but not execution fact source; source_types={','.join(source_types)}"
+
+
+def _has_usable_execution_value(data_type: str, value: Any) -> bool:
+    if data_type in {"mark", "index"}:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    if data_type == "order_book":
+        if not isinstance(value, dict):
+            return False
+        asks = value.get("asks")
+        bids = value.get("bids")
+        return _book_side_is_usable(asks) and _book_side_is_usable(bids)
+    return True
 
 
 def _conflicting_execution_facts(packets: list[EvidencePacket]) -> list[str]:
@@ -337,7 +360,56 @@ def _can_satisfy_auxiliary_fact(packet: EvidencePacket) -> bool:
 
 
 def _can_satisfy_event_fact(packet: EvidencePacket) -> bool:
-    return packet.freshness_status == "fresh" and packet.source_type in {"event_pool", "official"}
+    return (
+        packet.freshness_status == "fresh"
+        and packet.source_type in {"event_pool", "official"}
+        and _has_usable_event_value(packet)
+    )
+
+
+def _has_usable_event_value(packet: EvidencePacket) -> bool:
+    value = packet.value
+    if not isinstance(value, dict):
+        return False
+    status = str(value.get("status") or "").strip()
+    if status not in EVENT_STATUS_VALUES:
+        return False
+    if status != "no_active_event":
+        return True
+    required = ("provider", "operator_ref", "confirmed_at", "source_ref", "horizon", "valid_until")
+    if value.get("metadata_complete") is not True:
+        return False
+    if any(not str(value.get(name) or "").strip() for name in required):
+        return False
+    try:
+        valid_until = datetime.fromisoformat(str(value["valid_until"]).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    return valid_until > packet.retrieved_at
+
+
+def _book_side_is_usable(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    return all(
+        isinstance(level, (list, tuple))
+        and len(level) >= 2
+        and _is_positive_finite_number(level[0])
+        and _is_positive_finite_number(level[1])
+        for level in value
+    )
+
+
+def _is_positive_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
 
 
 def _missing_macro_facts(packets: list[EvidencePacket]) -> list[str]:

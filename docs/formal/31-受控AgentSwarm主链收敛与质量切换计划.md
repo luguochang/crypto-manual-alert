@@ -1,5 +1,7 @@
 # 受控 Agent Swarm 主链收敛与质量切换计划
 
+> **当前定位（2026-07-09）**：本文是历史 AgentSwarm 迁移进度记录，不是当前日常执行入口。当前交付执行、P0 证据闭环和 checklist 以 `docs/implementation/2026-07-09-current-delivery-checklist.md` 为准。当前 MVP production main path 仍是 `legacy_baseline + legacy_prompt`；任何 `decision_input` / AgentSwarm 主链切换都需要单独 release review。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** 将当前固定 pipeline、并发 search、单次 leader review 的候选链路，逐步收敛为“轻量自研 Workflow + LeadAgent + 多 Worker Agent + DecisionInput + Gate”的受控 Agent Swarm 主链，同时保留可回放、可审计、可人工切换和可回退的资金安全边界。

@@ -57,6 +57,8 @@ def test_decision_run_context_summary_is_stable_for_api_and_trace_boundaries():
         "horizon": None,
         "session_id": None,
         "manual_only": True,
+        "position": None,
+        "risk_mode": None,
         "memory_snapshot": {
             "snapshot_id": "memory:none:empty",
             "session_id": None,

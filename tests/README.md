@@ -13,9 +13,23 @@ python tools\local_stack\run_local_checks.py
 1. Python 单元测试：`python -m pytest -p no:cacheprovider`
 2. 前端类型检查：`npm run typecheck`
 3. 前端生产构建：`npm run build`
-4. 本地栈烟测：启动 API 和前端，检查健康接口、CORS 预检、手动运行、运行列表、运行详情和前端路由。
+4. Playwright 真实浏览器自测：生产 Next.js 构建 + 本地 API，覆盖桌面/移动产品路径、DOM 扫描和产品文案安全。
+5. 本地栈 no-secret smoke 矩阵，按顺序执行：
+   - 默认 fixture profile。
+   - mock LLM profile。
+   - actionable staging profile。
+   - mocked outcome visibility profile。
+   - collect-outcomes fixture profile。
 
-注意：执行前需要确保 `8010` 和 `3001` 端口没有被其他进程占用。脚本会给 pytest 分配独立临时目录，并在构建前清理 `frontend/.next`，避免历史缓存或上一次开发服务留下的锁影响结果。
+注意：执行前需要确保 `8010`、`3001`、`8011`、`8012`、`8013` 端口没有被其他进程占用。脚本会给 pytest 分配独立临时目录，并在构建前清理 `frontend/.next`，避免历史缓存或上一次开发服务留下的锁影响结果。`8013` 仅用于 opt-in Server Component fault API，不代表真实生产服务端口。
+
+该命令是不需要真实密钥的本地闭环矩阵；它不会把 `prod-actionable` release gate 混进绿色本地检查。真实生产可交付证明仍需单独运行：
+
+```powershell
+python tools\local_stack\smoke_local_stack.py --prod-actionable --fail-on-skip
+```
+
+缺少真实 Bark、OpenAI-compatible endpoint/model/key、`MACRO_EVENT_PROVIDER=no_active_event`，或缺少 `MACRO_EVENT_OPERATOR_REF` / `MACRO_EVENT_CONFIRMED_AT` / `MACRO_EVENT_SOURCE_REF` / `MACRO_EVENT_ASSERTION_HORIZON` / `MACRO_EVENT_VALID_UNTIL` 这组人工事件断言元数据时，上述严格门禁应非零退出；这表示生产证明未完成，不是本地矩阵失败。
 
 ## 只跑本地栈烟测
 
@@ -44,6 +58,7 @@ python tools\local_stack\start_local_stack.py
 
 - API: `http://127.0.0.1:8010`
 - 前端: `http://127.0.0.1:3001`
+- 可选故障 API: `http://127.0.0.1:8013`，仅在 `--with-error-internal-api` / Server Component fault tests 中启动。
 
 停止服务：
 

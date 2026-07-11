@@ -101,6 +101,30 @@ class OutcomeStore:
                 outcomes.append(outcome_from_public_dict(payload))
         return outcomes
 
+    def list_outcomes_by_decision_refs(self, decision_refs: list[str]) -> list[DecisionOutcome]:
+        """Return outcomes for exact decision refs in stable target/window order."""
+
+        refs = sorted({ref for ref in decision_refs if ref})
+        if not refs:
+            return []
+        placeholders = ", ".join("?" for _ in refs)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT outcome_json
+                FROM eval_decision_outcomes
+                WHERE decision_ref IN ({placeholders})
+                ORDER BY decision_ref ASC, evaluation_target ASC, window_name ASC
+                """,
+                tuple(refs),
+            ).fetchall()
+        outcomes: list[DecisionOutcome] = []
+        for row in rows:
+            payload = json.loads(str(row["outcome_json"]))
+            if isinstance(payload, dict):
+                outcomes.append(outcome_from_public_dict(payload))
+        return outcomes
+
 
 def _ensure_multi_window_primary_key(conn: sqlite3.Connection) -> None:
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(eval_decision_outcomes)").fetchall()]

@@ -95,6 +95,42 @@ def test_openai_compatible_engine_records_llm_interaction_when_trace_is_active(t
     assert row["retry_count"] == 0
 
 
+def test_openai_compatible_engine_disables_environment_proxy_for_default_client(monkeypatch):
+    created_clients: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": '{"instrument":"ETH-USDT-SWAP","main_action":"no trade","manual_execution_required":true}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+
+    class Client:
+        def __init__(self, **kwargs):
+            created_clients.append(kwargs)
+
+        def post(self, *args, **kwargs):
+            return Response()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    engine = OpenAICompatibleDecisionEngine(
+        base_url="http://127.0.0.1:8011",
+        api_key="test-key",
+        model="mock-crypto-plan",
+        timeout_seconds=30,
+    )
+
+    engine.run({"market_snapshot": {"symbol": "ETH-USDT-SWAP"}})
+
+    assert created_clients == [{"timeout": 30, "trust_env": False}]
+
+
 def test_command_decision_engine_rejects_shell_string_commands():
     with pytest.raises(ValueError, match="disabled"):
         CommandDecisionEngine("python decide.py", timeout_seconds=30)

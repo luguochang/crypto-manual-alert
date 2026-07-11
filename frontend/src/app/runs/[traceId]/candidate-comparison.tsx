@@ -1,4 +1,5 @@
 import type { AgentAuditView } from "@/lib/schemas/runs";
+import { safeDisplayError } from "@/app/shared/safe-error";
 
 type CandidateComparisonProps = {
   comparison: AgentAuditView["candidate_final_comparison"];
@@ -11,7 +12,18 @@ function valueText(value: unknown) {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    const scalars = value.filter((item) => ["string", "number", "boolean"].includes(typeof item)).slice(0, 4).map(String);
+    return scalars.length > 0 ? scalars.join(", ") : "结构化列表已记录";
+  }
+  return "结构化内容已记录";
+}
+
+function errorText(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  return safeDisplayError(valueText(value), "执行异常");
 }
 
 function stringList(value: unknown) {
@@ -72,7 +84,7 @@ export function CandidateComparison({ comparison }: CandidateComparisonProps) {
               <td>{valueText(comparison.candidate?.action)}</td>
               <td>{valueText(comparison.candidate?.probability)}</td>
               <td>{valueText(comparison.candidate?.allowed)}</td>
-              <td>{valueText(comparison.candidate?.error)}</td>
+              <td>{errorText(comparison.candidate?.error)}</td>
               <td className="mono-cell">{valueText(comparison.candidate?.input_ref)}</td>
             </tr>
           </tbody>
@@ -102,11 +114,11 @@ export function CandidateComparison({ comparison }: CandidateComparisonProps) {
       </dl>
       {candidateDiagnosis?.summary || blockingReasons.length > 0 ? (
         <div className="audit-note section-gap">
-          <strong>{valueText(candidateDiagnosis?.summary)}</strong>
+          <strong>{safeDisplayError(valueText(candidateDiagnosis?.summary), "诊断摘要已记录")}</strong>
           {blockingReasons.length > 0 ? (
             <ul>
               {blockingReasons.map((reason) => (
-                <li key={reason}>{reason}</li>
+                <li key={reason}>{safeDisplayError(reason, "阻断理由已记录")}</li>
               ))}
             </ul>
           ) : null}

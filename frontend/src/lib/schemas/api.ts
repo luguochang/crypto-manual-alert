@@ -27,6 +27,6 @@ export type ApiResult<T> =
 
 export function envelopeSchema<T extends z.ZodTypeAny>(dataSchema: T) {
   return apiEnvelopeBaseSchema.extend({
-    data: dataSchema.optional()
+    data: dataSchema.nullish()
   });
 }

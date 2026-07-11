@@ -232,6 +232,8 @@ def test_run_executor_persists_context_in_legacy_plan_payload(tmp_path):
             query_text="定时评估 ETH",
             horizon="6h",
             session_id="session-ctx",
+            position={"side": "flat"},
+            risk_mode="normal",
         )
     )
 
@@ -245,6 +247,8 @@ def test_run_executor_persists_context_in_legacy_plan_payload(tmp_path):
     assert payload["run_context"]["query_text"] == "定时评估 ETH"
     assert payload["run_context"]["horizon"] == "6h"
     assert payload["run_context"]["session_id"] == "session-ctx"
+    assert payload["run_context"]["position"] == {"side": "flat"}
+    assert payload["run_context"]["risk_mode"] == "normal"
     assert detail["trace"]["run_type"] == "scheduled"
     assert detail["trace"]["horizon"] == "6h"
     assert detail["trace"]["metadata"]["run_context"]["run_id"] == result.context["run_id"]

@@ -4,12 +4,27 @@ type WorkerMatrixProps = {
   workers: AgentAuditView["workers"];
 };
 
-function listText(items: string[] | undefined, max = 4) {
+const RAW_OBJECT_TEXT = /\{\s*["'][^"']+["']\s*:/;
+
+function listText(items: unknown[] | undefined, max = 4) {
   if (!items || items.length === 0) {
     return "-";
   }
-  const visible = items.slice(0, max).join(", ");
+  const visible = items.slice(0, max).map(itemText).join(", ");
   return items.length > max ? `${visible} +${items.length - max}` : visible;
+}
+
+function itemText(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "string" && RAW_OBJECT_TEXT.test(value)) {
+      return "结构化项已记录";
+    }
+    return String(value);
+  }
+  return "结构化项已记录";
 }
 
 function statusClass(status: string | undefined) {

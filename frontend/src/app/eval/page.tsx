@@ -4,30 +4,59 @@ import { EvalCandidatesTable } from "@/app/eval/eval-candidates-table";
 import { EvalJudgeScoresTable } from "@/app/eval/eval-judge-scores-table";
 import { EvalReplayTable } from "@/app/eval/eval-replay-table";
 import { shortId } from "@/app/eval/eval-format";
+import { EvalRunEvidenceSummary } from "@/app/eval/eval-run-evidence-summary";
 import { FinancialQualityPanel } from "@/app/eval/financial-quality-panel";
 import { RunEvalForm } from "@/app/eval/run-eval-form";
+import { Icon, type IconName } from "@/app/shared/icons";
+import { safeDisplayError } from "@/app/shared/safe-error";
+import { DiagnosticDisabledNotice, diagnosticRoutesEnabled } from "@/app/shared/diagnostic-access";
+import { getSystemConfig } from "@/lib/api/system";
 
 export const dynamic = "force-dynamic";
+
+type EvalPageProps = {
+  searchParams: Promise<{ tab?: string; status?: string; severity?: string }>;
+};
+
+type EvalTab = "runs" | "cases" | "outcomes" | "quality";
+type EvalTabItem = { id: EvalTab; label: string; icon: IconName };
+
+const EVAL_TABS: EvalTabItem[] = [
+  { id: "runs", label: "复盘批次", icon: "activity" },
+  { id: "cases", label: "问题样本", icon: "database" },
+  { id: "outcomes", label: "结果样本", icon: "shield" },
+  { id: "quality", label: "质量指标", icon: "flask" }
+];
 
 function passRate(passCount: number, caseCount: number) {
   return caseCount ? `${Math.round((passCount / caseCount) * 100)}%` : "0%";
 }
 
-function metadataText(metadata: Record<string, unknown>, key: string) {
-  const value = metadata[key];
-  return typeof value === "string" && value ? value : "-";
+function resolveTab(raw: string | undefined): EvalTab {
+  if (raw === "runs" || raw === "cases" || raw === "outcomes" || raw === "quality") return raw;
+  return "quality";
 }
 
-export default async function EvalPage() {
+export default async function EvalPage({ searchParams }: EvalPageProps) {
+  const params = await searchParams;
+  const tab = resolveTab(params.tab);
+  const diagnosticMode = tab !== "quality";
+  const visibleTabs = diagnosticMode ? EVAL_TABS : EVAL_TABS.filter((item) => item.id === "quality");
+  if (diagnosticMode) {
+    const config = await getSystemConfig();
+    if (!diagnosticRoutesEnabled(config)) {
+      return <DiagnosticDisabledNotice backHref="/eval?tab=quality" backLabel="返回质量复盘" />;
+    }
+  }
   const [candidatesResult, runsResult, outcomesResult] = await Promise.all([
-    listEvalCandidates({ limit: 50 }),
+    listEvalCandidates({ limit: 50, status: params.status, severity: params.severity }),
     listEvalRuns({ limit: 10 }),
     listEvalOutcomes()
   ]);
 
   const runs = runsResult.ok ? runsResult.data.items : [];
   const latestRunId = runs.length > 0 ? runs[0].eval_run_id : null;
-  const latestDetail = latestRunId ? await getEvalRunDetail(latestRunId) : null;
+  const latestDetail = tab === "runs" && latestRunId ? await getEvalRunDetail(latestRunId) : null;
   const candidates = candidatesResult.ok ? candidatesResult.data.items : [];
   const outcomes = outcomesResult.ok ? outcomesResult.data.items : [];
   const openCases = candidates.filter((item) => item.status === "open").length;
@@ -40,57 +69,76 @@ export default async function EvalPage() {
     <>
       <header className="page-header">
         <div>
-          <h1>Eval 工作台</h1>
-          <p>查看 badcase、FrozenInput、Replay、Judge 分数和生产副作用守卫。</p>
+          <h1>{diagnosticMode ? "工程复盘诊断" : "质量复盘"}</h1>
+          <p>
+            {diagnosticMode
+              ? "显式查看复盘批次、问题样本和回放评分细节；这些诊断信息不代表生产提醒已经通过。"
+              : "查看提醒后的结果样本和金融质量状态；本地展示样本不会计入真实金融质量。"}
+          </p>
         </div>
-        <Link className="button button-secondary" href="/runs?view=alerts">
-          查看 Trace
+        <Link className="button button-secondary" href="/runs" prefetch={false}>
+          查看提醒记录
         </Link>
       </header>
 
-      <section className="toolbar">
+      {diagnosticMode ? <section className="toolbar">
         <div>
-          <strong>旁路测评</strong>
-          <p className="muted">cheap 只跑规则；fixture 跑本地 LLMJudge 替身；judge_openai 会调用真实 OpenAI-compatible 模型。</p>
+          <strong>发起复盘</strong>
+          <p className="muted">默认使用本地规则检查；启用真实模型评审前需要确认成本和外部依赖。</p>
         </div>
         <RunEvalForm />
-      </section>
+      </section> : null}
 
-      <section className="stats-grid" aria-label="Eval 统计">
+      <nav className="tabs" aria-label="质量复盘视图">
+        {visibleTabs.map((item) => (
+          <Link
+            key={item.id}
+            href={`/eval?tab=${item.id}`}
+            prefetch={false}
+            className={`tab ${tab === item.id ? "active" : ""}`}
+            aria-current={tab === item.id ? "page" : undefined}
+          >
+            <Icon name={item.icon} size={15} />
+            {item.label}
+          </Link>
+        ))}
+      </nav>
+
+      {tab === "runs" ? <section className="stats-grid" aria-label="Eval 统计">
         <div className="stat-card">
-          <span>候选 case</span>
+          <span>候选样本</span>
           <strong>{candidates.length}</strong>
         </div>
         <div className="stat-card">
-          <span>Open</span>
+          <span>待处理</span>
           <strong>{openCases}</strong>
         </div>
         <div className="stat-card">
-          <span>High / Critical</span>
+          <span>高风险</span>
           <strong>{highRiskCases}</strong>
         </div>
         <div className="stat-card">
           <span>数据集</span>
           <strong>{datasets}</strong>
         </div>
-      </section>
+      </section> : null}
 
-      <div className="grid-2 section-gap">
+      {tab === "runs" ? <div className="grid-2 section-gap">
         <section className="panel">
-          <h2>最近 Eval Run</h2>
+          <h2>最近复盘批次</h2>
           {!runsResult.ok ? (
-            <div className="error-state">{runsResult.error.message}</div>
+            <div className="error-state" role="alert">{safeDisplayError(runsResult.error, "复盘批次暂时无法加载，请稍后重试。")}</div>
           ) : runs.length === 0 ? (
-            <p className="muted">暂无 eval run。先记录 badcase，再运行测评。</p>
+            <p className="muted">暂无复盘批次。先记录问题样本，再运行复盘。</p>
           ) : (
             <div className="table-wrap">
               <table className="compact-table">
                 <thead>
                   <tr>
-                    <th>Run ID</th>
+                    <th>批次</th>
                     <th>状态</th>
-                    <th>Mode</th>
-                    <th>Dataset</th>
+                    <th>模式</th>
+                    <th>数据集</th>
                     <th>通过率</th>
                     <th>失败</th>
                   </tr>
@@ -98,7 +146,11 @@ export default async function EvalPage() {
                 <tbody>
                   {runs.map((run) => (
                     <tr key={run.eval_run_id}>
-                      <td>{shortId(run.eval_run_id)}</td>
+                      <td>
+                        <Link href={`/eval/runs/${encodeURIComponent(run.eval_run_id)}`} prefetch={false}>
+                          {shortId(run.eval_run_id)}
+                        </Link>
+                      </td>
                       <td>
                         <span className={`badge ${run.status === "passed" ? "badge-success" : "badge-failed"}`}>
                           {run.status}
@@ -121,61 +173,31 @@ export default async function EvalPage() {
           {!latestRun ? (
             <p className="muted">暂无测评结果。</p>
           ) : (
-            <dl className="detail-list">
-              <div>
-                <dt>Run ID</dt>
-                <dd>{latestRun.eval_run_id}</dd>
-              </div>
-              <div>
-                <dt>Pass / Fail</dt>
-                <dd>{latestRun.pass_count} / {latestRun.fail_count}</dd>
-              </div>
-              <div>
-                <dt>Replay</dt>
-                <dd>{JSON.stringify(latestRun.metadata.replay ?? {})}</dd>
-              </div>
-              <div>
-                <dt>副作用 delta</dt>
-                <dd>{JSON.stringify(latestRun.metadata.side_effect_deltas ?? {})}</dd>
-              </div>
-              <div>
-                <dt>JSON 报告</dt>
-                <dd>{metadataText(latestRun.metadata, "report_json_ref")}</dd>
-              </div>
-              <div>
-                <dt>Markdown 报告</dt>
-                <dd>{metadataText(latestRun.metadata, "report_markdown_ref")}</dd>
-              </div>
-            </dl>
+            <EvalRunEvidenceSummary latestRun={latestRun} compact />
           )}
         </section>
-      </div>
+      </div> : null}
 
-      <FinancialQualityPanel
-        gate={latestRun?.metadata.financial_quality_gate}
-        outcomes={outcomes}
-        outcomesError={outcomesResult.ok ? undefined : outcomesResult.error.message}
-      />
-
-      <section className="panel section-gap">
-        <h2>候选 Case</h2>
+      {tab === "cases" ? <section className="panel section-gap">
         <EvalCandidatesTable
           candidates={candidates}
           errorMessage={candidatesResult.ok ? undefined : candidatesResult.error.message}
+          selectedStatus={params.status}
+          selectedSeverity={params.severity}
         />
-      </section>
+      </section> : null}
 
-      <section className="panel section-gap">
-        <h2>最新 Frozen / Replay</h2>
+      {tab === "runs" ? <section className="panel section-gap">
+        <h2>最新回放明细</h2>
         <EvalReplayTable
           cases={latestDetail?.ok ? latestDetail.data.cases : []}
           errorMessage={latestDetail && !latestDetail.ok ? latestDetail.error.message : undefined}
           hasRun={Boolean(latestDetail)}
         />
-      </section>
+      </section> : null}
 
-      <section className="panel section-gap">
-        <h2>最新 Judge 明细</h2>
+      {tab === "runs" ? <section className="panel section-gap">
+        <h2>最新评分明细</h2>
         <EvalJudgeScoresTable
           scores={latestDetail?.ok ? latestDetail.data.scores : []}
           errorMessage={latestDetail && !latestDetail.ok ? latestDetail.error.message : undefined}
@@ -183,10 +205,18 @@ export default async function EvalPage() {
         />
         {failedScores.length > 0 ? (
           <p className="muted section-gap">
-            当前最新 run 有 {failedScores.length} 条失败评分；优先复核 high/critical case，再决定是否加入 golden set。
+            当前最新复盘有 {failedScores.length} 条失败评分；优先复核高风险样本，再决定是否纳入固定回归集。
           </p>
         ) : null}
-      </section>
+      </section> : null}
+
+      {tab === "outcomes" || tab === "quality" ? (
+        <FinancialQualityPanel
+          gate={latestRun?.metadata.financial_quality_gate}
+          outcomes={outcomes}
+          outcomesError={outcomesResult.ok ? undefined : outcomesResult.error.message}
+        />
+      ) : null}
     </>
   );
 }

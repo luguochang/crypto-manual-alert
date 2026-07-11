@@ -17,6 +17,7 @@ ALLOWED_TESTS_ROOT_ENTRIES = {
     "config",
     "context",
     "decision",
+    "deployment",
     "eval",
     "fixtures",
     "lead",

@@ -5,8 +5,8 @@ export default function ManualRunPage() {
     <>
       <header className="page-header">
         <div>
-          <h1>Manual Run</h1>
-          <p>手动提交一次运行任务，返回 trace_id 后可进入详情页追踪。</p>
+          <h1>新建提醒</h1>
+          <p>填写交易对、周期和持仓信息，生成一条仅供人工复核的提醒建议。</p>
         </div>
       </header>
       <ManualRunForm />

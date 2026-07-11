@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable, Mapping
 import hashlib
 import json
+import math
 import time
 from typing import Any, Protocol
 
@@ -63,18 +64,24 @@ class OkxPublicOrderBookProvider:
             "/api/v5/public/mark-price",
             {"instType": "SWAP", "instId": request.symbol},
         )
+        index_payload = self._get(
+            "/api/v5/market/index-tickers",
+            {"instId": _index_instrument_id(request.symbol)},
+        )
         book_payload = self._get(
             "/api/v5/market/books",
             {"instId": request.symbol, "sz": str(self.order_book_depth)},
         )
         mark_row = _first_row(mark_payload)
+        index_row = _first_row(index_payload)
         book_row = _first_row(book_payload)
         now_ms = int(self.clock_ms())
-        _ensure_fresh("mark/index", mark_row, now_ms=now_ms, max_age_seconds=self.max_age_seconds)
+        _ensure_fresh("mark", mark_row, now_ms=now_ms, max_age_seconds=self.max_age_seconds)
+        _ensure_fresh("index", index_row, now_ms=now_ms, max_age_seconds=self.max_age_seconds)
         _ensure_fresh("order_book", book_row, now_ms=now_ms, max_age_seconds=self.max_age_seconds)
-        if not mark_row.get("markPx"):
+        if not _is_finite_number(mark_row.get("markPx")):
             raise RuntimeError("OKX mark price missing")
-        if not mark_row.get("idxPx"):
+        if not _is_finite_number(index_row.get("idxPx")):
             raise RuntimeError("OKX index price missing")
         if not book_row.get("asks") or not book_row.get("bids"):
             raise RuntimeError("OKX order book depth missing")
@@ -82,7 +89,7 @@ class OkxPublicOrderBookProvider:
         prefix = f"exchange:okx_public:{request.symbol}:{request.trace_id}"
         return OrderBookFactRefs(
             mark_ref=f"{prefix}:mark:{_stable_hash(_ref_payload(request, mark_row, 'mark'))}",
-            index_ref=f"{prefix}:index:{_stable_hash(_ref_payload(request, mark_row, 'index'))}",
+            index_ref=f"{prefix}:index:{_stable_hash(_ref_payload(request, index_row, 'index'))}",
             order_book_ref=f"{prefix}:order_book:{_stable_hash(_book_ref_payload(request, book_row))}",
         )
 
@@ -150,6 +157,20 @@ def _int_or_none(value: Any) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return value not in {None, ""} and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _index_instrument_id(symbol: str) -> str:
+    normalized = symbol.strip()
+    if normalized.upper().endswith("-SWAP"):
+        return normalized[:-5]
+    return normalized
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from crypto_manual_alert.artifacts.orchestration_inputs import build_audit_artifacts
 from crypto_manual_alert.decision.candidate_audit import build_candidate_audit_payload
 from crypto_manual_alert.decision.frozen_input import FrozenInput
 from crypto_manual_alert.domain import DecisionPlan, MarketSnapshot, RiskVerdict
 from crypto_manual_alert.research_pipeline import ResearchAudit
+
+if TYPE_CHECKING:
+    from crypto_manual_alert.config import Config
 
 
 def build_plan_payload(
@@ -26,6 +29,7 @@ def build_plan_payload(
     pre_final_decision_input: dict[str, Any] | None = None,
     candidate_audit: dict[str, Any] | None = None,
     production_control_verdict: RiskVerdict | None = None,
+    config: "Config | None" = None,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     audit_payload = audit_payload or build_audit_artifacts(
@@ -67,6 +71,12 @@ def build_plan_payload(
         "shadow_swarm_audit": shadow_swarm_audit,
         "pre_final_decision_input": pre_final_decision_input,
         "final_input_selection": final_input_selection,
+        "main_path_contract": _main_path_contract(
+            plan=plan,
+            final_input_selection=final_input_selection,
+            run_context_summary=run_context_summary,
+            config=config,
+        ),
         "legacy_prompt_lifecycle": _legacy_prompt_lifecycle(final_input_selection),
         **candidate_audit,
         "production_control_gate": (
@@ -92,6 +102,91 @@ def build_plan_payload(
     return payload
 
 
+def _main_path_contract(
+    *,
+    plan: DecisionPlan,
+    final_input_selection: dict[str, Any] | None,
+    run_context_summary: dict[str, Any] | None,
+    config: "Config | None",
+) -> dict[str, Any]:
+    selection = final_input_selection if isinstance(final_input_selection, dict) else {}
+    context = run_context_summary if isinstance(run_context_summary, dict) else {}
+    side_effect_policy = context.get("side_effect_policy")
+    if not isinstance(side_effect_policy, dict):
+        side_effect_policy = {}
+    mode = str(selection.get("mode") or "legacy_prompt")
+    audit_only = mode.endswith("_audit_only") or selection.get("production_final_input") is False
+    candidate_sidecar_mode = (
+        str(config.decision.candidate_sidecar_mode)
+        if config is not None
+        else str(selection.get("candidate_sidecar_mode") or "unknown")
+    )
+    auto_order_enabled = (
+        config.trading.auto_order_enabled is True
+        if config is not None
+        else side_effect_policy.get("auto_order_enabled") is True
+    )
+    return {
+        "schema_version": "2026-07-09.main-path-contract.v1",
+        "runtime_role": "production_blocking_audit" if audit_only else "production_main",
+        "proof_level": _proof_level_for_contract(config=config, audit_only=audit_only),
+        "production_success": False,
+        "hosted_proof_required": True,
+        "does_not_prove": "hosted_prod_actionable",
+        "final_input_contract": {
+            "mode": mode,
+            "production_final_input_mode": mode,
+            "legacy_prompt_required": mode == "legacy_prompt" and not audit_only,
+            "candidate_sidecar_mode": candidate_sidecar_mode,
+            "candidate_sidecar_can_replace_final_input": False,
+        },
+        "manual_only": {
+            "manual_execution_required": plan.manual_execution_required is True,
+            "auto_order_enabled": auto_order_enabled,
+            "order_submission": "disabled",
+        },
+        "query_contract": {
+            "mode": "audit_note",
+            "drives_final_input": False,
+            "drives_execution_facts": False,
+        },
+    }
+
+
+def _proof_level_for_contract(*, config: "Config | None", audit_only: bool) -> str:
+    if audit_only:
+        return "audit-sidecar-contract"
+    if config is None:
+        return "local-main-flow-contract"
+    if config.decision.engine == "fixture":
+        return "fixture"
+    if _is_mock_decision_config(config):
+        return "mock"
+    if (
+        config.decision.engine == "openai_compatible"
+        and config.market_data.provider == "okx_public"
+        and config.notification.enabled is True
+        and config.macro_event.provider == "no_active_event"
+        and config.decision.final_input_mode == "legacy_prompt"
+        and config.decision.candidate_sidecar_mode == "disabled"
+        and config.workflow.execution_mode == "legacy_baseline"
+        and config.trading.manual_execution_required is True
+        and config.trading.auto_order_enabled is False
+    ):
+        return "production-intent-contract"
+    return "local-main-flow-contract"
+
+
+def _is_mock_decision_config(config: "Config") -> bool:
+    model = str(config.decision.openai_model or "").strip().lower()
+    base_url = str(config.decision.openai_base_url or "").strip().lower()
+    return (
+        model.startswith("mock-")
+        or "localhost" in base_url
+        or "127.0.0.1" in base_url
+    )
+
+
 def run_context_for_audit(run_context_summary: dict[str, Any]) -> dict[str, Any]:
     allowed_keys = {
         "run_id",
@@ -102,6 +197,8 @@ def run_context_for_audit(run_context_summary: dict[str, Any]) -> dict[str, Any]
         "horizon",
         "session_id",
         "manual_only",
+        "position",
+        "risk_mode",
         "side_effect_policy",
         "artifacts",
     }

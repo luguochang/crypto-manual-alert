@@ -1,7 +1,7 @@
 # 前端 Cockpit 重设计与去黑盒实施计划
 
 - 日期：2026-07-07
-- 状态：待实施（基线已确认绿，未开工）
+- 状态：首版 Cockpit 已落地，2026-07-07 本轮继续补齐 Eval 去黑盒、控制/审计文案、真实 judge 提示与自测验收；F2、F1.0、F1.2、F1.3、F1.4、F1.5 已落地，F1.1 保留现有详情 tab 文件结构但已补业务驾驶舱/矩阵/raw 去黑盒能力
 - 适用仓库：`crypto-manual-alert`（Python 后端 + Next.js 前端）
 - 关联文档：`docs/formal/36-成熟观测与评测平台接入方案.md`、`docs/formal/37-真实多Agent对抗审查与交付方向裁决.md`
 
@@ -20,6 +20,16 @@
 - frontend `tsc --noEmit` 绿。当前 `runs/[traceId]` 已是 4-tab 结构（decision / agent / eval / raw + `format-helpers`，均为未跟踪新文件），可编译。
 - 后端数据模型与 `agent_audit_view` 投影足够丰富，**不重构**。`/api/runs/{id}?include_payloads=true` 已返回 LLM request/response、span input/output/error、badcases 结构化字段、`plan_run.agent_audit_view`（含 `facts_gate` / `gates` / `workers` / `conflict_edges` / `candidate_final_comparison` 等）。
 - 踩 doc 37 §8 冻结红线：不为 `production_candidate_swarm` 旁路造新展示位、不扩张 eval 死代码 UI、不接 Langfuse/DeepEval、配置 L3/L4 只读、不写新 formal 文档。
+
+## 1.1 2026-07-07 实施记录
+
+- F2.1-F2.3 已完成：run detail 暴露顶层 `facts_gate` / `production_control_gate`；eval 暴露 promotion artifacts 与 frozen input summary，frozen input API 不返回 raw `input_payload`。
+- F1.0 已完成：sidebar 分为业务 / 评估 / 配置；`/runs?view=alerts|observe` 假双入口已合并到单一 `/runs`，观测入口使用 `columns=observability` 列组预设。
+- F1.1 已完成主要能力但未强行改文件命名：`/runs/[traceId]` 仍使用 cockpit / matrix / raw tab 结构，已展示生产 final input 模式、阻断原因、缺失执行事实、tool health、financial quality、worker/tool/source/candidate/gate 矩阵、LLM/span raw 摘要。
+- F1.2 已完成：`/eval` tab 化，eval run 下钻页 `/eval/runs/[id]` 接 promotion artifacts、frozen input summaries、replay 与 judge scores；run-eval-form 改 typed API 并严格校验 badcase ids。
+- F1.3 已完成：配置页增加 L0-L4 分级标注与只读生效值说明。
+- F1.4 已完成轻量口径修正：dashboard 的 LLM 交互 trend 改为“最近 20 条累计”；未新增可选 `/api/dashboard/stats`。
+- 2026-07-07 追加补齐：`/eval` 与 `/eval/runs/[id]` 的 replay / side-effect delta 摘要改为结构化证据卡；`judge_openai` 增加真实外部 judge 调用确认；Dashboard/Runs/Config 文案收敛为“人工复核/只读控制面”；Run Detail 驾驶舱增加审计总判定，强调 allowed 不是下单许可。
 
 ## 2. F2：后端小补（先行，3 处，仅暴露已有数据）
 
@@ -76,7 +86,7 @@
 - L1 配置编辑（需写入端点 + 审计）
 - Case/Evidence 页、HumanReview/Release 页
 - Langfuse/DeepEval link 激活（Phase D/E 冻结）
-- outcome collector 接通（doc 37 P1 后端，另开任务）
+- outcome collector 持续调度 / 运维 runbook / prod actionable 真实提醒部署路径（本轮仅完成手动 `collect-outcomes` 与 legacy/candidate/hold baseline hardening，见 `docs/migration/2026-07-07-checkpoint-outcome-baseline-collection-hardening.md`）
 
 ## 6. 风险
 

@@ -1,8 +1,9 @@
 import { Icon, type IconName } from "@/app/shared/icons";
+import { productDisplayItems, productFactLabel } from "@/app/shared/product-copy";
+import { safeReasonBullets } from "@/lib/schemas/manual-run";
 import type { AgentAuditView } from "@/lib/schemas/runs";
 
-// 第一屏·业务驾驶舱的状态条：让管理者 5 秒看懂"能不能信 / 为什么不能执行 / 缺什么"。
-// 所有字段从 agent_audit_view（默认 run 即 available=true）+ verdict 兜底提取，不再 JSON dump。
+// 默认详情的复核状态条：只保留用户能理解的检查结论，工程字段留在诊断视图。
 
 type CockpitStatusBarProps = {
   agentAudit: AgentAuditView | undefined;
@@ -38,14 +39,21 @@ function collectBlockingReasons(agentAudit: AgentAuditView | undefined, verdict:
   }
   reasons.push(...asStringArray(verdict.reasons));
   // 去重保序，取前 3
-  return Array.from(new Set(reasons.filter(Boolean))).slice(0, 3);
+  return safeReasonBullets(reasons).slice(0, 3);
+}
+
+function qualityStatusText(status: string): string {
+  if (status === "not_configured") return "未配置";
+  if (status === "not_enough_samples") return "样本不足";
+  if (status === "passed") return "通过";
+  if (status === "failed") return "未通过";
+  return status ? "状态已记录" : "未知";
 }
 
 export function CockpitStatusBar({ agentAudit, verdict }: CockpitStatusBarProps) {
   const available = agentAudit?.available === true;
-  const productionMode = agentAudit?.input_lineage?.production_final_input_mode ?? "legacy_prompt";
   const candidatePromoted = agentAudit?.candidate_final_comparison?.production_final_input === true;
-  const blockingReasons = collectBlockingReasons(agentAudit, verdict);
+  const blockingReasons = productDisplayItems(collectBlockingReasons(agentAudit, verdict));
 
   const factsGate = (agentAudit?.facts_gate as Record<string, unknown> | undefined) ?? {};
   const missingExecutionFacts = asStringArray(factsGate.missing_execution_facts);
@@ -67,61 +75,75 @@ export function CockpitStatusBar({ agentAudit, verdict }: CockpitStatusBarProps)
   const financialTone: StatusCell["tone"] =
     financialStatus === "not_configured" || financialStatus === "not_enough_samples" ? "warn" : "ok";
 
+  const auditConclusion = candidatePromoted
+    ? "不可直接采信：候选输入已提升，需立即复核发布门禁"
+    : !available
+      ? "复核证据不足：请核对详细复核记录"
+      : factsPassed && symbolConsistent
+        ? "可人工复核：证据链未发现硬阻断"
+        : "已阻断：禁止作为操作依据";
+  const auditConclusionTone: StatusCell["tone"] = candidatePromoted || !symbolConsistent ? "danger" : factsPassed && available ? "ok" : "warn";
+
   const cells: StatusCell[] = [
     {
-      label: "生产最终输入",
-      value: candidatePromoted ? "decision_input（候选已提升）" : productionMode,
+      label: "生成路径",
+      value: candidatePromoted ? "需复核" : "稳定",
       tone: productionTone,
       icon: "shield",
-      hint: candidatePromoted ? "candidate 已成为生产输入，需立即审查" : "仍是 legacy_prompt，候选未切换"
+      hint: candidatePromoted ? "生成路径发生切换，需要复核详细记录" : "当前使用已验证的默认生成路径"
     },
     {
-      label: "事实门禁",
-      value: available ? (factsPassed ? "passed" : "blocked") : "无 swarm 审计",
+      label: "事实检查",
+      value: available ? (factsPassed ? "通过" : "缺少信息") : "证据不足",
       tone: factsTone,
       icon: "check",
       hint: missingExecutionFacts.length > 0 ? `缺 ${missingExecutionFacts.length} 项执行事实` : undefined
     },
     {
-      label: "工具证据",
-      value: `${toolHealthCount} 次调用`,
+      label: "证据补充",
+      value: toolHealthCount === 0 ? "未记录" : `${toolHealthCount} 条`,
       tone: toolTone,
       icon: "search",
-      hint: toolHealthCount === 0 ? "无 Skill 调用记录" : toolCanSatisfy ? "含可满足执行事实的证据" : "无可满足执行事实的证据"
+      hint: toolHealthCount === 0 ? "暂无补充证据" : toolCanSatisfy ? "含可满足执行事实的证据" : "无可满足执行事实的证据"
     },
     {
-      label: "金融质量",
-      value: financialStatus,
+      label: "质量检查",
+      value: qualityStatusText(financialStatus),
       tone: financialTone,
       icon: "flask",
       hint: financialStatus === "not_enough_samples" ? "样本不足，暂不构成发布阻断" : undefined
     },
     {
-      label: "Symbol 一致",
-      value: symbolConsistent ? "consistent" : "mismatch",
+      label: "交易对一致",
+      value: symbolConsistent ? "一致" : "不一致",
       tone: symbolConsistent ? "ok" : "danger",
       icon: "alert",
-      hint: symbolConsistent ? undefined : "请求/快照/计划 instrument 不一致"
+      hint: symbolConsistent ? undefined : "请求、行情快照与提醒计划的交易对不一致"
     }
   ];
 
   return (
-    <section className="panel section-gap cockpit-bar" aria-label="Cockpit 状态摘要">
-      <div className="cockpit-grid">
+    <section className="panel section-gap review-status-bar" aria-label="复核状态摘要">
+      <div className={`review-status-conclusion tone-${auditConclusionTone}`}>
+        <strong>{auditConclusion}</strong>
+        <span>本页展示提醒建议与审计证据，不是交易委托；任何执行都需要人工核对价格、仓位和风险。</span>
+      </div>
+
+      <div className="review-status-grid">
         {cells.map((cell) => (
-          <article key={cell.label} className={`cockpit-cell tone-${cell.tone}`}>
-            <span className="cockpit-cell-label">
+          <article key={cell.label} className={`review-status-cell tone-${cell.tone}`}>
+            <span className="review-status-cell-label">
               <Icon name={cell.icon} size={14} /> {cell.label}
             </span>
-            <strong className="cockpit-cell-value">{cell.value}</strong>
-            {cell.hint ? <span className="cockpit-cell-hint">{cell.hint}</span> : null}
+            <strong className="review-status-cell-value">{cell.value}</strong>
+            {cell.hint ? <span className="review-status-cell-hint">{cell.hint}</span> : null}
           </article>
         ))}
       </div>
 
       {blockingReasons.length > 0 ? (
-        <div className="cockpit-blocking">
-          <h3>阻断原因（top {blockingReasons.length}）</h3>
+        <div className="review-status-blocking">
+          <h3>主要阻断原因</h3>
           <ul>
             {blockingReasons.map((reason) => (
               <li key={reason}>{reason}</li>
@@ -131,11 +153,11 @@ export function CockpitStatusBar({ agentAudit, verdict }: CockpitStatusBarProps)
       ) : null}
 
       {missingExecutionFacts.length > 0 ? (
-        <div className="cockpit-missing">
+        <div className="review-status-missing">
           <h3>缺失执行事实</h3>
           <div className="pill-row">
             {missingExecutionFacts.map((fact) => (
-              <span key={fact} className="config-pill">{fact}</span>
+              <span key={fact} className="config-pill">{productFactLabel(fact)}</span>
             ))}
           </div>
         </div>

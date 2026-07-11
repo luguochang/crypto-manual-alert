@@ -3,7 +3,7 @@ import type { RunStatus } from "@/lib/schemas/runs";
 
 const statusText: Record<RunStatus, string> = {
   running: "运行中",
-  allowed: "允许提醒",
+  allowed: "可人工复核",
   blocked: "风控阻断",
   failed: "失败",
   ok: "完成"

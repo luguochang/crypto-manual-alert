@@ -27,6 +27,19 @@ def test_outcome_store_keeps_multiple_windows_for_the_same_decision(tmp_path):
     assert outcomes == [one_hour, four_hour]
 
 
+def test_outcome_store_lists_outcomes_by_exact_decision_refs(tmp_path):
+    store = OutcomeStore(tmp_path / "outcomes.db")
+    legacy = _outcome("plan-1:legacy_final", "legacy_final")
+    candidate = _outcome("plan-1:swarm_candidate_final", "swarm_candidate_final")
+    other = _outcome("plan-2:legacy_final", "legacy_final")
+
+    store.upsert_outcomes([other, candidate, legacy])
+
+    outcomes = store.list_outcomes_by_decision_refs(["plan-1:swarm_candidate_final", "plan-1:legacy_final"])
+
+    assert outcomes == [legacy, candidate]
+
+
 def _outcome(decision_ref: str, target: str, *, window_name: str = "1h") -> DecisionOutcome:
     return DecisionOutcome(
         decision_ref=decision_ref,

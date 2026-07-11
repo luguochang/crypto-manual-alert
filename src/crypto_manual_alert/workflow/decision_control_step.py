@@ -5,11 +5,11 @@ from typing import Any
 
 from crypto_manual_alert.config import Config
 from crypto_manual_alert.decision.candidate_audit import build_candidate_audit_payload
-from crypto_manual_alert.decision.candidate_final_decision import run_candidate_final_decision_sidecar
-from crypto_manual_alert.decision.pre_final_input_gate import evaluate_pre_final_input_gate
-from crypto_manual_alert.decision.production_control_gate import check_production_control_gate, merge_risk_verdicts
+from crypto_manual_alert.decision.production_control_gate import check_production_control_gate
 from crypto_manual_alert.domain import DecisionPlan, MarketSnapshot, RiskVerdict, RuleHit
 from crypto_manual_alert.decision.risk import check_plan
+from crypto_manual_alert.workflow.candidate_sidecar_step import run_candidate_sidecar_step
+from crypto_manual_alert.workflow.risk_merge_policy import merge_risk_verdicts
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ def run_decision_control_step(
         snapshot_symbol=snapshot.symbol,
         plan_instrument=plan.instrument,
     )
-    candidate_final_decision = _candidate_final_sidecar(
+    candidate_final_decision = run_candidate_sidecar_step(
         candidate_decision_engine=candidate_decision_engine,
         pre_final_decision_input=pre_final_decision_input,
     )
@@ -188,18 +188,3 @@ def _with_observability_refs(
     if span_tree_refs:
         merged["span_tree_refs"] = span_tree_refs
     return merged
-
-
-def _candidate_final_sidecar(
-    *,
-    candidate_decision_engine: Any | None,
-    pre_final_decision_input: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    if candidate_decision_engine is None:
-        return None
-    input_gate = evaluate_pre_final_input_gate(pre_final_decision_input)
-    return run_candidate_final_decision_sidecar(
-        decision_engine=candidate_decision_engine,
-        pre_final_decision_input=pre_final_decision_input,
-        input_gate=input_gate,
-    )

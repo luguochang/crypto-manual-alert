@@ -29,6 +29,14 @@ def test_eval_route_keeps_tables_and_financial_quality_in_components():
     assert _line_count(EVAL_ROUTE) <= 280
 
 
+def test_eval_quality_route_does_not_load_diagnostic_run_detail():
+    source = EVAL_ROUTE.read_text(encoding="utf-8")
+
+    assert "getEvalRunDetail" in source
+    assert 'tab === "runs" && latestRunId' in source
+    assert "const latestDetail = latestRunId ? await getEvalRunDetail" not in source
+
+
 def test_run_detail_route_keeps_agent_audit_in_components():
     run_detail_dir = RUN_DETAIL_ROUTE.parent
     component_files = {path.name for path in run_detail_dir.glob("*.tsx")}

@@ -16,6 +16,10 @@ def _fresh_event_status(timestamp_ms: int, observed_at: datetime) -> DataPoint:
     )
 
 
+def _non_empty_book() -> dict[str, list[list[str]]]:
+    return {"asks": [["3501", "10"]], "bids": [["3499", "10"]]}
+
+
 def test_market_snapshot_maps_okx_points_to_exchange_native_execution_evidence():
     observed_at = datetime(2026, 6, 30, 1, 2, 3, tzinfo=timezone.utc)
     timestamp_ms = int(observed_at.timestamp() * 1000)
@@ -44,6 +48,74 @@ def test_market_snapshot_maps_okx_points_to_exchange_native_execution_evidence()
     assert by_type["mark"].retrieved_at == snapshot.fetched_at
     assert by_type["order_book"].source_type == "exchange_native"
     assert by_type["order_book"].can_satisfy_execution_fact is True
+
+
+def test_exchange_native_execution_points_require_usable_non_empty_values():
+    fetched_at = datetime(2026, 6, 30, 1, 2, 5, tzinfo=timezone.utc)
+    timestamp_ms = int(fetched_at.timestamp() * 1000)
+    snapshot = MarketSnapshot(
+        symbol="ETH-USDT-SWAP",
+        fetched_at=fetched_at,
+        points={
+            "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
+            "index": DataPoint("index", None, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+        },
+    )
+
+    packets = from_market_snapshot(snapshot)
+    result = check_execution_facts(packets)
+    by_type = {packet.data_type: packet for packet in packets}
+
+    assert by_type["mark"].can_satisfy_execution_fact is True
+    assert by_type["index"].can_satisfy_execution_fact is False
+    assert by_type["order_book"].can_satisfy_execution_fact is False
+    assert result.passed is False
+    assert result.missing_execution_facts == ["index", "order_book"]
+    assert "index: unusable value" in result.reasons
+    assert "order_book: unusable value" in result.reasons
+
+
+def test_exchange_native_order_book_rejects_malformed_levels():
+    fetched_at = datetime(2026, 6, 30, 1, 2, 5, tzinfo=timezone.utc)
+    timestamp_ms = int(fetched_at.timestamp() * 1000)
+    snapshot = MarketSnapshot(
+        symbol="ETH-USDT-SWAP",
+        fetched_at=fetched_at,
+        points={
+            "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
+            "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", {"asks": [[]], "bids": [["3499", "10"]]}, timestamp_ms, "okx_public"),
+            "active_event_status": _fresh_event_status(timestamp_ms, fetched_at),
+        },
+    )
+
+    result = check_execution_facts(from_market_snapshot(snapshot))
+
+    assert result.passed is False
+    assert result.missing_execution_facts == ["order_book"]
+    assert "order_book: unusable value" in result.reasons
+
+
+def test_empty_event_value_cannot_satisfy_event_fact_gate():
+    fetched_at = datetime(2026, 7, 2, 1, 2, 5, tzinfo=timezone.utc)
+    timestamp_ms = int(fetched_at.timestamp() * 1000)
+    snapshot = MarketSnapshot(
+        symbol="ETH-USDT-SWAP",
+        fetched_at=fetched_at,
+        points={
+            "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
+            "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
+            "active_event_status": DataPoint("active_event_status", None, timestamp_ms, "event_pool"),
+        },
+    )
+
+    result = check_execution_facts(from_market_snapshot(snapshot))
+
+    assert result.passed is False
+    assert result.missing_execution_facts == []
+    assert result.missing_event_facts == ["active_event_status"]
 
 
 def test_exchange_native_auxiliary_points_are_not_core_execution_facts():
@@ -140,7 +212,7 @@ def test_auxiliary_fallback_sources_are_marked_and_cap_confidence():
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "coinglass_api"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "html_page"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "web_search"),
@@ -184,7 +256,7 @@ def test_stale_auxiliary_fallback_source_is_missing_and_cap_confidence():
         points={
             "mark": DataPoint("mark", 3500.0, fresh_timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, fresh_timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, fresh_timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), fresh_timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, fresh_timestamp_ms, "coinglass_api"),
             "open_interest": DataPoint("open_interest", 100000.0, stale_timestamp_ms, "coinglass_api"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, stale_timestamp_ms, "web_search"),
@@ -294,7 +366,7 @@ def test_stale_exchange_native_points_cannot_satisfy_execution_facts():
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public", status="stale"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "active_event_status": _fresh_event_status(timestamp_ms, observed_at),
         },
     )
@@ -321,7 +393,7 @@ def test_fresh_active_event_status_satisfies_event_fact_gate():
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "coinglass_api"),
@@ -355,7 +427,7 @@ def test_fresh_official_active_event_status_satisfies_event_fact_gate():
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -383,7 +455,7 @@ def test_complete_macro_event_surprise_fields_do_not_cap_confidence():
         points={
             "mark": DataPoint("mark", 60000.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 59980.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -424,7 +496,7 @@ def test_macro_event_with_only_name_is_incomplete_and_caps_confidence():
         points={
             "mark": DataPoint("mark", 60000.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 59980.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -458,7 +530,7 @@ def test_macro_event_missing_market_reaction_is_incomplete_even_from_official_so
         points={
             "mark": DataPoint("mark", 60000.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 59980.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -504,7 +576,7 @@ def test_any_incomplete_macro_event_keeps_macro_surprise_downgrade():
         points={
             "mark": DataPoint("mark", 60000.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 59980.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -536,7 +608,7 @@ def test_missing_active_event_status_hard_blocks_directional_actions():
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, timestamp_ms, "okx_public"),
@@ -565,7 +637,7 @@ def test_stale_event_pool_status_hard_blocks_directional_actions():
         points={
             "mark": DataPoint("mark", 3500.0, market_timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, market_timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, market_timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), market_timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, market_timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, market_timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, market_timestamp_ms, "okx_public"),
@@ -600,7 +672,7 @@ def test_event_pool_status_uses_payload_refreshed_at_for_freshness():
         points={
             "mark": DataPoint("mark", 3500.0, market_timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, market_timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, market_timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), market_timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, market_timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, market_timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, market_timestamp_ms, "okx_public"),
@@ -631,7 +703,7 @@ def test_event_status_without_timestamp_or_refreshed_at_hard_blocks_directional_
         points={
             "mark": DataPoint("mark", 3500.0, market_timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, market_timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, market_timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), market_timestamp_ms, "okx_public"),
             "funding": DataPoint("funding_rate", 0.0001, market_timestamp_ms, "okx_public"),
             "open_interest": DataPoint("open_interest", 100000.0, market_timestamp_ms, "okx_public"),
             "liquidation": DataPoint("liquidation_heatmap", {"cluster": "below"}, market_timestamp_ms, "okx_public"),
@@ -678,7 +750,7 @@ def test_conflicting_exchange_native_execution_facts_are_hard_failed():
             "mark_okx": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "mark_binance": DataPoint("mark", 3525.0, timestamp_ms, "binance_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
         },
     )
 
@@ -700,7 +772,7 @@ def test_facts_gate_caps_confidence_when_derivatives_or_liquidation_facts_are_mi
         points={
             "mark": DataPoint("mark", 3500.0, timestamp_ms, "okx_public"),
             "index": DataPoint("index", 3498.0, timestamp_ms, "okx_public"),
-            "order_book": DataPoint("order_book", {"asks": [], "bids": []}, timestamp_ms, "okx_public"),
+            "order_book": DataPoint("order_book", _non_empty_book(), timestamp_ms, "okx_public"),
             "active_event_status": _fresh_event_status(timestamp_ms, observed_at),
         },
     )

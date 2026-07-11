@@ -5,13 +5,14 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from crypto_manual_alert.storage.journal_rows import (
     badcase_row as _badcase_row,
     find_plan_run_for_trace as _find_plan_run_for_trace,
     llm_row as _llm_row,
     load_json as _load_json,
+    notification_row as _notification_row,
     plan_analysis as _plan_analysis,
     plan_payload as _plan_payload,
     plan_run_row as _plan_run_row,
@@ -19,6 +20,9 @@ from crypto_manual_alert.storage.journal_rows import (
     trace_row as _trace_row,
 )
 from crypto_manual_alert.storage.journal_schema import init_journal_schema
+
+if TYPE_CHECKING:
+    from crypto_manual_alert.config.models import Config
 
 
 BADCASE_SEVERITIES = {"low", "medium", "high", "critical"}
@@ -67,6 +71,10 @@ class Journal:
                 """,
                 (plan_id, _now_iso(), 1 if ok else 0, status_code, error),
             )
+
+    def get_latest_notification(self, plan_id: str | None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            return _notification_row(_find_notification_for_plan(conn, plan_id))
 
     def record_outcome(self, plan_id: str, outcome: str, notes: str = "") -> None:
         with self.connect() as conn:
@@ -249,23 +257,55 @@ class Journal:
                 ),
             )
 
-    def list_traces(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_traces(
+        self,
+        limit: int = 20,
+        *,
+        offset: int = 0,
+        status: str | None = None,
+        symbol: str | None = None,
+        allowed: bool | None = None,
+        include_business_summary: bool = False,
+        projection_config: "Config | None" = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("t.status = ?")
+            params.append(status)
+        if symbol:
+            clauses.append("LOWER(t.symbol) LIKE ?")
+            params.append(f"%{symbol.lower()}%")
+        if allowed is not None:
+            clauses.append("t.allowed = ?")
+            params.append(1 if allowed else 0)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     t.*,
                     (SELECT COUNT(*) FROM trace_spans s WHERE s.trace_id = t.trace_id) AS span_count,
                     (SELECT COUNT(*) FROM llm_interactions l WHERE l.trace_id = t.trace_id) AS llm_interaction_count
                 FROM traces t
+                {where}
                 ORDER BY t.created_at DESC
                 LIMIT ?
+                OFFSET ?
                 """,
-                (limit,),
+                (*params, limit, offset),
             ).fetchall()
+            if include_business_summary:
+                return [_trace_summary_row(conn, row, projection_config=projection_config) for row in rows]
         return [_trace_row(row) for row in rows]
 
-    def get_trace_detail(self, trace_id: str, include_payloads: bool = False) -> dict[str, Any] | None:
+    def get_trace_detail(
+        self,
+        trace_id: str,
+        include_payloads: bool = False,
+        *,
+        projection_config: "Config | None" = None,
+    ) -> dict[str, Any] | None:
         with self.connect() as conn:
             trace = conn.execute("SELECT * FROM traces WHERE trace_id = ?", (trace_id,)).fetchone()
             if trace is None:
@@ -298,13 +338,23 @@ class Journal:
                 """,
                 (trace_id,),
             ).fetchall()
+            notification = _find_notification_for_plan(conn, plan_run["plan_id"] if plan_run else None)
+            notification_history = _find_notifications_for_plan(conn, plan_run["plan_id"] if plan_run else None)
+        notification_data = _notification_row(notification)
         return {
             "trace": _trace_row(trace),
-            "plan_run": _plan_run_row(plan_run) if plan_run else None,
+            "plan_run": _plan_run_row(
+                plan_run,
+                notification=notification_data,
+                llm_interactions=llm_interactions,
+                config=projection_config,
+            ) if plan_run else None,
             "analysis": _plan_analysis(plan_run) if plan_run else {},
             "spans": [_span_row(row) for row in spans],
             "llm_interactions": [_llm_row(row, include_payloads=include_payloads) for row in llm_interactions],
             "badcases": [_badcase_row(row) for row in badcases],
+            "notification": notification_data or _notification_fallback(),
+            "notification_history": [_notification_row(row) for row in notification_history],
         }
 
     def get_plan_run_payload(self, plan_id: str) -> dict[str, Any] | None:
@@ -442,6 +492,40 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _trace_summary_row(
+    conn: sqlite3.Connection,
+    trace: sqlite3.Row,
+    *,
+    projection_config: "Config | None" = None,
+) -> dict[str, Any]:
+    summary = _trace_row(trace)
+    plan_run = _find_plan_run_for_trace(conn, trace)
+    if plan_run is None:
+        summary["business_summary"] = None
+        summary["notification"] = _notification_fallback()
+        return summary
+
+    llm_interactions = conn.execute(
+        """
+        SELECT *
+        FROM llm_interactions
+        WHERE trace_id = ?
+        ORDER BY created_at ASC
+        """,
+        (trace["trace_id"],),
+    ).fetchall()
+    notification = _notification_row(_find_notification_for_plan(conn, plan_run["plan_id"]))
+    public_plan_run = _plan_run_row(
+        plan_run,
+        notification=notification,
+        llm_interactions=llm_interactions,
+        config=projection_config,
+    )
+    summary["business_summary"] = public_plan_run.get("business_summary")
+    summary["notification"] = notification or _notification_fallback()
+    return summary
+
+
 def _json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -459,11 +543,47 @@ def _trace_id_for_plan(conn: sqlite3.Connection, plan_id: str) -> str | None:
     return None
 
 
+def _find_notification_for_plan(conn: sqlite3.Connection, plan_id: str | None) -> sqlite3.Row | None:
+    if not plan_id:
+        return None
+    return conn.execute(
+        """
+        SELECT *
+        FROM notifications
+        WHERE plan_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+
+
+def _find_notifications_for_plan(conn: sqlite3.Connection, plan_id: str | None) -> list[sqlite3.Row]:
+    if not plan_id:
+        return []
+    return conn.execute(
+        """
+        SELECT *
+        FROM notifications
+        WHERE plan_id = ?
+        ORDER BY created_at DESC, id DESC
+        """,
+        (plan_id,),
+    ).fetchall()
+
+
+def _notification_fallback() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "channel": None,
+        "status": "not_recorded",
+        "message": "通知状态未记录。",
+    }
+
+
 def _validate_plan_belongs_to_trace(conn: sqlite3.Connection, plan_id: str, trace_id: str) -> None:
     resolved_trace_id = _trace_id_for_plan(conn, plan_id)
     if not resolved_trace_id:
         raise ValueError(f"plan_id not found: {plan_id}")
     if resolved_trace_id != trace_id:
         raise ValueError(f"plan_id does not belong to trace_id: {plan_id}")
-
-

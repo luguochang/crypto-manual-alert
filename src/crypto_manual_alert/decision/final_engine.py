@@ -81,7 +81,7 @@ class OpenAICompatibleDecisionEngine(DecisionEngine):
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-        client = self.client or httpx.Client(timeout=self.timeout_seconds)
+        client = self.client or httpx.Client(timeout=self.timeout_seconds, trust_env=False)
         close_client = self.client is None
         started_perf = time.perf_counter()
         try:

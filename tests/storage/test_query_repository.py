@@ -43,3 +43,72 @@ def test_query_repository_caps_list_limit(tmp_path):
     assert repository.normalize_limit(0) == 1
     assert repository.normalize_limit(500) == 100
     assert repository.normalize_limit(20) == 20
+
+
+def test_query_repository_filters_runs_for_ui(tmp_path):
+    """Runs 列表支持前端分页/过滤，而不是只给最近 20 条静态摘要。"""
+    journal = Journal(tmp_path / "journal.db")
+    journal.append_trace(
+        trace_id="eth-allowed",
+        created_at="2026-07-07T01:00:00+00:00",
+        run_type="manual",
+        symbol="ETH-USDT-SWAP",
+        horizon="6h",
+        status="running",
+        metadata={},
+    )
+    journal.finish_trace(
+        trace_id="eth-allowed",
+        ended_at="2026-07-07T01:01:00+00:00",
+        status="allowed",
+        final_plan_id="plan-eth",
+        final_action="trigger long",
+        allowed=True,
+        metadata={},
+    )
+    journal.append_trace(
+        trace_id="btc-blocked",
+        created_at="2026-07-07T02:00:00+00:00",
+        run_type="manual",
+        symbol="BTC-USDT-SWAP",
+        horizon="6h",
+        status="running",
+        metadata={},
+    )
+    journal.finish_trace(
+        trace_id="btc-blocked",
+        ended_at="2026-07-07T02:01:00+00:00",
+        status="blocked",
+        final_plan_id="plan-btc",
+        final_action="trigger short",
+        allowed=False,
+        metadata={},
+    )
+    journal.append_trace(
+        trace_id="eth-failed",
+        created_at="2026-07-07T03:00:00+00:00",
+        run_type="manual",
+        symbol="ETH-USDT-SWAP",
+        horizon="6h",
+        status="running",
+        metadata={},
+    )
+    journal.finish_trace(
+        trace_id="eth-failed",
+        ended_at="2026-07-07T03:01:00+00:00",
+        status="failed",
+        final_plan_id=None,
+        final_action=None,
+        allowed=None,
+        metadata={},
+    )
+    repository = JournalQueryRepository(journal)
+
+    allowed = repository.list_runs(limit=10, status="allowed")
+    blocked = repository.list_runs(limit=10, allowed=False)
+    eth_page = repository.list_runs(limit=1, offset=1, symbol="ETH")
+
+    assert [item["trace_id"] for item in allowed] == ["eth-allowed"]
+    assert [item["trace_id"] for item in blocked] == ["btc-blocked"]
+    assert [item["trace_id"] for item in eth_page] == ["eth-allowed"]
+    assert repository.normalize_offset(-3) == 0

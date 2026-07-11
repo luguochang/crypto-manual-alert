@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from crypto_manual_alert.decision.production_control_gate import check_production_control_gate, merge_risk_verdicts
+from crypto_manual_alert.decision.production_control_gate import check_production_control_gate
+from crypto_manual_alert.workflow.risk_merge_policy import merge_risk_verdicts
 from crypto_manual_alert.domain import DecisionPlan, RiskVerdict
 
 

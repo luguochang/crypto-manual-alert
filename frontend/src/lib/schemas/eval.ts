@@ -176,6 +176,26 @@ export const evalRunDetailSchema = z.object({
   scores: z.array(evalScoreSchema).default([])
 });
 
+export const evalPromotionArtifactsSchema = z.object({
+  artifacts: z.record(z.record(z.unknown())).default({})
+});
+
+export const evalFrozenInputSummarySchema = z
+  .object({
+    frozen_input_hash: z.string(),
+    schema_version: z.number(),
+    kind: z.string(),
+    source_trace_id: z.string(),
+    source_badcase_id: z.number(),
+    public_summary: z.record(z.unknown()).default({}),
+    metadata: z.record(z.unknown()).default({})
+  })
+  .passthrough();
+
+export const evalCaseFrozenInputSchema = z.object({
+  frozen_input: evalFrozenInputSummarySchema
+});
+
 export const evalOutcomeWindowSchema = z
   .object({
     name: z.string(),
@@ -222,5 +242,8 @@ export type EvalCase = z.output<typeof evalCaseSchema>;
 export type FinancialQualityGate = z.output<typeof financialQualityGateSchema>;
 export type EvalRunSummary = z.output<typeof evalRunSummarySchema>;
 export type EvalRunDetail = z.output<typeof evalRunDetailSchema>;
+export type EvalPromotionArtifacts = z.output<typeof evalPromotionArtifactsSchema>;
+export type EvalFrozenInputSummary = z.output<typeof evalFrozenInputSummarySchema>;
+export type EvalCaseFrozenInput = z.output<typeof evalCaseFrozenInputSchema>;
 export type EvalScore = z.output<typeof evalScoreSchema>;
 export type EvalOutcome = z.output<typeof evalOutcomeSchema>;

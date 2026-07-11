@@ -39,17 +39,47 @@ class NoActiveEventStatusProvider:
     calendar provider would replace this in a later phase.
     """
 
-    def __init__(self, *, clock: datetime | None = None):
+    def __init__(
+        self,
+        *,
+        operator_ref: str = "",
+        confirmed_at: str = "",
+        source_ref: str = "",
+        horizon: str = "",
+        valid_until: str = "",
+        clock: datetime | None = None,
+    ):
+        self._operator_ref = operator_ref
+        self._confirmed_at = confirmed_at
+        self._source_ref = source_ref
+        self._horizon = horizon
+        self._valid_until = valid_until
         self._clock = clock
 
     def active_event_status(self, symbol: str) -> DataPoint:
         now = self._clock or datetime.now(timezone.utc)
+        metadata_complete = all(
+            [
+                self._operator_ref.strip(),
+                self._confirmed_at.strip(),
+                self._source_ref.strip(),
+                self._horizon.strip(),
+                self._valid_until.strip(),
+            ]
+        )
         return DataPoint(
             name="active_event_status",
             value={
                 "status": "no_active_event",
                 "symbol": symbol,
                 "assertion": "operator_confirmed_no_scheduled_macro_event",
+                "provider": "no_active_event",
+                "operator_ref": self._operator_ref,
+                "confirmed_at": self._confirmed_at,
+                "source_ref": self._source_ref,
+                "horizon": self._horizon,
+                "valid_until": self._valid_until,
+                "metadata_complete": metadata_complete,
             },
             timestamp_ms=int(now.timestamp() * 1000),
             source="event_pool",
@@ -60,7 +90,13 @@ class NoActiveEventStatusProvider:
 def build_event_status_provider(config: Config) -> EventStatusProvider:
     provider = config.macro_event.provider
     if provider == "no_active_event":
-        return NoActiveEventStatusProvider()
+        return NoActiveEventStatusProvider(
+            operator_ref=config.macro_event.no_active_event_operator_ref,
+            confirmed_at=config.macro_event.no_active_event_confirmed_at,
+            source_ref=config.macro_event.no_active_event_source_ref,
+            horizon=config.macro_event.no_active_event_horizon,
+            valid_until=config.macro_event.no_active_event_valid_until,
+        )
     if provider == "disabled":
         return DisabledEventStatusProvider()
     raise ValueError(f"Unsupported macro_event.provider: {provider}")

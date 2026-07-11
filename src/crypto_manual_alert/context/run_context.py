@@ -196,6 +196,8 @@ class DecisionRunContext:
             "horizon": self.request.horizon,
             "session_id": self.request.session_id,
             "manual_only": self.request.manual_only,
+            "position": copy.deepcopy(self.request.position),
+            "risk_mode": self.request.risk_mode,
             "memory_snapshot": copy.deepcopy(self._memory_snapshot),
             "side_effect_policy": self.side_effect_policy.to_public_dict(),
         }

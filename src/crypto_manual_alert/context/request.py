@@ -22,6 +22,8 @@ class DecisionRequest:
     session_id: str | None = None
     manual_only: bool = True
     alert_channel: str | None = "bark"
+    position: dict[str, Any] | None = None
+    risk_mode: str | None = None
 
     def __post_init__(self) -> None:
         if self.run_type not in RUN_TYPES:
@@ -30,6 +32,8 @@ class DecisionRequest:
         object.__setattr__(self, "symbol", normalized_symbol)
         object.__setattr__(self, "query_text", (self.query_text or "").strip())
         object.__setattr__(self, "manual_only", True)
+        object.__setattr__(self, "position", _optional_mapping(self.position))
+        object.__setattr__(self, "risk_mode", _optional_text(self.risk_mode))
 
     def query_semantics(self) -> dict[str, bool | str]:
         return {
@@ -63,6 +67,8 @@ def build_manual_decision_request(payload: dict[str, Any] | Any) -> DecisionRequ
         session_id=_optional_text(data.get("session_id")),
         manual_only=True,
         alert_channel=_optional_text(data.get("alert_channel")) or "bark",
+        position=_optional_mapping(data.get("position")),
+        risk_mode=_optional_text(data.get("risk_mode")),
     )
 
 
@@ -81,3 +87,9 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_mapping(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return dict(value)

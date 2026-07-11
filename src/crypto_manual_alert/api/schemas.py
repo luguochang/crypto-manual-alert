@@ -37,6 +37,8 @@ class ManualRunRequest(BaseModel):
     horizon: str | None = None
     session_id: str | None = None
     alert_channel: str | None = "bark"
+    position: dict[str, Any] | None = None
+    risk_mode: str | None = None
 
 
 class EvalRunRequest(BaseModel):

@@ -5,9 +5,18 @@ app:
 market_data:
   provider: okx_public
 
+trading:
+  auto_order_enabled: false
+  manual_execution_required: true
+
 decision:
   engine: openai_compatible
+  final_input_mode: legacy_prompt
   timeout_seconds: 1200
+  candidate_sidecar_mode: disabled
+
+workflow:
+  execution_mode: legacy_baseline
 
 notification:
   enabled: true

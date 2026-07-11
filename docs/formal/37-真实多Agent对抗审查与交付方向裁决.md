@@ -2,6 +2,8 @@
 
 日期：2026-07-06
 
+> **当前定位（2026-07-09）**：本文是方向裁决和历史审查记录，不是逐项执行 checklist。当前交付执行、测试状态、P0 证据闭环和后续 checklist 以 `docs/implementation/2026-07-09-current-delivery-checklist.md` 为准；文中的历史测试失败、AgentSwarm 扩展路线和观测平台路线不得覆盖当前 `legacy_prompt` manual-only production main path。
+
 ## 1. 文档定位
 
 本文是项目第一次**真实**多 Agent 对抗审查的结论与方向裁决记录。

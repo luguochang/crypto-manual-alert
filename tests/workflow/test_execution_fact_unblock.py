@@ -2,32 +2,86 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
 
 from crypto_manual_alert.config import load_config
 from crypto_manual_alert.context.request import DecisionRequest
 from crypto_manual_alert.context.run_context import DecisionRunContext
+import crypto_manual_alert.market.providers as market_providers
 from crypto_manual_alert.market.providers import OkxPublicMarketDataProvider
 from crypto_manual_alert.storage.journal import Journal
 from crypto_manual_alert.workflow.legacy_plan_runner import PlanRunner
+
+
+class CountingDecisionEngine:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def run(self, input_payload):
+        self.calls.append(input_payload)
+        return json.dumps(
+            {
+                "instrument": "ETH-USDT-SWAP",
+                "main_action": "trigger long",
+                "horizon": "6h",
+                "reference_price": 3500,
+                "entry_trigger": 3510,
+                "stop_price": 3435,
+                "target_1": 3580,
+                "target_2": 3660,
+                "probability": 0.58,
+                "position_size_class": "light",
+                "max_leverage": 2,
+                "risk_pct": 0.25,
+                "expires_in_seconds": 90,
+                "why_not_opposite": "BTC structure is not confirming downside.",
+                "invalidation": "Invalid if ETH loses 3435 on fresh OKX mark price.",
+                "unavailable_data": [],
+                "manual_execution_required": True,
+                "notes": "counting engine",
+            },
+            ensure_ascii=False,
+        )
 
 
 def _fresh_ts() -> int:
     return int(time.time() * 1000)
 
 
+def _with_complete_no_active_event_assertion(config):
+    confirmed_at = datetime.now(timezone.utc)
+    valid_until = confirmed_at + timedelta(hours=6)
+    return replace(
+        config,
+        macro_event=replace(
+            config.macro_event,
+            provider="no_active_event",
+            no_active_event_operator_ref="ops:macro-desk",
+            no_active_event_confirmed_at=confirmed_at.isoformat(),
+            no_active_event_source_ref="calendar:operator-verified:no-high-impact",
+            no_active_event_horizon="6h",
+            no_active_event_valid_until=valid_until.isoformat(),
+        ),
+    )
+
+
 def _okx_http_get(path: str, params: dict[str, str]) -> dict:
     """Deterministic stand-in for OKX public HTTP responses.
 
     Returns fresh-timestamped payloads so the snapshot's execution facts pass the
-    source_freshness check (stale_market_data_seconds). mark/index come from
-    /public/mark-price; order_book from /market/books — both source=okx_public
-    which maps to source_type=exchange_native and satisfies facts_gate.
+    source_freshness check (stale_market_data_seconds). mark comes from
+    /public/mark-price, index from /market/index-tickers, and order_book from
+    /market/books; all carry source=okx_public and satisfy facts_gate.
     """
     ts = _fresh_ts()
     if path == "/api/v5/market/ticker":
         return {"code": "0", "data": [{"last": "3500", "bidPx": "3499", "askPx": "3501", "ts": str(ts)}]}
     if path == "/api/v5/public/mark-price":
-        return {"code": "0", "data": [{"markPx": "3499", "idxPx": "3498", "ts": str(ts)}]}
+        return {"code": "0", "data": [{"markPx": "3499", "ts": str(ts)}]}
+    if path == "/api/v5/market/index-tickers":
+        assert params == {"instId": "ETH-USDT"}
+        return {"code": "0", "data": [{"instId": "ETH-USDT", "idxPx": "3498", "ts": str(ts)}]}
     if path == "/api/v5/public/funding-rate":
         return {"code": "0", "data": [{"fundingRate": "0.0001", "fundingTime": str(ts)}]}
     if path == "/api/v5/public/open-interest":
@@ -53,7 +107,7 @@ def test_okx_public_market_data_unblocks_opening_action_gate(tmp_path):
     """
     config = load_config("config/default.yaml")
     config = replace(config, app=replace(config.app, data_dir=str(tmp_path)))
-    config = replace(config, macro_event=replace(config.macro_event, provider="no_active_event"))
+    config = _with_complete_no_active_event_assertion(config)
     journal = Journal(tmp_path / "journal.db")
     market_provider = OkxPublicMarketDataProvider(config, http_get=_okx_http_get)
     runner = PlanRunner(config, journal, market_provider=market_provider)
@@ -115,6 +169,121 @@ def test_fixture_market_data_blocks_opening_action_by_default(tmp_path):
     )
 
 
+def test_okx_public_provider_disables_environment_proxy_for_default_client(monkeypatch):
+    """Local/mock OKX verification must not be hijacked by system proxy env vars."""
+    config = load_config("config/default.yaml", "config/staging.yaml")
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": "0", "data": [{"markPx": "3499", "ts": str(_fresh_ts())}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path, params):
+            return Response()
+
+    monkeypatch.setattr(market_providers.httpx, "Client", Client)
+
+    provider = OkxPublicMarketDataProvider(config)
+    provider._get("/api/v5/public/mark-price", {"instId": "ETH-USDT-SWAP"})
+
+    assert calls
+    assert calls[0]["trust_env"] is False
+    assert "proxy" not in calls[0]
+
+
+def test_okx_public_provider_can_enable_environment_proxy_for_prod_network(monkeypatch):
+    config = load_config("config/default.yaml", "config/staging.yaml")
+    config = replace(
+        config,
+        market_data=replace(config.market_data, http_trust_env=True),
+    )
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": "0", "data": [{"markPx": "3499", "ts": str(_fresh_ts())}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path, params):
+            return Response()
+
+    monkeypatch.setattr(market_providers.httpx, "Client", Client)
+
+    provider = OkxPublicMarketDataProvider(config)
+    provider._get("/api/v5/public/mark-price", {"instId": "ETH-USDT-SWAP"})
+
+    assert calls
+    assert calls[0]["trust_env"] is True
+    assert "proxy" not in calls[0]
+
+
+def test_okx_public_provider_uses_explicit_http_proxy(monkeypatch):
+    config = load_config("config/default.yaml", "config/staging.yaml")
+    config = replace(
+        config,
+        market_data=replace(
+            config.market_data,
+            http_trust_env=False,
+            http_proxy="http://127.0.0.1:8888",
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": "0", "data": [{"markPx": "3499", "ts": str(_fresh_ts())}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, path, params):
+            return Response()
+
+    monkeypatch.setattr(market_providers.httpx, "Client", Client)
+
+    provider = OkxPublicMarketDataProvider(config)
+    provider._get("/api/v5/public/mark-price", {"instId": "ETH-USDT-SWAP"})
+
+    assert calls
+    assert calls[0]["trust_env"] is False
+    assert calls[0]["proxy"] == "http://127.0.0.1:8888"
+
+
 def test_staging_config_loads_and_unblocks_gate(tmp_path):
     """The staging overlay (default + staging.yaml) configures the actionable-alert
     path: okx_public market data + no_active_event operator assertion. With mocked
@@ -123,6 +292,7 @@ def test_staging_config_loads_and_unblocks_gate(tmp_path):
     config = load_config("config/default.yaml", "config/staging.yaml")
     assert config.market_data.provider == "okx_public"
     assert config.macro_event.provider == "no_active_event"
+    config = _with_complete_no_active_event_assertion(config)
     config = replace(config, app=replace(config.app, data_dir=str(tmp_path)))
 
     journal = Journal(tmp_path / "journal.db")
@@ -138,3 +308,74 @@ def test_staging_config_loads_and_unblocks_gate(tmp_path):
     detail = journal.get_trace_detail(result.trace_id)
     audit = detail["plan_run"]["agent_audit_view"]
     assert audit["gates"]["production_control_gate"]["allowed"] is True
+
+
+def test_no_active_event_assertion_metadata_is_persisted_in_snapshot(tmp_path):
+    """The no-active-event assertion must be an auditable run artifact, not just a config switch."""
+
+    config = load_config("config/default.yaml", "config/staging.yaml")
+    config = replace(
+        config,
+        app=replace(config.app, data_dir=str(tmp_path)),
+        macro_event=replace(
+            config.macro_event,
+            no_active_event_operator_ref="ops:macro-desk",
+            no_active_event_confirmed_at="2026-07-09T09:30:00+08:00",
+            no_active_event_source_ref="calendar:forexfactory:2026-07-09:no-high-impact",
+            no_active_event_horizon="6h",
+            no_active_event_valid_until="2026-07-09T15:30:00+08:00",
+        ),
+    )
+    journal = Journal(tmp_path / "journal.db")
+    market_provider = OkxPublicMarketDataProvider(config, http_get=_okx_http_get)
+    runner = PlanRunner(config, journal, market_provider=market_provider)
+    context = DecisionRunContext.create(
+        DecisionRequest(symbol="ETH-USDT-SWAP", query_text="assess ETH manual operation", horizon="6h")
+    )
+
+    result = runner.run_once("ETH-USDT-SWAP", run_context=context)
+
+    payload = journal.get_plan_run_payload(result.plan.plan_id)
+    event_point = payload["snapshot"]["points"]["active_event_status"]
+    event_value = event_point["value"]
+    assert event_point["source"] == "event_pool"
+    assert event_value["status"] == "no_active_event"
+    assert event_value["provider"] == "no_active_event"
+    assert event_value["operator_ref"] == "ops:macro-desk"
+    assert event_value["confirmed_at"] == "2026-07-09T09:30:00+08:00"
+    assert event_value["source_ref"] == "calendar:forexfactory:2026-07-09:no-high-impact"
+    assert event_value["horizon"] == "6h"
+    assert event_value["valid_until"] == "2026-07-09T15:30:00+08:00"
+    assert event_value["metadata_complete"] is True
+
+
+def test_staging_actionable_can_disable_candidate_sidecar_without_changing_final_verdict(tmp_path):
+    config = load_config("config/default.yaml", "config/staging.yaml")
+    config = _with_complete_no_active_event_assertion(config)
+    config = replace(
+        config,
+        app=replace(config.app, data_dir=str(tmp_path)),
+        decision=replace(config.decision, candidate_sidecar_mode="disabled"),
+    )
+    engine = CountingDecisionEngine()
+    journal = Journal(tmp_path / "journal.db")
+    market_provider = OkxPublicMarketDataProvider(config, http_get=_okx_http_get)
+    runner = PlanRunner(config, journal, market_provider=market_provider, decision_engine=engine)
+    context = DecisionRunContext.create(
+        DecisionRequest(symbol="ETH-USDT-SWAP", query_text="assess ETH manual operation", horizon="6h")
+    )
+
+    result = runner.run_once("ETH-USDT-SWAP", run_context=context)
+
+    assert len(engine.calls) == 1
+    assert engine.calls[0].get("mode") != "candidate_final_input"
+    assert result.plan.main_action == "trigger long"
+    assert result.plan.manual_execution_required is True
+    assert result.verdict.allowed is True
+    detail = journal.get_trace_detail(result.trace_id)
+    audit = detail["plan_run"]["agent_audit_view"]
+    assert audit["gates"]["production_control_gate"]["allowed"] is True
+    payload = journal.get_plan_run_payload(result.plan.plan_id)
+    assert payload["final_input_selection"]["mode"] == "legacy_prompt"
+    assert payload.get("candidate_final_decision") is None
+    assert payload["audit_only"]["candidate_final_decision"] is None

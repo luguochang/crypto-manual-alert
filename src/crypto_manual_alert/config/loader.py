@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import copy
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+from urllib.parse import urlparse
 
 from .final_input_switch_review import validate_final_input_switch_review_path
 from .models import (
@@ -13,10 +15,10 @@ from .models import (
     Config,
     ConfigError,
     DecisionConfig,
+    DiagnosticConfig,
     EvalConfig,
     EvalFinancialQualityConfig,
     EvalReleaseGateConfig,
-    MacroEventConfig,
     MarketDataConfig,
     MacroEventConfig,
     NotificationConfig,
@@ -27,6 +29,7 @@ from .models import (
     SkillProvidersConfig,
     TradingConfig,
     WorkflowConfig,
+    parse_iso_datetime_with_timezone,
 )
 
 
@@ -40,9 +43,11 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
-def _read_yaml(path: str | Path) -> dict[str, Any]:
+def _read_yaml(path: str | Path, *, required: bool = True) -> dict[str, Any]:
     p = Path(path)
     if not p.exists():
+        if required:
+            raise ConfigError(f"Config file does not exist: {p}")
         return {}
     with p.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
@@ -75,6 +80,12 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         merged.setdefault("trading", {})["auto_order_enabled"] = _env_bool("AUTO_ORDER_ENABLED", False)
     if "MARKET_DATA_PROVIDER" in os.environ:
         merged.setdefault("market_data", {})["provider"] = os.environ["MARKET_DATA_PROVIDER"]
+    if "MARKET_DATA_OKX_BASE_URL" in os.environ:
+        merged.setdefault("market_data", {})["okx_base_url"] = os.environ["MARKET_DATA_OKX_BASE_URL"]
+    if "MARKET_DATA_HTTP_TRUST_ENV" in os.environ:
+        merged.setdefault("market_data", {})["http_trust_env"] = _env_bool("MARKET_DATA_HTTP_TRUST_ENV", False)
+    if "MARKET_DATA_HTTP_PROXY" in os.environ:
+        merged.setdefault("market_data", {})["http_proxy"] = os.environ["MARKET_DATA_HTTP_PROXY"]
     if "DECISION_ENGINE" in os.environ:
         merged.setdefault("decision", {})["engine"] = os.environ["DECISION_ENGINE"]
     if "DECISION_COMMAND" in os.environ:
@@ -87,6 +98,8 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         merged.setdefault("decision", {})["openai_model"] = os.environ["OPENAI_MODEL"]
     if "OPENAI_API_KEY_ENV" in os.environ:
         merged.setdefault("decision", {})["openai_api_key_env"] = os.environ["OPENAI_API_KEY_ENV"]
+    if "CANDIDATE_SIDECAR_MODE" in os.environ:
+        merged.setdefault("decision", {})["candidate_sidecar_mode"] = os.environ["CANDIDATE_SIDECAR_MODE"]
     if "NOTIFICATION_ENABLED" in os.environ:
         merged.setdefault("notification", {})["enabled"] = _env_bool("NOTIFICATION_ENABLED", False)
     if "SCHEDULER_ENABLED" in os.environ:
@@ -115,6 +128,18 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         merged.setdefault("workflow", {})["execution_mode"] = os.environ["WORKFLOW_EXECUTION_MODE"]
     if "MACRO_EVENT_PROVIDER" in os.environ:
         merged.setdefault("macro_event", {})["provider"] = os.environ["MACRO_EVENT_PROVIDER"]
+    if "MACRO_EVENT_OPERATOR_REF" in os.environ:
+        merged.setdefault("macro_event", {})["no_active_event_operator_ref"] = os.environ["MACRO_EVENT_OPERATOR_REF"]
+    if "MACRO_EVENT_CONFIRMED_AT" in os.environ:
+        merged.setdefault("macro_event", {})["no_active_event_confirmed_at"] = os.environ["MACRO_EVENT_CONFIRMED_AT"]
+    if "MACRO_EVENT_SOURCE_REF" in os.environ:
+        merged.setdefault("macro_event", {})["no_active_event_source_ref"] = os.environ["MACRO_EVENT_SOURCE_REF"]
+    if "MACRO_EVENT_ASSERTION_HORIZON" in os.environ:
+        merged.setdefault("macro_event", {})["no_active_event_horizon"] = os.environ["MACRO_EVENT_ASSERTION_HORIZON"]
+    if "MACRO_EVENT_VALID_UNTIL" in os.environ:
+        merged.setdefault("macro_event", {})["no_active_event_valid_until"] = os.environ["MACRO_EVENT_VALID_UNTIL"]
+    if "DIAGNOSTIC_ROUTES_ENABLED" in os.environ:
+        merged.setdefault("diagnostic", {})["routes_enabled"] = _env_bool("DIAGNOSTIC_ROUTES_ENABLED", False)
     if "PLAN_TTL_SECONDS" in os.environ:
         merged.setdefault("trading", {})["plan_ttl_seconds"] = int(os.environ["PLAN_TTL_SECONDS"])
     if "STALE_MARKET_DATA_SECONDS" in os.environ:
@@ -146,6 +171,7 @@ def _build_config(data: dict[str, Any]) -> Config:
         workflow=WorkflowConfig(**_section(data, "workflow")),
         skill_providers=SkillProvidersConfig(**_section(data, "skill_providers")),
         macro_event=MacroEventConfig(**_section(data, "macro_event")),
+        diagnostic=DiagnosticConfig(**_section(data, "diagnostic")),
         security=SecurityConfig(**_section(data, "security")),
     )
 
@@ -161,12 +187,20 @@ def _validate(config: Config) -> None:
         raise ConfigError("max_risk_per_trade_pct must be within (0, 1]")
     if config.trading.max_leverage > 2:
         raise ConfigError("max_leverage must not exceed 2 in manual-alert mode")
+    if config.market_data.provider not in {"fixture", "okx_public"}:
+        raise ConfigError("market_data.provider must be one of: fixture, okx_public")
+    if config.market_data.http_proxy:
+        proxy_url = urlparse(config.market_data.http_proxy)
+        if proxy_url.scheme not in {"http", "https"} or not proxy_url.hostname:
+            raise ConfigError("market_data.http_proxy must be an http or https URL with a hostname")
     if config.decision.engine == "command":
         raise ConfigError("decision.engine=command is disabled for manual-alert mode")
     if config.decision.final_input_mode == "decision_input":
         validate_final_input_switch_review_path(config.decision.final_input_mode_switch_review_path)
     elif config.decision.final_input_mode != "legacy_prompt":
         raise ConfigError(f"Unsupported decision.final_input_mode: {config.decision.final_input_mode}")
+    if config.decision.candidate_sidecar_mode not in {"same_engine", "disabled"}:
+        raise ConfigError("decision.candidate_sidecar_mode must be one of: same_engine, disabled")
     if config.research.planner not in {"static", "llm"}:
         raise ConfigError(f"Unsupported research.planner: {config.research.planner}")
     if config.research.leader_mode not in {"static", "llm"}:
@@ -191,6 +225,7 @@ def _validate(config: Config) -> None:
         raise ConfigError("skill_providers.liquidity_order_book must be one of: disabled, fixture, exchange_native")
     if config.macro_event.provider not in {"disabled", "no_active_event"}:
         raise ConfigError("macro_event.provider must be one of: disabled, no_active_event")
+    _validate_macro_event_assertion_metadata(config.macro_event)
     if config.eval.release_gate.minimum_case_count < 1:
         raise ConfigError("eval.release_gate.minimum_case_count must be at least 1")
     if not 0 <= config.eval.release_gate.schema_valid_rate_threshold <= 1:
@@ -217,14 +252,40 @@ def _validate(config: Config) -> None:
                 raise ConfigError(f"forbidden environment variable is set: {name}")
 
 
+def _validate_macro_event_assertion_metadata(config: MacroEventConfig) -> None:
+    confirmed_dt = _parse_optional_macro_event_datetime(
+        config.no_active_event_confirmed_at,
+        field_name="macro_event.no_active_event_confirmed_at",
+    )
+    valid_until_dt = _parse_optional_macro_event_datetime(
+        config.no_active_event_valid_until,
+        field_name="macro_event.no_active_event_valid_until",
+    )
+    if confirmed_dt is not None and valid_until_dt is not None and valid_until_dt <= confirmed_dt:
+        raise ConfigError("macro_event.no_active_event_valid_until must be after no_active_event_confirmed_at")
+    if config.provider == "no_active_event" and valid_until_dt is not None and valid_until_dt <= datetime.now(timezone.utc):
+        raise ConfigError("macro_event.no_active_event_valid_until must be in the future")
+
+
+def _parse_optional_macro_event_datetime(value: Any, *, field_name: str):
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ConfigError(f"{field_name} must include timezone")
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return parse_iso_datetime_with_timezone(text, field_name=field_name)
+
+
 def load_config(*paths: str | Path) -> Config:
     default_path = Path("config/default.yaml")
-    data = _read_yaml(default_path)
+    data = _read_yaml(default_path, required=True)
     for path in paths:
         p = Path(path)
         if p == default_path:
             continue
-        data = _deep_merge(data, _read_yaml(p))
+        data = _deep_merge(data, _read_yaml(p, required=True))
     data = _apply_env_overrides(data)
     config = _build_config(data)
     _validate(config)

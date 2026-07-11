@@ -66,10 +66,14 @@ class FakeOkxHttp:
                     {
                         "instId": "ETH-USDT-SWAP",
                         "markPx": "3500.1",
-                        "idxPx": "3499.8",
                         "ts": "1783317600000",
                     }
                 ],
+            }
+        if path == "/api/v5/market/index-tickers":
+            return {
+                "code": "0",
+                "data": [{"instId": "ETH-USDT", "idxPx": "3499.8", "ts": "1783317600000"}],
             }
         if path == "/api/v5/market/books":
             return {
@@ -104,6 +108,10 @@ def test_okx_public_order_book_provider_returns_refs_without_raw_order_book_payl
         (
             "/api/v5/public/mark-price",
             {"instType": "SWAP", "instId": "ETH-USDT-SWAP"},
+        ),
+        (
+            "/api/v5/market/index-tickers",
+            {"instId": "ETH-USDT"},
         ),
         (
             "/api/v5/market/books",

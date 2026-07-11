@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,5 +17,4 @@ RUN pip install --upgrade pip && pip install .
 
 RUN mkdir -p /app/data
 
-CMD ["crypto-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "scheduler"]
-
+CMD ["crypto-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "--config", "config/staging.yaml", "scheduler"]

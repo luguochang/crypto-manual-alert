@@ -57,24 +57,6 @@ def check_production_control_gate(
     )
 
 
-def merge_risk_verdicts(*verdicts: RiskVerdict) -> RiskVerdict:
-    """Merge deterministic risk verdicts without hiding any blocking reason."""
-
-    reasons: list[str] = []
-    warnings: list[str] = []
-    rule_hits: list[RuleHit] = []
-    for verdict in verdicts:
-        reasons.extend(verdict.reasons)
-        warnings.extend(verdict.warnings)
-        rule_hits.extend(verdict.rule_hits)
-    return RiskVerdict(
-        allowed=not reasons,
-        reasons=_dedupe(reasons),
-        warnings=_dedupe(warnings),
-        rule_hits=rule_hits,
-    )
-
-
 def _apply_candidate_gate(
     plan: DecisionPlan,
     gate_candidate: dict[str, Any],
@@ -219,7 +201,3 @@ def _append_hit(
             details=details,
         )
     )
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    return list(dict.fromkeys(value for value in values if value))

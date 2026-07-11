@@ -41,6 +41,20 @@ def test_build_manual_decision_request_accepts_legacy_query_alias():
     assert request.manual_only is True
 
 
+def test_build_manual_decision_request_preserves_frontend_position_and_risk_mode():
+    """manual-run 前端字段必须进入后端请求语义，不能被入口层静默丢弃。"""
+    request = build_manual_decision_request(
+        {
+            "symbol": "ETH-USDT-SWAP",
+            "position": {"side": "long", "size": "0.5", "entry_price": 3200},
+            "risk_mode": "conservative",
+        }
+    )
+
+    assert request.position == {"side": "long", "size": "0.5", "entry_price": 3200}
+    assert request.risk_mode == "conservative"
+
+
 def test_manual_request_cannot_disable_manual_only():
     """用户输入不能关闭 manual_only，这是手动提醒系统的硬边界。"""
     request = build_manual_decision_request({"manual_only": False})

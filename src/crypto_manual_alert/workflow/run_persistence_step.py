@@ -74,6 +74,7 @@ def persist_run_result(
         pre_final_decision_input=pre_final_decision_input,
         candidate_audit=candidate_audit,
         production_control_verdict=production_control_verdict,
+        config=config,
         error=error,
     )
     status = "blocked" if error or not verdict.allowed else "allowed"

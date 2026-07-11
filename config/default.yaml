@@ -20,6 +20,8 @@ trading:
 market_data:
   provider: fixture
   okx_base_url: https://www.okx.com
+  http_trust_env: false
+  http_proxy: ""
   request_timeout_seconds: 8
   aggregate_timeout_seconds: 25
   stale_market_data_seconds: 120
@@ -97,9 +99,9 @@ security:
   secret_env_names:
     - BARK_DEVICE_KEY
     - OPENAI_API_KEY
+  forbidden_env_names:
     - OKX_API_KEY
     - OKX_API_SECRET
     - OKX_API_PASSPHRASE
-  forbidden_env_names:
     - OKX_TRADE_API_KEY
     - OKX_WITHDRAW_API_KEY

@@ -28,6 +28,20 @@ def horizon_seconds(horizon: str | None) -> float | None:
     return float(match.group(1)) * _HORIZON_SECONDS[match.group(2).lower()]
 
 
+def horizon_seconds_values(horizon: str | None) -> list[float]:
+    """Parse a single or slash-separated horizon string into ordered windows."""
+
+    if not horizon:
+        return []
+    values: list[float] = []
+    for token in re.split(r"[/,]+", str(horizon)):
+        parsed = horizon_seconds(token)
+        if parsed is None:
+            return []
+        values.append(parsed)
+    return values
+
+
 @dataclass(frozen=True)
 class PlanOutcomeInput:
     """Minimal plan projection needed to collect a market outcome.
@@ -178,7 +192,11 @@ class OutcomeCollector:
             payload = self.http_get(path, params)
         else:
             base_url = self.config.market_data.okx_base_url.rstrip("/")
-            with httpx.Client(base_url=base_url, timeout=self.config.market_data.request_timeout_seconds) as client:
+            with httpx.Client(
+                base_url=base_url,
+                timeout=self.config.market_data.request_timeout_seconds,
+                trust_env=False,
+            ) as client:
                 response = client.get(path, params=params)
                 response.raise_for_status()
                 payload = response.json()

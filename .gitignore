@@ -13,6 +13,7 @@ venv/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Local runtime data
 data/tmp/
@@ -37,6 +38,13 @@ frontend/.turbo/
 frontend/tsconfig.tsbuildinfo
 frontend/npm-debug.log*
 frontend/yarn-error.log*
+
+# Generated test reports and local proof artifacts
+artifacts/
+test-results/
+playwright-report/
+frontend/test-results/
+frontend/playwright-report/
 
 # IDE / OS
 .idea/

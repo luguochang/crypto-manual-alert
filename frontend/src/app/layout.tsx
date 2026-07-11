@@ -5,7 +5,7 @@ import { Sidebar } from "./shared/sidebar";
 
 export const metadata: Metadata = {
   title: "Crypto Manual Alert",
-  description: "人工确认的加密货币操作提醒与可观测工作台"
+  description: "人工确认的加密货币操作提醒"
 };
 
 export default function RootLayout({
@@ -31,7 +31,7 @@ export default function RootLayout({
             <div className="sidebar-footer">
               人工确认 · 非自动交易
               <br />
-              manual_execution_required
+              只生成提醒，不自动下单
             </div>
           </aside>
           <main className="main-panel">{children}</main>

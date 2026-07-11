@@ -11,10 +11,17 @@ const DEFAULT_ERROR: ApiError = {
 };
 
 function getApiBaseUrl() {
-  const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+  const isServer = typeof window === "undefined";
+  const baseUrl = isServer
+    ? process.env.API_INTERNAL_BASE_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL
+    : process.env.NEXT_PUBLIC_API_BASE_URL;
 
   if (!baseUrl) {
-    throw new Error("缺少 NEXT_PUBLIC_API_BASE_URL，前端不会读取任何 secret。");
+    throw new Error(
+      isServer
+        ? "缺少 frontend server-side API base；请设置 API_INTERNAL_BASE_URL 或 NEXT_PUBLIC_API_BASE_URL。"
+        : "缺少 NEXT_PUBLIC_API_BASE_URL，前端不会读取任何 secret。"
+    );
   }
 
   return baseUrl.replace(/\/$/, "");
@@ -26,6 +33,17 @@ function normalizeError(error: unknown): ApiError {
   }
 
   return DEFAULT_ERROR;
+}
+
+function unwrapFastApiErrorEnvelope(json: unknown): unknown {
+  if (!json || typeof json !== "object" || !("detail" in json)) {
+    return json;
+  }
+  const detail = (json as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object" || !("ok" in detail)) {
+    return json;
+  }
+  return detail;
 }
 
 // API 边界只接受后端统一信封，业务字段交给调用方 schema 校验。
@@ -44,7 +62,7 @@ export async function apiRequest<S extends z.ZodTypeAny>(
       cache: "no-store"
     });
     const json = (await response.json()) as unknown;
-    const envelope = envelopeSchema(schema).safeParse(json);
+    const envelope = envelopeSchema(schema).safeParse(unwrapFastApiErrorEnvelope(json));
 
     if (!envelope.success) {
       return {

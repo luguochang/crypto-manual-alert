@@ -221,7 +221,7 @@ class LegacyDecisionWorkflow:
                 shadow_swarm_audit=shadow_swarm_audit,
                 raw_decision=raw_decision,
                 final_input_selection=final_input_selection,
-                candidate_decision_engine=self.decision_engine,
+                candidate_decision_engine=_candidate_sidecar_engine(self.config, self.decision_engine),
                 pre_final_decision_input=pre_final_decision_input,
                 run_context_summary=_current_run_context_summary(
                     run_context,
@@ -289,6 +289,12 @@ def _current_run_context_summary(
         legacy_final_input_result=legacy_final_input_result,
     )
     return summary
+
+
+def _candidate_sidecar_engine(config: Config, decision_engine: DecisionEngine) -> DecisionEngine | None:
+    if config.decision.candidate_sidecar_mode == "disabled":
+        return None
+    return decision_engine
 
 
 def _version_lock_summary(

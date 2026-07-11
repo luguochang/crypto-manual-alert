@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -87,8 +88,9 @@ def test_eval_outcomes_endpoint_exposes_collected_samples(tmp_path):
     assert items[0]["can_score"] is True
 
 
-def test_eval_run_scores_cases_without_prod_side_effects(tmp_path):
+def test_eval_run_scores_cases_without_prod_side_effects(tmp_path, monkeypatch):
     """Eval run 只能写 eval sidecar，不能新增生产 plan_runs、notifications 或 manual_outcomes。"""
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
@@ -128,6 +130,172 @@ def test_eval_run_scores_cases_without_prod_side_effects(tmp_path):
     assert any(score["passed"] is False for score in detail["scores"])
     assert not any("raw_decision" in str(case).lower() for case in detail["cases"])
 
+    artifacts_response = client.get(f"/api/eval/runs/{run_summary['eval_run_id']}/promotion-artifacts")
+    assert artifacts_response.status_code == 200
+    artifacts = artifacts_response.json()["data"]["artifacts"]
+    assert set(artifacts) == {"no_production_side_effect_proof", "shadow_candidate_comparison"}
+    assert artifacts["no_production_side_effect_proof"]["eval_run_id"] == run_summary["eval_run_id"]
+    assert artifacts["no_production_side_effect_proof"]["decision_effect"] == "none"
+    assert artifacts["shadow_candidate_comparison"]["eval_run_id"] == run_summary["eval_run_id"]
+    assert artifacts["shadow_candidate_comparison"]["decision_effect"] == "none"
+
+    frozen_response = client.get(f"/api/eval/cases/{detail['cases'][0]['case_id']}/frozen-input")
+    assert frozen_response.status_code == 200
+    frozen_input = frozen_response.json()["data"]["frozen_input"]
+    assert frozen_input["frozen_input_hash"] == detail["cases"][0]["frozen_input_hash"]
+    assert frozen_input["source_badcase_id"] == badcase_id
+    assert frozen_input["source_trace_id"] == detail["cases"][0]["source_trace_id"]
+    assert frozen_input["public_summary"]
+    assert "input_payload" not in frozen_input
+    assert "raw_decision" not in str(frozen_input).lower()
+
+    by_hash_response = client.get(f"/api/eval/frozen-inputs/{detail['cases'][0]['frozen_input_hash']}")
+    assert by_hash_response.status_code == 200
+    by_hash_frozen_input = by_hash_response.json()["data"]["frozen_input"]
+    assert by_hash_frozen_input == frozen_input
+    assert "input_payload" not in by_hash_frozen_input
+    assert "raw_decision" not in str(by_hash_frozen_input).lower()
+
+
+def test_eval_run_rejects_real_judge_when_diagnostic_routes_are_disabled(tmp_path):
+    """Real external judge mode is an engineering diagnostic path, not a default product API."""
+
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
+
+    response = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_openai"},
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "diagnostic_routes_disabled"
+
+
+def test_eval_run_create_and_list_hide_diagnostic_metadata_by_default(tmp_path):
+    """Default eval summaries keep quality status but hide replay/release/report internals."""
+
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
+
+    create_response = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    )
+    list_response = client.get("/api/eval/runs")
+
+    assert create_response.status_code == 200
+    assert list_response.status_code == 200
+    created_metadata = create_response.json()["data"]["metadata"]
+    listed_metadata = list_response.json()["data"]["items"][0]["metadata"]
+    for metadata in (created_metadata, listed_metadata):
+        assert set(metadata) == {"financial_quality_gate"}
+        assert metadata["financial_quality_gate"]["decision_effect"] == "none"
+        rendered = str(metadata)
+        for forbidden in (
+            "report_json_ref",
+            "report_markdown_ref",
+            "promotion_artifacts",
+            "side_effect_deltas",
+            "replay",
+            "case_ids",
+        ):
+            assert forbidden not in rendered
+
+
+def test_eval_run_detail_rejects_when_diagnostic_routes_are_disabled(tmp_path):
+    """Eval replay detail can contain output payloads, so the API route is diagnostic-only."""
+
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
+    run = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    ).json()["data"]
+
+    response = client.get(f"/api/eval/runs/{run['eval_run_id']}")
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "diagnostic_routes_disabled"
+
+
+def test_eval_promotion_artifacts_reject_when_diagnostic_routes_are_disabled(tmp_path):
+    """Promotion artifacts are engineering release evidence, not a default product API."""
+
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+    _trace_id, badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
+    run = client.post(
+        "/api/eval/runs",
+        json={"badcase_ids": [badcase_id], "mode": "judge_only_fixture"},
+    ).json()["data"]
+
+    response = client.get(f"/api/eval/runs/{run['eval_run_id']}/promotion-artifacts")
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "diagnostic_routes_disabled"
+
+
+def test_eval_run_allows_real_judge_when_diagnostic_routes_are_enabled(tmp_path, monkeypatch):
+    """The diagnostic gate should allow an explicitly enabled real-judge API path."""
+
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
+    app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
+    client = TestClient(app)
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def run(self, **kwargs: Any) -> SimpleNamespace:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                eval_run_id="eval-diagnostic-judge",
+                dataset_name=kwargs["dataset_name"],
+                mode=kwargs["mode"],
+                status="passed",
+                started_at="2026-07-09T00:00:00+00:00",
+                ended_at="2026-07-09T00:00:01+00:00",
+                case_count=0,
+                pass_count=0,
+                fail_count=0,
+                metadata={},
+            )
+
+    runner = RecordingRunner()
+    app.state.eval_runner = runner
+
+    response = client.post("/api/eval/runs", json={"mode": "judge_openai"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["mode"] == "judge_openai"
+    assert runner.calls[0]["mode"] == "judge_openai"
+
+
+def test_eval_artifact_endpoints_return_stable_not_found_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
+    client = TestClient(create_app(config_paths=["config/default.yaml"], data_dir=tmp_path))
+
+    artifacts_response = client.get("/api/eval/runs/missing/promotion-artifacts")
+    frozen_response = client.get("/api/eval/cases/missing/frozen-input")
+    frozen_by_hash_response = client.get("/api/eval/frozen-inputs/missing")
+
+    assert artifacts_response.status_code == 404
+    assert artifacts_response.json()["error"]["code"] == "eval_run_not_found"
+    assert frozen_response.status_code == 404
+    assert frozen_response.json()["error"]["code"] == "eval_case_not_found"
+    assert frozen_by_hash_response.status_code == 404
+    assert frozen_by_hash_response.json()["error"]["code"] == "eval_frozen_input_not_found"
+
 
 def test_eval_run_rejects_empty_selection(tmp_path):
     """没有可评估 case 时，API 应返回稳定错误，避免前端误以为已经完成测评。"""
@@ -141,8 +309,9 @@ def test_eval_run_rejects_empty_selection(tmp_path):
     assert body["error"]["code"] == "eval_no_cases"
 
 
-def test_eval_apis_redact_badcase_and_plan_freeform_payloads(tmp_path):
+def test_eval_apis_redact_badcase_and_plan_freeform_payloads(tmp_path, monkeypatch):
     """badcase metadata/input_ref 和 parsed_plan 自由字段都不能把 secret/raw payload 带到 eval API。"""
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     trace_id, badcase_id = _seed_badcase(
@@ -183,8 +352,9 @@ def test_eval_apis_redact_badcase_and_plan_freeform_payloads(tmp_path):
     assert "<redacted>" in rendered
 
 
-def test_eval_explicit_badcase_ids_can_select_older_cases_beyond_limit(tmp_path):
+def test_eval_explicit_badcase_ids_can_select_older_cases_beyond_limit(tmp_path, monkeypatch):
     """显式 badcase_ids 不能被最近列表 limit 截断，否则历史回归样本无法运行。"""
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, older_badcase_id = _seed_badcase(app, expected_behavior="数据不足时必须 no trade")
@@ -209,7 +379,8 @@ def test_eval_explicit_badcase_ids_can_select_older_cases_beyond_limit(tmp_path)
     assert all(score["source_trace_id"] for score in detail["scores"])
 
 
-def test_eval_run_persists_json_and_markdown_report_artifacts(tmp_path):
+def test_eval_run_persists_json_and_markdown_report_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
@@ -232,7 +403,8 @@ def test_eval_run_persists_json_and_markdown_report_artifacts(tmp_path):
     assert "failure_cases" in report_json.read_text(encoding="utf-8")
 
 
-def test_eval_run_detail_keeps_case_snapshot_for_historical_runs(tmp_path):
+def test_eval_run_detail_keeps_case_snapshot_for_historical_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, badcase_id = _seed_badcase(app, expected_behavior="first expected behavior")
@@ -262,7 +434,8 @@ def test_eval_run_detail_keeps_case_snapshot_for_historical_runs(tmp_path):
     assert any(case["expected_behavior"] == "second expected behavior" for case in second_detail["cases"])
 
 
-def test_eval_rule_judge_covers_action_schema_and_opening_requirements(tmp_path):
+def test_eval_rule_judge_covers_action_schema_and_opening_requirements(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, badcase_id = _seed_badcase(
@@ -290,7 +463,8 @@ def test_eval_rule_judge_covers_action_schema_and_opening_requirements(tmp_path)
     assert scores["rule.opening_requirements"]["passed"] is False
 
 
-def test_eval_cheap_mode_skips_fixture_llm_and_keeps_side_effect_guard(tmp_path):
+def test_eval_cheap_mode_skips_fixture_llm_and_keeps_side_effect_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
     app = create_app(config_paths=["config/default.yaml"], data_dir=tmp_path)
     client = TestClient(app)
     _trace_id, badcase_id = _seed_badcase(app, expected_behavior="data gap requires no trade")
@@ -415,11 +589,29 @@ def _seed_badcase_with_options(
         "probability": 0.72,
     }
     parsed_plan.update(parsed_plan_extra or {})
+    frozen_payload = {
+        "skill": {"name": "crypto-macro-decision", "sha256": "skill-hash"},
+        "market_snapshot": {
+            "symbol": "ETH-USDT-SWAP",
+            "fetched_at": "2026-07-06T00:00:00+00:00",
+            "points": {},
+            "unavailable": [],
+        },
+        "required_output": "strict JSON DecisionPlan",
+    }
+    frozen_hash = "frozen-eval-seed"
     journal.append_plan_run(
         plan_id,
         "allowed",
         {
             "trace_id": trace_id,
+            "frozen_input": {
+                "schema_version": 1,
+                "kind": "decision_prompt_packet",
+                "sha256": frozen_hash,
+                "payload": frozen_payload,
+            },
+            "frozen_input_hash": frozen_hash,
             "parsed_plan": parsed_plan,
             "verdict": {"allowed": True, "reasons": [], "warnings": []},
             "analysis": {

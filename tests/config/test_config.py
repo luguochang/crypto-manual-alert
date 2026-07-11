@@ -1,7 +1,10 @@
 import json
 import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+import yaml
 
 from crypto_manual_alert.config import ConfigError, load_config
 
@@ -11,8 +14,11 @@ def test_default_config_disables_auto_ordering():
 
     assert config.trading.auto_order_enabled is False
     assert config.trading.manual_execution_required is True
+    assert config.market_data.http_trust_env is False
+    assert config.market_data.http_proxy == ""
     assert config.notification.bark_device_key_env == "BARK_DEVICE_KEY"
     assert config.decision.final_input_mode == "legacy_prompt"
+    assert config.decision.candidate_sidecar_mode == "same_engine"
     assert config.workflow.execution_mode == "legacy_baseline"
     assert config.shadow.worker_mode == "local_audit"
     assert config.eval.release_gate.minimum_case_count == 20
@@ -22,12 +28,175 @@ def test_default_config_disables_auto_ordering():
     assert config.eval.financial_quality.minimum_scored_count == 30
     assert config.eval.financial_quality.minimum_direction_hit_rate == 0.52
     assert config.eval.financial_quality.maximum_brier_score == 0.25
+    assert config.diagnostic.routes_enabled is False
+
+
+def test_diagnostic_routes_can_be_enabled_by_environment(monkeypatch):
+    monkeypatch.setenv("DIAGNOSTIC_ROUTES_ENABLED", "true")
+
+    config = load_config("config/default.yaml")
+
+    assert config.diagnostic.routes_enabled is True
+    assert config.safe_dict()["diagnostic"] == {"routes_enabled": True}
 
 
 def test_prod_config_uses_real_public_market_data_provider():
     config = load_config("config/default.yaml", "config/prod.yaml")
 
     assert config.market_data.provider == "okx_public"
+    assert config.decision.candidate_sidecar_mode == "disabled"
+
+
+def test_prod_config_declares_manual_only_legacy_main_path_explicitly():
+    prod_overlay = yaml.safe_load(Path("config/prod.yaml").read_text(encoding="utf-8"))
+    config = load_config("config/default.yaml", "config/prod.yaml")
+
+    assert prod_overlay["trading"]["auto_order_enabled"] is False
+    assert prod_overlay["trading"]["manual_execution_required"] is True
+    assert prod_overlay["decision"]["final_input_mode"] == "legacy_prompt"
+    assert prod_overlay["decision"]["candidate_sidecar_mode"] == "disabled"
+    assert prod_overlay["workflow"]["execution_mode"] == "legacy_baseline"
+    assert config.trading.auto_order_enabled is False
+    assert config.trading.manual_execution_required is True
+    assert config.decision.final_input_mode == "legacy_prompt"
+    assert config.workflow.execution_mode == "legacy_baseline"
+
+
+def test_explicit_missing_config_path_fails_fast(tmp_path):
+    missing = tmp_path / "missing-prod-overlay.yaml"
+
+    with pytest.raises(ConfigError, match="Config file does not exist"):
+        load_config("config/default.yaml", missing)
+
+
+def test_candidate_sidecar_mode_can_be_disabled_by_environment(monkeypatch):
+    monkeypatch.setenv("CANDIDATE_SIDECAR_MODE", "disabled")
+
+    config = load_config("config/default.yaml")
+
+    assert config.decision.candidate_sidecar_mode == "disabled"
+
+
+def test_macro_event_assertion_metadata_can_be_set_by_environment(monkeypatch):
+    confirmed_at = datetime.now(timezone.utc).isoformat()
+    valid_until = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+    monkeypatch.setenv("MACRO_EVENT_PROVIDER", "no_active_event")
+    monkeypatch.setenv("MACRO_EVENT_OPERATOR_REF", "ops:macro-desk")
+    monkeypatch.setenv("MACRO_EVENT_CONFIRMED_AT", confirmed_at)
+    monkeypatch.setenv("MACRO_EVENT_SOURCE_REF", "calendar:forexfactory:2026-07-09:no-high-impact")
+    monkeypatch.setenv("MACRO_EVENT_ASSERTION_HORIZON", "6h")
+    monkeypatch.setenv("MACRO_EVENT_VALID_UNTIL", valid_until)
+
+    config = load_config("config/default.yaml")
+
+    assert config.macro_event.provider == "no_active_event"
+    assert config.macro_event.no_active_event_operator_ref == "ops:macro-desk"
+    assert config.macro_event.no_active_event_confirmed_at == confirmed_at
+    assert config.macro_event.no_active_event_source_ref == "calendar:forexfactory:2026-07-09:no-high-impact"
+    assert config.macro_event.no_active_event_horizon == "6h"
+    assert config.macro_event.no_active_event_valid_until == valid_until
+
+
+def test_macro_event_assertion_rejects_invalid_timestamp(tmp_path):
+    path = tmp_path / "bad-macro-event.yaml"
+    path.write_text(
+        """
+macro_event:
+  provider: no_active_event
+  no_active_event_confirmed_at: yesterday
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="macro_event.no_active_event_confirmed_at"):
+        load_config(path)
+
+
+def test_macro_event_assertion_rejects_expired_valid_until(tmp_path):
+    confirmed_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    valid_until = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    path = tmp_path / "expired-macro-event.yaml"
+    path.write_text(
+        f"""
+macro_event:
+  provider: no_active_event
+  no_active_event_operator_ref: ops:macro-desk
+  no_active_event_confirmed_at: {confirmed_at}
+  no_active_event_source_ref: calendar:forexfactory:no-high-impact
+  no_active_event_horizon: 6h
+  no_active_event_valid_until: {valid_until}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="macro_event.no_active_event_valid_until must be in the future"):
+        load_config(path)
+
+
+def test_config_rejects_unknown_candidate_sidecar_mode(tmp_path):
+    path = tmp_path / "bad-sidecar.yaml"
+    path.write_text(
+        """
+decision:
+  candidate_sidecar_mode: always_on
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="candidate_sidecar_mode"):
+        load_config(path)
+
+
+def test_market_data_okx_base_url_can_be_overridden_for_local_stack(monkeypatch):
+    monkeypatch.setenv("MARKET_DATA_OKX_BASE_URL", "http://127.0.0.1:8012")
+
+    config = load_config("config/default.yaml", "config/staging.yaml")
+
+    assert config.market_data.provider == "okx_public"
+    assert config.market_data.okx_base_url == "http://127.0.0.1:8012"
+
+
+def test_market_data_http_trust_env_can_be_enabled_for_prod_network(monkeypatch):
+    monkeypatch.setenv("MARKET_DATA_HTTP_TRUST_ENV", "true")
+
+    config = load_config("config/default.yaml")
+
+    assert config.market_data.http_trust_env is True
+
+
+def test_market_data_http_proxy_can_be_configured_without_leaking_from_safe_snapshot(monkeypatch):
+    proxy_url = "http://proxy-user:proxy-password@127.0.0.1:8888"
+    monkeypatch.setenv("MARKET_DATA_HTTP_PROXY", proxy_url)
+
+    config = load_config("config/default.yaml")
+    safe_market_data = config.safe_dict()["market_data"]
+
+    assert config.market_data.http_proxy == proxy_url
+    assert safe_market_data["http_proxy"] == "<redacted>"
+    assert safe_market_data["http_proxy_set"] is True
+    assert proxy_url not in json.dumps(config.safe_dict())
+    assert "proxy-password" not in json.dumps(config.safe_dict())
+
+
+def test_market_data_http_proxy_rejects_invalid_url(monkeypatch):
+    monkeypatch.setenv("MARKET_DATA_HTTP_PROXY", "proxy.internal:8888")
+
+    with pytest.raises(ConfigError, match="market_data.http_proxy"):
+        load_config("config/default.yaml")
+
+
+def test_config_rejects_unknown_market_data_provider(tmp_path):
+    path = tmp_path / "bad-market-provider.yaml"
+    path.write_text(
+        """
+market_data:
+  provider: paper_feed
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="market_data.provider"):
+        load_config(path)
 
 
 def test_config_rejects_auto_ordering(tmp_path):
@@ -205,6 +374,17 @@ def test_config_rejects_forbidden_trade_key_env(monkeypatch):
     monkeypatch.setenv("OKX_TRADE_API_KEY", "not-allowed")
 
     with pytest.raises(ConfigError, match="forbidden"):
+        load_config("config/default.yaml")
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    ["OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE"],
+)
+def test_config_rejects_okx_private_account_envs_in_v1(monkeypatch, env_name):
+    monkeypatch.setenv(env_name, "not-allowed")
+
+    with pytest.raises(ConfigError, match=env_name):
         load_config("config/default.yaml")
 
 

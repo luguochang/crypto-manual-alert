@@ -1,4 +1,14 @@
 import { z } from "zod";
+import {
+  businessSummarySchema,
+  mainPathContractSchema,
+  manualRunPlanSchema,
+  manualRunVerdictSchema,
+  resultReviewSchema,
+  safeReasonBullets,
+  safeBusinessSummary,
+  safeResultReview
+} from "@/lib/schemas/manual-run";
 
 export const runStatusSchema = z.enum(["running", "allowed", "blocked", "failed", "ok"]);
 
@@ -13,13 +23,24 @@ export const runSummarySchema = z
     final_plan_id: z.string().nullable().optional(),
     final_action: z.string().nullable().optional(),
     allowed: z.boolean().nullable().optional(),
+    business_summary: z.unknown().optional(),
+    result_review: z.unknown().optional(),
     span_count: z.number().default(0),
     llm_interaction_count: z.number().default(0)
   })
-  .passthrough();
+  .passthrough()
+  .transform((value) => ({
+    ...value,
+    business_summary: safeOptionalBusinessSummary(value.business_summary),
+    result_review: safeOptionalResultReview(value.result_review)
+  }));
 
 export const runListSchema = z.object({
-  items: z.array(runSummarySchema)
+  items: z.array(runSummarySchema),
+  limit: z.number().optional(),
+  offset: z.number().optional(),
+  has_more: z.boolean().optional(),
+  next_offset: z.number().nullable().optional()
 });
 
 export const traceSpanSchema = z
@@ -62,6 +83,7 @@ export const llmInteractionSchema = z
     output_hash: z.string(),
     input_summary: z.unknown().optional(),
     output_summary: z.unknown().optional(),
+    completion_excerpt: z.string().nullable().optional(),
     request_json: z.string().optional(),
     response_json: z.string().optional(),
     error_type: z.string().nullable().optional(),
@@ -72,6 +94,18 @@ export const llmInteractionSchema = z
 
 const auditRecordSchema = z.record(z.unknown());
 const sourceTierSchema = z.union([z.string(), z.number()]).nullable().optional();
+
+export const notificationAttemptSchema = z
+  .object({
+    id: z.number().optional(),
+    created_at: z.string().nullable().optional(),
+    channel: z.string().nullable().optional(),
+    ok: z.boolean().optional(),
+    status: z.enum(["sent", "disabled", "failed", "not_recorded"]),
+    status_code: z.number().nullable().optional(),
+    error: z.string().nullable().optional()
+  })
+  .passthrough();
 
 export const toolCallArtifactRefSchema = z
   .object({
@@ -335,7 +369,23 @@ export const agentAuditViewSchema = z
     runtime_flow: z.array(auditRecordSchema).default([]),
     source_payload_keys: z.array(z.string()).default([])
   })
-  .passthrough();
+  .passthrough()
+  .transform((value) => {
+    const gates = { ...value.gates };
+    if (gates.production_control_gate) {
+      gates.production_control_gate = sanitizeReasonRecord(gates.production_control_gate);
+    }
+    return {
+      ...value,
+      facts_gate: sanitizeReasonRecord(value.facts_gate),
+      gates,
+      candidate_final_comparison: sanitizeCandidateFinalComparison(value.candidate_final_comparison),
+      release_eval_gate: {
+        ...value.release_eval_gate,
+        production_control_gate: sanitizeReasonRecord(value.release_eval_gate.production_control_gate)
+      }
+    };
+  });
 
 export const planRunSchema = z
   .object({
@@ -345,22 +395,47 @@ export const planRunSchema = z
     parsed_plan: z.record(z.unknown()).optional(),
     verdict: z.record(z.unknown()).optional(),
     redaction: z.record(z.unknown()).optional(),
+    facts_gate: z.record(z.unknown()).optional(),
+    production_control_gate: z.record(z.unknown()).optional(),
+    run_context: z.record(z.unknown()).optional(),
+    final_input_selection: z.record(z.unknown()).optional(),
+    legacy_prompt_lifecycle: z.record(z.unknown()).optional(),
+    main_path_contract: mainPathContractSchema.optional(),
+    business_summary: z.unknown().optional(),
     agent_audit_view: agentAuditViewSchema.optional(),
     payload_keys: z.array(z.string()).default([])
   })
   .passthrough()
   .nullable();
 
-export const runDetailSchema = z
+const runDetailBaseSchema = z
   .object({
     trace: runSummarySchema,
     plan_run: planRunSchema,
     analysis: z.record(z.unknown()).default({}),
     spans: z.array(traceSpanSchema).default([]),
     llm_interactions: z.array(llmInteractionSchema).default([]),
-    badcases: z.array(z.record(z.unknown())).default([])
+    badcases: z.array(z.record(z.unknown())).default([]),
+    notification: notificationAttemptSchema.nullable().optional(),
+    notification_history: z.array(notificationAttemptSchema).default([]),
+    result_review: z.unknown().optional()
   })
   .passthrough();
+
+export const runDetailSchema = runDetailBaseSchema.transform((value) => {
+  const planRun = value.plan_run
+    ? {
+        ...value.plan_run,
+        verdict: safeRunDetailVerdict(value),
+        business_summary: safeRunDetailBusinessSummary(value)
+      }
+    : value.plan_run;
+  return {
+    ...value,
+    plan_run: planRun,
+    result_review: safeResultReview(value.result_review)
+  };
+});
 
 export const dashboardStatsSchema = z.object({
   total_runs: z.number().default(0),
@@ -379,4 +454,120 @@ export type DashboardStats = z.output<typeof dashboardStatsSchema>;
 export type AgentAuditView = z.output<typeof agentAuditViewSchema>;
 export type TraceSpan = z.output<typeof traceSpanSchema>;
 export type LlmInteraction = z.output<typeof llmInteractionSchema>;
-export type PlanRun = z.output<typeof planRunSchema>;
+export type PlanRun = NonNullable<RunDetail["plan_run"]>;
+export type NotificationAttempt = z.output<typeof notificationAttemptSchema>;
+export type ResultReview = z.output<typeof resultReviewSchema>;
+
+function safeRunDetailBusinessSummary(value: z.output<typeof runDetailBaseSchema>) {
+  const existing = businessSummarySchema.safeParse(value.plan_run?.business_summary);
+  if (existing.success) {
+    return existing.data;
+  }
+
+  const plan = manualRunPlanSchema.parse({
+    plan_id: asString(value.plan_run?.parsed_plan?.plan_id) ?? value.plan_run?.plan_id ?? value.trace.final_plan_id ?? value.trace.trace_id,
+    instrument: asString(value.plan_run?.parsed_plan?.instrument) ?? value.trace.symbol,
+    main_action: asString(value.plan_run?.parsed_plan?.main_action) ?? value.trace.final_action ?? "no trade",
+    horizon: asString(value.plan_run?.parsed_plan?.horizon) ?? "未记录",
+    manual_execution_required: asBoolean(value.plan_run?.parsed_plan?.manual_execution_required) ?? true,
+    expires_at: asString(value.plan_run?.parsed_plan?.expires_at) ?? "",
+    reference_price: asNumberOrNull(value.plan_run?.parsed_plan?.reference_price),
+    entry_trigger: asNumberOrNull(value.plan_run?.parsed_plan?.entry_trigger),
+    stop_price: asNumberOrNull(value.plan_run?.parsed_plan?.stop_price),
+    target_1: asNumberOrNull(value.plan_run?.parsed_plan?.target_1),
+    target_2: asNumberOrNull(value.plan_run?.parsed_plan?.target_2),
+    probability: asNumberOrNull(value.plan_run?.parsed_plan?.probability)
+  });
+  const verdict = manualRunVerdictSchema.parse({
+    allowed: asBoolean(value.plan_run?.verdict?.allowed) ?? value.trace.allowed ?? false,
+    reasons: asStringArray(value.plan_run?.verdict?.reasons),
+    warnings: asStringArray(value.plan_run?.verdict?.warnings)
+  });
+  return safeBusinessSummary(value.plan_run?.business_summary, { plan, verdict });
+}
+
+function safeOptionalBusinessSummary(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const parsed = businessSummarySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function safeOptionalResultReview(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const parsed = resultReviewSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+function safeRunDetailVerdict(value: z.output<typeof runDetailBaseSchema>): Record<string, unknown> {
+  const rawVerdict = asRecord(value.plan_run?.verdict);
+  const parsed = manualRunVerdictSchema.parse({
+    allowed: asBoolean(rawVerdict?.allowed) ?? value.trace.allowed ?? false,
+    reasons: safeReasonBullets(asStringArray(rawVerdict?.reasons)),
+    warnings: safeReasonBullets(asStringArray(rawVerdict?.warnings))
+  });
+  return {
+    ...(rawVerdict ?? {}),
+    ...parsed
+  };
+}
+
+function sanitizeCandidateFinalComparison(
+  value: z.output<typeof candidateFinalComparisonSchema>
+): z.output<typeof candidateFinalComparisonSchema> {
+  return {
+    ...value,
+    production_control_gate: sanitizeReasonRecord(value.production_control_gate),
+    candidate: sanitizeCandidateRecord(value.candidate)
+  };
+}
+
+function sanitizeCandidateRecord(value: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = sanitizeReasonRecord(value);
+  const diagnosis = asRecord(sanitized.diagnosis);
+  if (diagnosis) {
+    sanitized.diagnosis = sanitizeReasonRecord(diagnosis);
+  }
+  return sanitized;
+}
+
+function sanitizeReasonRecord(value: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...value };
+  for (const key of ["reasons", "blocking_reasons", "hard_block_reasons", "confidence_cap_reasons"]) {
+    sanitized[key] = sanitizeReasonArray(sanitized[key]);
+  }
+  return sanitized;
+}
+
+function sanitizeReasonArray(value: unknown): unknown {
+  return Array.isArray(value) ? safeReasonBullets(value.filter((item): item is string => typeof item === "string")) : value;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function asNumberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
