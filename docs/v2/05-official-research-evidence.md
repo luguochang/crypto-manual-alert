@@ -86,10 +86,16 @@ V2 采用：
 - Tool call limit。
 - Model fallback。
 - PII detection。
+- Todo list。
+- LLM tool selector。
 - Tool retry。
 - Model retry。
-- File search / Filesystem。
-- Subagent 等扩展能力。
+- LLM tool emulator。
+- Context editing。
+- Provider tool search。
+- Shell tool、File search / Filesystem。
+- Subagent。
+- Rubric grading，当前 beta。
 
 来源：
 
@@ -100,6 +106,27 @@ V2 采用：
 - 预算、重试、PII 和 HITL 优先使用官方 Middleware。
 - 禁止复制 V1 `ToolBudget`、统一 retry shell 和 PII 最后端字符串过滤。
 - Model fallback 默认不用于最终风险主链，避免不同模型静默改变决策语义。
+- Middleware 必须按 Coordinator、Research、Decision、Integration 和 Eval 角色装配，而不是把所有 Middleware 全局堆叠。
+- Tool emulator 只用于测试；Shell/Filesystem 在当前生产产品禁用；Rubric 只提供评测信号。
+
+### 2.5 Custom Middleware
+
+官方事实：
+
+- Node-style hooks：`before_agent`、`before_model`、`after_model`、`after_agent`。
+- Wrap-style hooks：`wrap_model_call`、`wrap_tool_call`。
+- Middleware 可以声明 state、tools 和 scope-aware stream transformers。
+- before hooks 正序执行，after hooks 逆序执行，wrap hooks 嵌套执行。
+
+来源：
+
+- [Custom Middleware](https://docs.langchain.com/oss/python/langchain/middleware/custom)
+
+V2 采用：
+
+- 租户权限、entitlement、usage、证据引用完整性等领域扩展只能通过官方 hooks 实现。
+- Middleware 顺序必须有 contract test，禁止依赖未记录的偶然顺序。
+- Stream transformer 用于 typed business extension，不创建第二套 EventBus。
 
 ## 3. LangGraph Runtime
 
@@ -141,6 +168,8 @@ V2 采用：
 - Agent Server 管 Checkpoint/Store；如果自管 Runtime，使用官方 PostgreSQL Checkpointer。
 - 产品业务记录使用独立 SQLAlchemy schema，不查询 Checkpoint 表。
 - `thread_id` 使用 UUID，避免超长和跨租户冲突。
+- Run 显式选择 `sync`、`async` 或 `exit` durability，不依赖默认值。
+- Research subgraph 默认 `checkpointer=None` 继承父图；per-thread persistence 需要单独批准和并行限制。
 
 ### 3.3 Interrupt / Resume
 
@@ -164,19 +193,29 @@ V2 采用：
 
 官方事实：
 
-- LangGraph 支持 values、updates、messages、custom 等 stream modes。
-- Agent Server 提供正式 Thread/Run streaming protocol。
+- LangChain/Deep Agents 当前推荐 `streamEvents(input, { version: "v3" })` typed projections。
+- 通用 projection 包括 messages、toolCalls、values、output、subgraphs 和 extensions。
+- Deep Agents 额外提供 `stream.subagents`，每个 handle 具有 name、taskInput、messages、toolCalls、values、nested subagents 和 output。
+- `stream.subagents` 表达产品级 task delegation；`stream.subgraphs` 表达 Graph execution structure。
+- Agent Server Protocol v2 通过 command endpoint 启动后台 Run，通过 event endpoint 观察事件。
+- Event endpoint 按 channel/namespace/depth 订阅，并通过 `since` sequence replay 重连。
+- Protocol v2 SSE endpoint 是 POST-only，浏览器原生 `EventSource` 自动恢复不适用。
 
 来源：
 
-- [Streaming](https://docs.langchain.com/oss/python/langgraph/streaming)
-- [Agent Server streaming API](https://docs.langchain.com/langsmith/agent-server-api/streaming/protocol-v2-event-stream-sse)
+- [LangChain Event Streaming](https://docs.langchain.com/oss/javascript/langchain/event-streaming)
+- [LangGraph Event Streaming](https://docs.langchain.com/oss/javascript/langgraph/event-streaming)
+- [Deep Agents Event Streaming](https://docs.langchain.com/oss/javascript/deepagents/event-streaming)
+- [Protocol v2 Command](https://docs.langchain.com/langsmith/agent-server-api/streaming/protocol-v2-command)
+- [Protocol v2 Event Stream](https://docs.langchain.com/langsmith/agent-server-api/streaming/protocol-v2-event-stream-sse)
 
 V2 采用：
 
-- Token/Message 由官方 message stream 传输。
-- 阶段进度使用 typed custom event 或稳定 State projection。
-- 不手写 SSE reconnect、chunk assembler 和 run polling。
+- 进程内使用 Event Streaming v3，Agent Server 使用 Protocol v2，React 使用 SDK selectors。
+- Token/Message、Tool、lifecycle、input、tasks 和 checkpoint pointer 使用官方固定 channel。
+- 阶段进度、Artifact、Evidence、Usage、Notification 和 Quality 使用版本化 `custom:<name>` extension。
+- 不手写 SSE reconnect、sequence replay、dedup、namespace parser、chunk assembler 和 run polling。
+- 产品数据库不逐条保存 wire frame，只保存稳定业务投影。
 
 ## 4. Deep Agents
 
@@ -202,6 +241,8 @@ V2 采用：
 
 官方公开参数包含 Model、Tools、System Prompt、Subagents、Middleware、Backend、Permissions、Checkpointer 和 Store 等。
 
+官方默认栈还会装配 Filesystem、Subagent、Summarization 和 Patch Tool Calls 等 Middleware/Tools，不能通过省略参数推断已关闭。
+
 来源：
 
 - [Customization](https://docs.langchain.com/oss/python/deepagents/customization)
@@ -212,6 +253,7 @@ V2 采用：
 - 只配置 search/fetch tools 和受限 subagents。
 - 不启用代码执行和产品仓库写入。
 - 通过官方 Middleware 限制模型/Tool 调用。
+- 启动测试断言最终 Tool/Middleware/Permission 清单；完全禁用 filesystem 时允许改用 `create_agent` Research Harness。
 
 ### 4.3 Permissions 的限制
 
@@ -255,8 +297,11 @@ V2 采用：
 官方仓库当前事实：
 
 - v1 提供 v2-native `useStream`。
-- 支持自动 re-attach、Thread state、Messages、Tool Calls、Interrupts、Submission Queue、Subagents、Media 和 custom transport。
+- 支持自动 re-attach、Thread state、Messages、Tool Calls、Interrupts、Submission Queue、Subagents、Subgraphs、Media 和 custom transport。
 - 推荐每个 Thread 挂载一个 root hook，其余使用 selector hooks。
+- 根 stream 提供 submit、stop、disconnect、respond、respondAll 等控制能力。
+- `useExtension`、`useChannel` 和 `useChannelEffect` 分别适合最新 typed projection、原始有界时间线和无 rerender side effect。
+- Subagent snapshot 仅用于 discovery；`useMessages/useToolCalls/useValues(stream, subagent)` 在组件挂载时懒订阅 scoped stream。
 
 来源：
 
@@ -266,6 +311,7 @@ V2 采用：
 V2 采用：
 
 - 直接使用 `@langchain/react` v1。
+- 使用官方 queue、multitask strategy、forkFrom、checkpoint history 和 media selector。
 - Agent Chat UI 只作为产品交互参考，不照搬其中可能较旧的 import 和版本。
 
 ### 6.2 LangGraph JavaScript SDK
@@ -284,6 +330,7 @@ V2 采用：
 
 - 新代码使用 Thread-centric/React v1 接口。
 - 禁止按旧教程新写 `joinStream/reconnectOnMount` 状态机。
+- 禁止直接使用原生 EventSource 连接 Protocol v2 POST endpoint。
 
 ### 6.3 Agent Chat UI
 
@@ -302,6 +349,51 @@ V2 采用：
 - 借鉴 Thread UI、Tool 状态、Artifact 和 BFF 方式。
 - 不把通用聊天页面直接当成交易决策产品；业务结果使用专门组件。
 
+### 6.4 官方 Frontend Patterns 与集成
+
+官方文档覆盖：
+
+- Markdown messages、Tool calling、Reasoning tokens、Structured Output。
+- Generative UI、Human-in-the-loop、Headless tools。
+- Join/Rejoin、Message queues、Branching chat、Time travel。
+- AI Elements、assistant-ui、CopilotKit 和 OpenUI 集成。
+
+来源：
+
+- [Frontend Overview](https://docs.langchain.com/oss/javascript/langchain/frontend/overview)
+- [Frontend Integrations](https://docs.langchain.com/oss/python/langchain/frontend/integrations/overview)
+- [Deep Agents Subagent Streaming](https://docs.langchain.com/oss/javascript/deepagents/frontend/subagent-streaming)
+
+V2 采用：
+
+- `@langchain/react` 保持唯一 Runtime 状态源。
+- AI Elements 或 assistant-ui 只作为视觉/交互组件层，实施前 ADR 二选一。
+- Generative UI 使用受控组件注册表，不执行任意 JSX。
+- Reasoning 只展示 Provider 返回且允许显示的 block/summary。
+- Headless browser/device tool 默认禁用，未来启用必须 sandbox、allowlist、HITL 和审计。
+
+### 6.5 长任务与异步能力
+
+官方事实：
+
+- `run.start`、`input.respond` 创建后台执行。
+- Agent Server 提供 background runs、crons 和 webhook 相关能力。
+- Submission queue 和 multitask strategy 处理运行中追加输入。
+- Checkpoint/fork/time travel 支持编辑、重新生成和分支比较。
+
+来源：
+
+- [Background Runs](https://docs.langchain.com/langsmith/background-run)
+- [Cron Jobs](https://docs.langchain.com/langsmith/cron-jobs)
+- [Time Travel](https://docs.langchain.com/langsmith/human-in-the-loop-time-travel)
+
+V2 采用：
+
+- 页面断开不取消后台 Task。
+- Scheduled Monitor 使用官方 Cron，不使用应用进程 timer。
+- Inbox 是 Interrupt/Task 的产品投影，不成为第二权威状态。
+- 编辑和重生成使用 checkpoint fork，不覆盖历史结果。
+
 ## 7. Agent Server Auth 与默认用户
 
 官方事实：
@@ -309,6 +401,8 @@ V2 采用：
 - Agent Server `Auth` 支持 authentication handler 和 resource authorization handler。
 - authorization handler 可给 Thread/Run 等资源加入 owner metadata 并返回查询 filter。
 - Runtime Config 可获得 authenticated user ID。
+- Run 读取/列表权限继承父 Thread；`threads.create_run` 负责 Run admission。
+- Store 隔离需要后端重写 namespace，不能只依赖 metadata filter。
 
 来源：
 
@@ -320,6 +414,7 @@ V2 采用：
 - 开发模式返回固定 `ActorContext`，让主流程先跑通。
 - 正式模式替换 handler，不修改 Graph State 或业务 DTO。
 - 即使开发模式也写入 tenant/user 字段，防止后期数据库重构。
+- custom routes 启用 auth-first，使用 `/app/*`/`/internal/*`，禁止覆盖 Agent Server 系统路径。
 
 ## 8. LangSmith
 
@@ -417,6 +512,7 @@ V2 采用：
 
 - Mask function 在数据发送前处理 input、output 和 metadata。
 - Sampling 在 Trace 级进行，被采样的 Trace 保留全部 observations/scores。
+- Head sampling 在 Trace 创建时决定，不能在 Run 结束后把 failed/blocked Trace 补采回来。
 - JS/TS SDK 尊重 OpenTelemetry sampling。
 
 来源：
@@ -427,9 +523,23 @@ V2 采用：
 V2 采用：
 
 - 密钥和 PII 在出口前脱敏。
-- 失败、blocked、负反馈和 release proof 全量记录；普通成功可采样。
+- Langfuse 选择 100%+retention 或统计采样；若采样，失败、blocked、负反馈和 release proof 由 Product Audit/LangSmith 全量保留。
 
-## 10. V1 审计证据
+## 10. 成熟 C 端 Agent 参考
+
+| 官方/开源项目 | 已验证能力 | V2 采用边界 |
+| --- | --- | --- |
+| [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) | Thread、Tool、Markdown、Artifact、Interrupt、API proxy | 借鉴交互，不把通用 Chat 直接当最终产品 |
+| [Deep Agents UI](https://github.com/langchain-ai/deep-agents-ui) | Todo、Subagent、审批、文件/Artifact、checkpoint rerun | 只作 UX 参考，不复制旧 SDK API |
+| [Open SWE](https://github.com/langchain-ai/open-swe) | 长任务、运行中追加消息、并行任务、持久 sandbox、集成 | 借鉴任务模型，不引入代码写权限 |
+| [Open Canvas](https://github.com/langchain-ai/open-canvas) | Chat + Artifact、版本、记忆、快速动作 | 借鉴 Artifact，不变成文档编辑器产品 |
+| [Agent Inbox](https://github.com/langchain-ai/agent-inbox) | 异步 HITL Inbox、accept/edit/respond/ignore | Inbox 只做官方 Interrupt 投影 |
+| [Agent Auth Payments](https://github.com/langchain-ai/agent-auth-payments) | Auth、Stripe、credits、RLS、web/agents 分离 | 借鉴商业边界，不复制示例账本 |
+| [Open Deep Research](https://github.com/langchain-ai/open_deep_research) | 多 Provider、搜索/MCP、研究配置、Dataset eval、计划批准 | 借鉴研究与评测，保留本项目风险门禁 |
+
+这些参考共同说明成熟 C 端 Agent 不是单一聊天框，而是 Thread、Task、Inbox、Artifact、Subagent、HITL、长任务、设置、权限和反馈组成的工作空间。
+
+## 11. V1 审计证据
 
 只读仓库审计确认：
 
@@ -442,9 +552,10 @@ V2 采用：
 
 V2 结论：迁移业务规则和 golden cases，不迁移上述 Runtime 实现。
 
-## 11. 调研限制与诚实边界
+## 12. 调研限制与诚实边界
 
-- 五个并行调研 Agent 中，仓库审计 Agent 正常完成；四个外部文档 Agent 因兼容模型服务返回 HTTP 503 未完成。
-- 官方文档证据由主 Agent 直接读取官方 Markdown、GitHub README、PyPI 和 NPM 注册表补齐。
-- 503 不影响文档来源真实性，但说明当前兼容模型服务本身需要在 V2 Provider capability/availability 测试中被视为真实外部依赖风险。
+- 本次完整扫描 `https://docs.langchain.com/llms.txt` 的文档索引，并深读所有与 V2 架构直接相关的页面族；没有声称逐字阅读每个无关的管理后台/API Reference 页面。
+- 官方事实由官方 Markdown、API Reference、GitHub README、PyPI 和 NPM 注册表交叉核对。
+- 官方示例仓库可能滞后于 SDK，因此产品模式可参考，API 必须以锁定版本的 docs/types/changelog 为准。
 - 实施前仍需再次读取官方 Changelog，因为 Deep Agents 和前端 SDK 更新速度较快。
+- 完整覆盖方法和实施前复核清单见 `07-official-doc-coverage-index.md`。

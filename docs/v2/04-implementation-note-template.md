@@ -24,6 +24,11 @@
 
 如果没有使用官方能力，必须链接对应 ADR。
 
+- `llms.txt` 对应文档族与读取日期：
+- 锁定版本和 stable/beta/alpha 状态：
+- 与当前 SDK types/API Reference 的核对结果：
+- 是否发现旧示例与当前接口不一致：
+
 ## 4. 设计与实现说明
 
 ### 4.1 数据流
@@ -52,7 +57,14 @@
 - API：无/具体 route/schema/version。
 - Database：无/具体 migration。
 - Frontend：无/具体 View Model/stream event。
+- Event：无/固定 channel、custom extension、schema version。
+- Middleware：无/角色、顺序、权限和 stream transformer。
 - Observability：无/具体 metadata/trace。
+- Migration forward/rollback：无/命令、数据影响和恢复方式。
+- Feature flag/canary：无/启用范围、观察指标和回滚阈值。
+- Retention/privacy/security：无/审查结论和数据类别变化。
+- Cost/capacity：无/单 Run、并发、存储或外部服务变化。
+- Runbook/alert/on-call：无/更新路径。
 
 ## 7. 测试证据
 
@@ -61,6 +73,10 @@
 | command | pass/fail/count | scope |
 
 不能只写“测试通过”，必须记录实际命令和结果。
+
+- Protocol v2 replay/ordering/dedup：
+- Middleware order/permission contract：
+- Visual regression/DOM 深度扫描：
 
 ## 8. 真实运行证据
 
@@ -71,6 +87,7 @@
 - Langfuse Trace：
 - Playwright screenshot/report：
 - 是否使用真实模型/行情/搜索/通知：
+- Production/canary 环境与发布批准：
 
 没有真实运行时明确写“本轮未做真实运行”，不能用 mock 代替。
 
@@ -86,6 +103,8 @@
 - 是否新增 wrapper/runtime/adapter：是/否。
 - 若是，业务价值是什么：
 - 官方能力为什么不足：
+- 是否新增 custom channel/extension；schema、owner、retention 和 consumer：
+- 是否引入第二套 Runtime/Store/Queue/Event/HITL 状态；必须回答“否”：
 - ADR：
 - 未来删除条件：
 
