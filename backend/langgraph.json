@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./src/crypto_alert_v2/graph/__init__.py:graph"
+  },
+  "env": ".env"
+}

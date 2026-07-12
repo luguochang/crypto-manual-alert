@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/*
+ * Crypto Alert V2 - 全局样式
+ * 暗色主题：深蓝灰背景 + 琥珀色品牌色
+ */
+
+/* 暗色主题 CSS 变量 */
+:root {
+  color-scheme: dark;
+
+  /* 背景色 - 深蓝灰系 */
+  --color-bg-primary: #0f172a; /* 主背景 */
+  --color-bg-secondary: #1e293b; /* 卡片背景 */
+  --color-bg-tertiary: #334155; /* 悬停/输入框背景 */
+
+  /* 品牌色 - 琥珀色 */
+  --color-brand: #f59e0b;
+  --color-brand-hover: #d97706;
+  --color-brand-light: #fbbf24;
+
+  /* 文字色 */
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+
+  /* 边框色 */
+  --color-border: #334155;
+  --color-border-light: #475569;
+
+  /* 状态色 */
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+  --color-info: #3b82f6;
+}
+
+/* 全局基础样式 */
+html,
+body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
+    Cantarell, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条样式（暗色主题适配） */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-light);
+}
+
+/* 代码/JSON 展示区域样式 */
+.json-block {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
