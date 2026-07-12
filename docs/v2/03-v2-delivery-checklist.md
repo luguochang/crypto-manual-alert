@@ -15,8 +15,9 @@
 - [ ] 用户批准 C 端 Agent Workspace 定位、产品模式和 Thread/Task/Artifact 第一等对象。
 - [ ] 用户批准三层事件架构、Middleware role matrix 和长任务/商业化边界。
 - [ ] 用户批准生产治理规范中的部署、数据权威、重试、Outbox、观测去重、保留、安全和量化门槛。
+- [ ] 用户批准 Internal Alpha 与公开 Beta/GA 的法律、年龄、披露和金融字段边界。
 - [ ] 用户批准 AI Elements 或 assistant-ui 的视觉组件 ADR，且 `@langchain/react` 保持唯一 Runtime 状态源。
-- [ ] `docs/v2/` 不存在 `TODO`、`TBD` 和模糊完成条件。
+- [ ] `docs/v2/` 不存在未解释的占位标记、模糊完成条件和无责任人开放项。
 
 完成证据：设计文档提交及用户明确确认。
 
@@ -31,7 +32,7 @@
 - [ ] 固定开发租户/用户能够进入 Runtime Context。
 - [ ] LangSmith/Langfuse 可关闭，关闭后主链仍能运行。
 - [ ] Import Contracts 和 forbidden-pattern CI 已启用。
-- [ ] custom routes 使用 `/app/*`/`/internal/*`，auth-first 且不能覆盖 Agent Server 系统路由。
+- [ ] custom routes 使用 `/app/*`/`/internal/*`，auth-first 后每条路由显式 AuthZ，且不能覆盖 Agent Server 系统路由。
 - [ ] Protocol v2 的 Agent Server/API/Python SDK/JS SDK/React SDK 兼容组已锁定。
 - [ ] 第一份实施说明已创建。
 
@@ -51,10 +52,10 @@
 
 ### 2.1.1 事件架构
 
-- [ ] Agent/Graph 使用 `streamEvents(..., { version: "v3" })` typed projections。
+- [ ] Python Agent 使用 `astream_events(version="v3")`，Graph 使用 `astream/stream_mode`；JS 实现才使用 camelCase `streamEvents`。
 - [ ] Agent Server 使用 Protocol v2 `/commands` 和 `/stream/events`。
 - [ ] 官方 SDK 完成 sequence replay、ordering、deduplication 和 namespace subscription。
-- [ ] 固定 channel 不被 custom event 重复实现。
+- [ ] 锁定协议的官方 channel 不被 custom event 重复实现，OpenAPI/protocol package/SDK schema contract 通过。
 - [ ] `custom:task_progress/artifact/evidence/usage/notification/quality` 均有版本化 schema。
 - [ ] 普通 UI 使用 `stream.subagents`，Graph 诊断才使用 `stream.subgraphs`。
 - [ ] 产品数据库不逐条保存 token/event frame，只保存稳定投影和业务记录。
@@ -72,11 +73,13 @@
 - [ ] Provider capability probe 验证 built-in web search。
 - [ ] 不支持 built-in 时使用明确配置的官方搜索 Tool。
 - [ ] Deep Agent 只有 search/fetch 只读权限。
-- [ ] 启动测试断言 Deep Agent 最终 Tool/Middleware/Permission 清单；默认 Filesystem 栈没有意外暴露。
+- [ ] 启动测试断言 Deep Agent 最终 Tool/Middleware/Permission/Subagent 清单；HarnessProfile 关闭 general-purpose subagent，Filesystem 调用 deny-all。
+- [ ] 若锁定版本不能满足上述限制，Research 改用 `create_agent`，不保留两套并行 Harness。
 - [ ] Research subgraph 使用批准的 checkpointer 模式，并通过并行/恢复测试。
 - [ ] Model/Tool call limit、retry、timeout 和 recursion limit 生效。
 - [ ] Coordinator、Research、Decision、Integration、Eval 使用各自 Middleware matrix。
 - [ ] Custom Middleware hooks 和执行顺序有 contract test。
+- [ ] PIIMiddleware 显式开启 output/tool-results 脱敏，并通过 key/Cookie/Authorization wire-level canary 测试。
 - [ ] 搜索查询、URL、发布时间、抓取时间、摘要和引用完整入库。
 - [ ] 搜索不可用时页面明确显示，不生成伪结果。
 
@@ -111,7 +114,7 @@
 - [ ] Checkpoint 与业务投影 reconciliation 规则通过故障注入测试。
 - [ ] 通知使用事务 Outbox、确定性 message key、租约和 unknown 状态。
 - [ ] Agent Server 重启后 Thread 可恢复。
-- [ ] 每类 Run 显式设置 sync/async/exit durability，并通过崩溃窗口测试。
+- [ ] UI Protocol v2 Run 记录服务端有效 durability；仅在调用面实际支持时使用 sync/exit，并通过类型/OpenAPI contract test 证明参数可表达。
 - [ ] waiting_human Interrupt 可恢复和响应。
 - [ ] Resume 保持同一 Thread/Checkpoint，但生成新的 Run 并记录 `resume_of_run_id`。
 - [ ] Retry 新建 Run 并记录 retry_of_run_id。
@@ -134,7 +137,7 @@
 - [ ] `stop()` 取消当前服务端 Run，和 `disconnect()` 有不同控件、确认和状态结果。
 - [ ] 首次创建 Thread 后通过 `onThreadId` 持久化 ID，rejoin 使用同一 ID。
 - [ ] Subagent selector 只在对应卡片展开/挂载时订阅 scoped stream。
-- [ ] 明确区分客户端内存 submission queue 与 Agent Server 持久 worker queue。
+- [ ] 明确区分客户端 submission queue、Product task_commands dispatcher 和只执行已创建 Run 的 Agent Server worker queue。
 - [ ] 使用官方 multitask strategy 和 checkpoint fork，不建立私有 Agent queue/分支 Runtime。
 
 ### 4.2 页面
@@ -181,6 +184,8 @@
 - [ ] 页面刷新后仍可处理待确认 Interrupt。
 - [ ] Inbox 可以处理原对话页之外的待确认动作，并实时同步回 Thread。
 - [ ] 开发默认流程不强制 Interrupt，不阻断主链。
+- [ ] Interrupt 不允许静默 ignore；dismiss 仅用于非阻塞通知，expire 必须驱动 Graph 终态。
+- [ ] 多标签页/设备重复 respond 使用 interrupt/checkpoint/version 幂等键，只有一次副作用。
 
 完成证据：Agent Server真实 Interrupt/Resume E2E。
 
@@ -214,13 +219,16 @@
 ## 8. 多用户正式启用
 
 - [ ] 正式 Auth Provider 实现同一 IdentityProvider 契约。
-- [ ] Agent Server resource auth 为 Thread/Run/Store 添加 owner/tenant metadata。
+- [ ] Agent Server resource auth 为 Thread/Run 添加 owner/tenant metadata/filter；Store 对 put/get/search/delete/list_namespaces 强制 namespace rewrite。
 - [ ] Next.js Session 到 Agent Server 身份传播通过。
 - [ ] 用户 A 不能读取、恢复、取消或反馈用户 B 的 Run。
 - [ ] 租户 A 和租户 B 数据库查询隔离。
 - [ ] Operator/Admin 权限有独立 action 和 audit event。
 - [ ] 开发模式在生产构建中默认关闭。
 - [ ] 无 Authorization 时生产请求 fail-closed。
+- [ ] Development auth 只允许 loopback + local/test，preview/staging/production 启动硬失败。
+- [ ] 默认开发身份仅为 member，真实管理副作用和跨租户能力关闭。
+- [ ] 至少两个用户、两个租户和最小权限 operator fixture 通过授权测试。
 
 完成证据：双用户/双租户 API、SDK 和 Playwright 安全测试。
 
@@ -253,6 +261,7 @@
 ## 10. V1 迁移与清理
 
 - [ ] V2 production code 不 import V1 workflow/agent_swarm/orchestration。
+- [ ] V2 生产镜像不包含 V1 research_pipeline、旧模型客户端、Tool Executor、telemetry runtime 和前端 fallback。
 - [ ] V1 业务规则逐条迁移并有 golden test。
 - [ ] V1 SQLite 保持只读或一次性 ETL。
 - [ ] 没有永久双写 V1/V2。
@@ -260,6 +269,7 @@
 - [ ] 没有 fallback 回 V1 Prompt/Workflow。
 - [ ] V1 历史页面明确标记 legacy archive。
 - [ ] 旧代码删除清单完成并经 `rg`/import test 验证。
+- [ ] 机器可读 V1 manifest 覆盖 rule/table/path，包含 golden test、row count/checksum 和生产镜像扫描。
 
 完成证据：静态 import gate、golden tests、ETL report 和删除 diff。
 
@@ -271,6 +281,8 @@
 - [ ] Visual snapshot 无未审查更新。
 - [ ] API Schema/Zod contract 全通过。
 - [ ] Graph resume/retry/interrupt/cancel 全通过。
+- [ ] 页面始终从持久 snapshot/projection 重建稳定历史；React stream error/hydration failure 不导致空白或自行解析 sequence。
+- [ ] Worker/Agent Server 崩溃后的 orphan detection、resume/retry 和 recovery SLA 通过故障注入。
 - [ ] Protocol v2 sequence replay、重复 frame、乱序保护和 scoped namespace 测试通过。
 - [ ] Queue、fork、time travel、subagent nested/error 和 Artifact version 测试通过。
 - [ ] Provider timeout/rate-limit/malformed-output 全通过。
@@ -279,6 +291,9 @@
 - [ ] 负载测试覆盖并发 Run、长研究和流式连接。
 - [ ] 视觉回归覆盖桌面/移动端、深滚动、长文本、动态高度、折叠/展开和重连过程。
 - [ ] DOM 深度扫描覆盖重叠、横向溢出、焦点丢失、重复 ID、不可点击控件和错误 aria。
+- [ ] WCAG 2.2 AA 自动与人工检查通过；流式更新不抢焦点，Interrupt 焦点可恢复，图表有等价文本。
+- [ ] 移动端覆盖中文 IME、safe area、44px 触控目标、深链接返回栈、横竖屏和离线重连。
+- [ ] 未知/旧 schema、未知 Tool/组件和部分 Structured Output 使用可读 fallback，不回退 raw JSON。
 
 完成证据：CI run、HTML report、trace/video on failure、benchmark report。
 
@@ -293,11 +308,14 @@
 - [ ] 同一真实长任务经历断线、后台继续、重连 replay 和完成通知，无重复内容。
 - [ ] 同一真实 Run 展示 coordinator、subagent、Tool、Artifact、Evidence 和 Risk 正式组件。
 - [ ] Desktop/Mobile hosted visual gate 使用同一真实 Run。
+- [ ] 公网 hosted Playwright 禁止 route interception/mock，报告绑定部署 URL、commit、image digest、同一 Run ID、桌面/移动 trace/video 和测试时间。
 - [ ] 生产错误、超时和恢复演练通过。
-- [ ] 至少一个成熟 outcome 被收集和评分。
+- [ ] 至少一个成熟 outcome 只作为采集链路证明；Beta/GA 金融质量声明满足 `12-production-proof-slo-and-lifecycle.md` 的样本量、时间窗和基线门禁。
 - [ ] no-trade baseline 和金融指标可查看。
 - [ ] Runbook、告警、备份恢复和密钥轮换文档完成。
 - [ ] 真实用户/Workspace entitlement、quota 和数据隔离完成安全演练。
+- [ ] SLO ADR 的 availability、latency、reconnect、recovery、quality 和 security 阈值全部有测量证据，错误预算未超限。
+- [ ] 账户/Workspace 删除贯穿 Product DB、Object Storage、Checkpoint、Store、LangSmith、Langfuse、日志和备份轮换并通过 E2E。
 
 完成证据：同一 Run ID 的 API、页面、数据库、通知、LangSmith、Langfuse 和 outcome 证据包。
 

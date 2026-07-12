@@ -2,7 +2,7 @@
 
 > 状态：Proposed，待用户批准
 >
-> 基线日期：2026-07-11
+> 基线日期：2026-07-12
 >
 > 入口：[LangChain documentation index](https://docs.langchain.com/llms.txt)
 
@@ -25,7 +25,7 @@
 | LangChain Agents/Models/Messages/Tools | 深读 | Agent loop、模型、Tool、消息使用官方 API |
 | Structured Output | 深读 | Decision/Research 输出使用 Pydantic/JSON Schema 策略 |
 | Built-in/Custom Middleware | 深读 | 按 Agent role 组装，领域扩展只用官方 hooks |
-| LangChain Event Streaming | 深读 | 进程内统一 `streamEvents(..., version v3)` |
+| LangChain/LangGraph Streaming | 深读 | Python `astream_events v3` + `astream/stream_mode`；JS 对应 `streamEvents v3` |
 | LangGraph Graph/Persistence/Interrupts | 深读 | canonical graph、checkpoint、store、HITL |
 | LangGraph Event Streaming | 深读 | typed projection、custom transformer、namespace |
 | Deep Agents | 深读 | 研究、subagent、context 管理；权限严格限制 |
@@ -72,24 +72,45 @@
 - Checkpoint 管执行恢复，Store 管跨 Thread 记忆，业务表管产品查询。
 - Interrupt/Resume 使用官方 Command 和 Server API。
 - 并行使用 Graph branch/`Send`，禁止 ThreadPool Agent Runtime。
-- Run 显式选择 durability；subgraph 明确 per-invocation/per-thread persistence，不能依赖默认值。
+- 实施前区分传统 Run API 与 Protocol v2：只有调用面暴露 durability 时才显式选择；Protocol v2 UI Run 记录服务端有效默认值。subgraph 仍需明确 per-invocation/per-thread persistence。
 - Interrupt 恢复从节点函数开头重执行，副作用和非确定性操作必须拆分。
 
 ## 4. Event Streaming
 
-### 4.1 进程内 Event Streaming v3
+### 4.1 Python/JavaScript Event Streaming v3 与 Graph Stream Mode
 
-- [LangChain Event Streaming](https://docs.langchain.com/oss/javascript/langchain/event-streaming)
-- [LangGraph Event Streaming](https://docs.langchain.com/oss/javascript/langgraph/event-streaming)
-- [Deep Agents Event Streaming](https://docs.langchain.com/oss/javascript/deepagents/event-streaming)
+- [Python LangGraph Streaming](https://docs.langchain.com/oss/python/langgraph/streaming)
+- [Python Deep Agents Streaming](https://docs.langchain.com/oss/python/deepagents/streaming)
+- [JavaScript LangChain Event Streaming](https://docs.langchain.com/oss/javascript/langchain/event-streaming)
+- [JavaScript LangGraph Event Streaming](https://docs.langchain.com/oss/javascript/langgraph/event-streaming)
+- [JavaScript Deep Agents Event Streaming](https://docs.langchain.com/oss/javascript/deepagents/event-streaming)
 
-当前官方主接口：
+Python Agent typed event 主接口：
+
+```python
+async for event in agent.astream_events(input, version="v3"):
+    ...
+```
+
+Python Graph state/task stream：
+
+```python
+async for chunk in graph.astream(
+    input,
+    config,
+    stream_mode=["updates", "messages", "custom", "tasks"],
+    subgraphs=True,
+):
+    ...
+```
+
+JavaScript 对应接口：
 
 ```ts
 const stream = await agent.streamEvents(input, { version: "v3" });
 ```
 
-核心 typed projection：
+JS 核心 typed projection：
 
 ```text
 stream.messages
@@ -108,7 +129,8 @@ Message stream 可提供 `text`、Provider 支持时的 `reasoning`、`toolCalls
 - 普通 C 端 UI 使用 `stream.subagents`，因为它表达 Deep Agents 的产品级 task delegation。
 - `stream.subgraphs` 用于 Graph 结构和诊断，不直接等同用户可理解的专家任务。
 - Reasoning 只渲染 Provider 公开返回且政策允许的 block/summary，不宣称 chain-of-thought。
-- Custom transformer 用于 artifact、evidence、usage 和 progress，不重建固定协议。
+- Python custom stream writer 或 JS custom transformer 用于 artifact、evidence、usage 和 progress，不重建固定协议。
+- Python 使用 snake_case，JavaScript 使用 camelCase；不得把一个语言的示例直接复制到另一个语言。
 
 ### 4.2 Agent Server Protocol v2
 
@@ -133,21 +155,7 @@ POST /threads/{thread_id}/stream/events
 
 Protocol v2/Event Streaming 属于需要单独记录稳定性和兼容组的高级能力。实施时至少同时锁定并验证 Agent Server/API 镜像、`langgraph-sdk` 和 `@langchain/langgraph-sdk`，不能只锁 React 包。当前官方页面给出的最低兼容基线包括 `langgraph-api>=0.10.0`、JS SDK `>=1.9.15`、Python SDK `>=0.4.0`；最终以实施日文档和锁定版本为准。
 
-固定 channel：
-
-```text
-values
-updates
-messages
-tools
-lifecycle
-input
-tasks
-custom
-custom:<name>
-```
-
-强制使用官方 SDK/Transport 实现 replay、ordering、deduplication 和 namespace subscription。
+Channel schema 以锁定的 Agent Server OpenAPI、`@langchain/protocol` 和 SDK types 为准。当前 OpenAPI 与 0.x protocol package 可能在 `checkpoints` 等字段上出现差异，因此实施必须生成 schema snapshot 并做兼容测试，不能把本文某个列表复制成永久业务枚举。强制使用官方 SDK/Transport 实现 replay、ordering、deduplication 和 namespace subscription。
 
 ## 5. React SDK 与高级前端能力
 
@@ -176,7 +184,7 @@ respond()
 respondAll()
 ```
 
-新 Thread 首次提交后必须通过 `onThreadId` 保存服务端 ID。恢复/切换 Thread 时重新挂载同一 `threadId`，由 SDK hydrate/reattach。`disconnect()` 只断开客户端订阅；`stop()` 默认取消当前服务端 Run。`isThreadLoading`、运行 `isLoading`、optimistic projection 和 reconnect 不能合并成一个产品状态。
+新 Thread 首次提交后必须通过 `onThreadId` 保存服务端 ID。恢复/切换 Thread 时重新挂载同一 `threadId`，由 SDK hydrate/reattach。`disconnect()` 只断开客户端订阅；`stop()` 默认取消当前服务端 Run。`isThreadLoading`、运行 `isLoading`、`error` 和 optimistic projection 不能合并成一个产品状态；当前公共 API 不提供通用 reconnect/gap 字段。
 
 实施时必须复核并优先使用以下 selector/能力：
 
@@ -196,9 +204,11 @@ useFiles
 useMediaURL
 ```
 
-高级 submit 语义包括 `multitaskStrategy`、`forkFrom`、`runId`、`threadId`、`metadata`、`config`、`interruptBefore`、`interruptAfter`。具体签名在锁定依赖版本后从 TypeScript types 和官方 API Reference 再确认，不在业务 wrapper 中冻结一份复制类型。
+当前 `StreamSubmitOptions` 重点字段包括 `multitaskStrategy`、`forkFrom`、`threadId`、`metadata`、`config`、`signal` 和 `onError`。`runId`、`interruptBefore`、`interruptAfter` 不得按旧示例写入 React v1 代码；最终签名从锁定 TypeScript types 生成 contract test，不在业务 wrapper 中复制类型。
 
-`useSubmissionQueue` 是客户端内存能力，刷新和切换 Thread 后不能作为 durable queue。Agent Server worker queue 才承担后台 Run。`multitaskStrategy` 的默认值和各枚举行为必须以锁定 SDK types 为准并写入测试，禁止依赖默认 rollback 或旧文档示例。
+`useSubmissionQueue` 是客户端内存能力，刷新和切换 Thread 后不能作为 durable queue。Agent Server worker queue 只承担已创建 Run 的后台执行；持久 pending input 若需要，由 Product `task_commands` + dispatcher 明确实现。`multitaskStrategy` 的默认值和各枚举行为必须以锁定 SDK types 为准并写入测试。
+
+`useChannel` 只提供受 `bufferSize/replay` 约束的有界内存数组，不提供产品历史分页。历史分页必须来自 Product `product_event_projections` API。
 
 Fork 使用锁定版本的 `useMessageMetadata(...).parentCheckpointId` 和 `submit(..., { forkFrom: checkpointId })` 形状。若官网示例与已发布包 TypeScript types 不一致，以锁定包 types 和 SDK 仓库文档为准，并在实施说明记录差异。
 
@@ -298,7 +308,7 @@ Custom Middleware 可增加 state、tools 和 stream transformers。执行顺序
 - Root `stream.interrupts` 只代表 root namespace；完整 Thread/subagent Interrupt 从官方 Thread snapshot 读取，并携带 interrupt ID 与 namespace 恢复。
 - 响应和 State 修正需要原子提交时使用 `respond(response, { update })`。
 - 页面离开使用 disconnect/rejoin，不等同 cancel。
-- 运行中用户输入区分 client submission queue、Server worker queue 和 multitask strategy。
+- 运行中用户输入区分 client submission queue、Product task_commands dispatcher、已创建 Run 的 Server worker queue 和 multitask strategy。
 - 编辑和重新生成使用 checkpoint fork/`forkFrom`。
 - 定时监控使用 Agent Server cron，不使用应用进程内 timer。
 - Interrupt 恢复保持同一 Thread/Checkpoint 连续性，但产生新的可追踪 Run；业务记录通过 `resume_of_run_id` 关联。

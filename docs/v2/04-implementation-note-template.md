@@ -6,6 +6,14 @@
 
 # <日期> <阶段> <本轮主题>
 
+```yaml
+slice_id: <唯一 ID>
+phase: <Phase 0-6>
+owner: <责任人或 Agent>
+commit_or_pr: <提交或 PR>
+status: in_progress|verified|blocked
+```
+
 ## 1. 本轮目标
 
 - 本轮要完成什么。
@@ -57,7 +65,7 @@
 - API：无/具体 route/schema/version。
 - Database：无/具体 migration。
 - Frontend：无/具体 View Model/stream event。
-- Event：无/固定 channel、custom extension、schema version。
+- Event：无/官方 channel、custom extension、protocol/schema version。
 - Middleware：无/角色、顺序、权限和 stream transformer。
 - Observability：无/具体 metadata/trace。
 - Migration forward/rollback：无/命令、数据影响和恢复方式。
@@ -89,7 +97,7 @@
 - 是否使用真实模型/行情/搜索/通知：
 - Production/canary 环境与发布批准：
 
-没有真实运行时明确写“本轮未做真实运行”，不能用 mock 代替。
+没有真实运行时明确写“本轮未做真实运行”，不能用 mock 代替；本轮状态不能标记为 `verified`，对应阶段出口不能勾选。
 
 ## 9. 异常与修复记录
 

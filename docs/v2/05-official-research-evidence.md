@@ -1,6 +1,6 @@
 # V2 官方文档调研证据矩阵
 
-> 调研日期：2026-07-11
+> 调研日期：2026-07-12
 >
 > 来源限制：只引用 LangChain、LangGraph、Deep Agents、LangSmith、Langfuse 官方文档、官方 GitHub 仓库和官方包注册表。
 >
@@ -17,6 +17,7 @@
 | 2026-07-11 PyPI `langgraph` 为 1.2.9 | [PyPI](https://pypi.org/project/langgraph/) | 实施时重新读取并生成 lockfile |
 | 2026-07-11 PyPI `deepagents` 为 0.6.12 | [PyPI](https://pypi.org/project/deepagents/) | 禁止宽松 `>=` 无上界升级 |
 | 2026-07-11 NPM `@langchain/react` 为 1.0.26 | [NPM Registry](https://registry.npmjs.org/%40langchain%2Freact/latest) | 前端采用 v1 API，不复制旧 hook |
+| 2026-07-12 NPM `@langchain/protocol` 为 0.0.18 | [NPM Registry](https://registry.npmjs.org/%40langchain%2Fprotocol/latest) | 仍为 pre-1.0，必须锁定并做 OpenAPI/SDK schema contract test |
 
 ## 2. LangChain Agent Framework
 
@@ -168,7 +169,7 @@ V2 采用：
 - Agent Server 管 Checkpoint/Store；如果自管 Runtime，使用官方 PostgreSQL Checkpointer。
 - 产品业务记录使用独立 SQLAlchemy schema，不查询 Checkpoint 表。
 - `thread_id` 使用 UUID，避免超长和跨租户冲突。
-- Run 显式选择 `sync`、`async` 或 `exit` durability，不依赖默认值。
+- 传统 Run API/进程内调用可选择 `sync`、`async` 或 `exit`；当前 Protocol v2 `run.start` 和 React `submit()` 不暴露该字段，UI 路径必须记录服务端有效默认值，不能虚构 per-run 配置。
 - Research subgraph 默认 `checkpointer=None` 继承父图；per-thread persistence 需要单独批准和并行限制。
 
 ### 3.3 Interrupt / Resume
@@ -193,7 +194,7 @@ V2 采用：
 
 官方事实：
 
-- LangChain/Deep Agents 当前推荐 `streamEvents(input, { version: "v3" })` typed projections。
+- Python LangChain/Deep Agents 当前提供 `stream_events/astream_events(version="v3")`，Python LangGraph 同时提供 `stream/astream` 与 `stream_mode`；JavaScript 对应 camelCase `streamEvents`。
 - 通用 projection 包括 messages、toolCalls、values、output、subgraphs 和 extensions。
 - Deep Agents 额外提供 `stream.subagents`，每个 handle 具有 name、taskInput、messages、toolCalls、values、nested subagents 和 output。
 - `stream.subagents` 表达产品级 task delegation；`stream.subgraphs` 表达 Graph execution structure。
@@ -211,8 +212,8 @@ V2 采用：
 
 V2 采用：
 
-- 进程内使用 Event Streaming v3，Agent Server 使用 Protocol v2，React 使用 SDK selectors。
-- Token/Message、Tool、lifecycle、input、tasks 和 checkpoint pointer 使用官方固定 channel。
+- Python 进程内使用 Event Streaming v3 与 `astream/stream_mode`，Agent Server 使用 Protocol v2，React 使用 SDK selectors；实现必须使用对应语言的正确方法名。
+- Token/Message、Tool、lifecycle、input、tasks 和 checkpoint pointer 使用锁定协议版本提供的官方 channel；具体集合由 OpenAPI/protocol types contract test 决定。
 - 阶段进度、Artifact、Evidence、Usage、Notification 和 Quality 使用版本化 `custom:<name>` extension。
 - 不手写 SSE reconnect、sequence replay、dedup、namespace parser、chunk assembler 和 run polling。
 - 产品数据库不逐条保存 wire frame，只保存稳定业务投影。

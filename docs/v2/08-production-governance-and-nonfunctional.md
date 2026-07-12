@@ -2,7 +2,7 @@
 
 > 状态：Proposed，待用户批准
 >
-> 日期：2026-07-11
+> 日期：2026-07-12
 >
 > 目的：冻结生产级数据权威、幂等、重试、观测、安全、保留和量化验收边界
 
@@ -84,11 +84,11 @@ Graph Node 不直接散落 SQL。采用单一 Product Projection service/reposit
 
 | 场景 | Durability | 规则 |
 | --- | --- | --- |
-| 普通人工分析/研究 | `async` | 平衡吞吐与恢复，允许极小崩溃窗口 |
-| 高价值外部副作用之前 | `sync` | checkpoint 持久后才允许进入副作用 |
-| 无中间恢复要求的纯离线计算 | `exit` | 仅结束时持久化，禁止用于 HITL/长任务 |
+| Protocol v2 普通人工分析/研究 | 服务端有效默认，基线 `async` | 调用面不支持 per-run 覆盖，记录实际配置并通过恢复测试 |
+| 服务端创建且 API 明确支持的高价值任务 | `sync` 可选 | 只在类型/OpenAPI 证明可表达时使用；通知仍走事务 Outbox |
+| 服务端纯离线计算 | `exit` 可选 | 只在支持的调用面使用，禁止用于 HITL/长任务 |
 
-所有 Run 显式声明 durability，禁止依赖 Agent Server 默认值。Research subgraph 默认 `checkpointer=None` 继承父图；per-thread `checkpointer=True` 需要单独 ADR、固定 namespace、禁止同 subgraph 并行调用和专项恢复测试。
+Protocol v2 UI Run 使用并记录 Agent Server 有效默认 durability；当前接口不能表达 per-run `sync/exit`。传统 Run API 或服务端内部调用只有在锁定类型/OpenAPI 证明支持时才可显式选择。Research subgraph 默认 `checkpointer=None` 继承父图；per-thread `checkpointer=True` 需要单独 ADR、固定 namespace、禁止同 subgraph 并行调用和专项恢复测试。
 
 ## 4. 状态机
 
@@ -108,7 +108,10 @@ created -> queued -> running
 running -> waiting_human | succeeded | blocked | failed | cancelled
 waiting_human -> responded
 responded -> superseded_by_resume_run
+running -> recovery_pending -> superseded_by_resume_run | orphaned_failed
 ```
+
+`agent_runs` 是通用不可变执行尝试；模式结果存入独立结果表。Agent Server/Checkpointer 是执行活性的权威，Product PostgreSQL 是用户可查询状态转换和审计的权威；二者通过版本化映射投影，不允许各自独立决定最终状态。
 
 ### 4.3 Artifact 状态
 
@@ -139,6 +142,11 @@ unread|read -> expired | dismissed
 
 Interrupt projection 的 resolved/expired 必须由官方 Thread snapshot 对账，不能仅靠前端点击更新。
 
+- `dismissed` 只适用于非阻塞通知。
+- Interrupt 不支持静默 ignore；reject/cancel/expire 必须驱动 Graph 到明确终态或恢复动作。
+- `expired` 由服务端策略和 Graph timeout response 产生，不能由客户端单方面设置。
+- 多设备响应以 interrupt/checkpoint/version 幂等键进行乐观并发控制。
+
 ### 4.6 Entitlement 状态
 
 ```text
@@ -147,7 +155,7 @@ trial|active -> grace -> suspended -> cancelled
 
 每个 Task 保存创建时的 entitlement snapshot；套餐变化影响新调用和后续预算，不篡改历史 usage。
 
-连接状态 `connected/reconnecting/offline` 和 UI 状态 `optimistic/hydrating/streaming` 不属于 Task/Run 状态机。
+连接展示状态不属于 Task/Run 状态机。React v1 可直接使用的公开状态以锁定 types 为准，例如 `error/isLoading/isThreadLoading/hydrationPromise`；`optimistic/hydrating/streaming` 也不得写入业务状态。
 
 部分成功通过 `completion_scope`、warnings 和 artifact completeness 表达，不增加含糊的 `partial_success` 通用状态。
 
@@ -157,14 +165,14 @@ trial|active -> grace -> suspended -> cancelled
 
 | 错误/动作 | 重试所有者 | 最大策略 | 总预算 | 幂等要求 |
 | --- | --- | --- | --- | --- |
-| Model transient | `ModelRetryMiddleware` | 限次退避 | 单 Run model budget 内 | 无副作用 |
-| Structured output invalid | Structured Output strategy | 限次修复 | 独立修复预算 | 保留失败样本 |
-| Search transient | `ToolRetryMiddleware` | 限次退避 | search budget 内 | 查询可重复 |
-| Market GET transient | Market adapter | SDK retry 或 adapter 二选一 | freshness deadline 内 | 只读 |
-| Graph node infrastructure | Graph RetryPolicy | 仅无副作用/幂等 node | task deadline 内 | node 幂等 |
-| PostgreSQL transient | Repository transaction | 极少次数 | request deadline 内 | transaction/idempotency key |
-| Notification | Outbox worker | 状态机控制 | delivery policy 内 | deterministic message key |
-| Webhook delivery | Delivery worker | 限次 + DLQ | endpoint policy 内 | event ID |
+| Model transient | `ModelRetryMiddleware` | 最多 2 attempt | 单次 60s，Task model calls <= 4 | 无副作用 |
+| Structured output invalid | Structured Output strategy | 最多 1 次 repair | 不与 ModelRetry 嵌套 | 保留失败样本 |
+| Search transient | `ToolRetryMiddleware` | 最多 3 attempt | 总计 30s，尊重 Retry-After | 查询可重复 |
+| Market GET transient | Market adapter | 最多 3 attempt | 总计 10s 且仍满足 freshness | 只读 |
+| Graph node infrastructure | Graph RetryPolicy | 最多 2 attempt | task deadline 内 | node 幂等 |
+| PostgreSQL transient | Repository transaction | 最多 2 attempt | 总计 5s，仅 serialization/deadlock | transaction/idempotency key |
+| Notification | Outbox worker | 最多 5 attempt | 24h 后 terminal/unknown | deterministic message key |
+| Webhook delivery | Delivery worker | 最多 5 attempt + DLQ | endpoint policy 内 | event ID |
 
 每个 Task 具有最大 wall time、model calls、tool calls、search calls、tokens、cost 和 recursion。超过任一预算必须形成明确 `budget_exhausted`，不能静默切换廉价模型后继续输出最终风险结论。
 
@@ -206,30 +214,30 @@ planned -> leased -> sending -> delivered
 ### 7.2 埋点策略
 
 - LangSmith 使用 LangChain/LangGraph 自动 tracing。
-- Langfuse 使用单一 CallbackHandler 或统一 OTel fan-out ADR 二选一。
+- Langfuse 使用 ADR 0005 冻结的单一 CallbackHandler；如需切换 OTel fan-out，必须新增替代 ADR 并同步修改验收。
 - Langfuse 使用当前推荐的 OTel masking 接口（实施时核对 `mask_otel_spans`），不依赖 legacy `mask` 配置。
 - 禁止 Callback + 手工 generation 重复记录同一调用。
 - 两个平台共享内部 correlation IDs，但各自拥有独立 trace ID。
 - 采样决策、masking、queue size、flush timeout 和 exporter failure 由集中 Observability bootstrap 配置。
 - 任一 exporter queue 满或服务不可用时丢弃观测数据并计数告警，不能阻断业务。
-- CI/集成测试检查同一 model/tool 调用在各平台最多一条预期记录。
+- Product DB `observability_links` 保存稳定 model/tool call ID 到 LangSmith child run 和 Langfuse observation 的映射。CI/集成测试按 call ID 断言每个 attempt 在每个平台恰有一条记录；Retry 是新 child，Resume 是新 root Run。
 - Langfuse head sampling 不能在结束后补回失败 Trace：要么 100% 采集后用 retention 控制成本，要么只做统计采样，并由 Product Audit/LangSmith 全量保留 failed/blocked/negative-feedback/security 事件。
 
 ## 8. 数据分类与保留
 
 | 数据类别 | 默认保留 | 可关闭 I/O | 删除要求 |
 | --- | --- | --- | --- |
-| Checkpoint | 活跃 Thread + 产品保留期 | 否，运行必需 | Thread 删除后级联/合规保留 |
+| Checkpoint | Task 完成后默认 30 天 | 否，运行必需 | Thread 删除后级联/合规保留 |
 | Agent Store memory | 用户可控 | 可禁用 | 支持逐 namespace 删除 |
-| 业务 Task/Run/Decision | 产品保留期 | 不适用 | 账户/Workspace 删除策略 |
-| Evidence/Artifact | 套餐保留期 | 可限制正文 | 对象与索引一致删除 |
-| Raw Prompt/Response | 默认最小化 | 是 | 短保留或不保存 |
+| 业务 Task/Run/Decision | 默认 365 天 | 不适用 | 账户/Workspace 删除策略 |
+| Evidence/Artifact | 默认 365 天，可由套餐缩短 | 可限制正文 | 对象与索引一致删除 |
+| Raw Prompt/Response | 默认不保存 | 是 | 开启时必须短保留 |
 | LangSmith/Langfuse I/O | 租户策略 | 是 | 平台 retention/删除 API |
-| Logs | 短期 | 敏感内容禁止 | 自动过期 |
-| Backups | RPO 策略 | 不适用 | 删除传播到备份轮换周期 |
+| Logs | 默认 30 天 | 敏感内容禁止 | 自动过期 |
+| Backups | 默认 35 天轮换 | 不适用 | 删除传播到备份轮换周期 |
 | Usage/Billing/Audit | 法律和财务要求 | 不适用 | 最小字段、合法保留 |
 
-“零保留”必须按数据类别定义，不能只关闭 Trace input/output 后仍保存完整业务证据和模型输出却称为零保留。用户必须能够导出、删除和查看保留策略；合法保留和备份删除延迟必须明确披露。
+“零保留”必须按数据类别定义，不能只关闭 Trace input/output 后仍保存完整业务证据和模型输出却称为零保留。用户必须能够导出、删除和查看保留策略；合法保留和备份删除延迟必须明确披露。账户/Workspace 删除必须有跨 Product DB、Object Storage、Checkpoint、Store、LangSmith、Langfuse、日志和备份轮换的 E2E，在线系统 30 天内完成，备份在 35 天轮换内传播。
 
 ## 9. 威胁模型
 
