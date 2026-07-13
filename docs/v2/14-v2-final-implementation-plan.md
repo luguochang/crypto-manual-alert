@@ -14,7 +14,7 @@
 
 ## Execution Rules
 
-- Task 0 is the bootstrap exception to the later-task note and preexisting-`NORMATIVE_SHA` rules: its review requests identify the proposed normative candidate SHA, its three reviews run sequentially as specified below, and its manifest-only commit is the Task 0 attestation. Task 0B and Tasks 1-14 follow the normal implementation-note/candidate/attestation protocol.
+- Task 0 is the bootstrap exception to the later-task note and preexisting-`NORMATIVE_SHA` rules: its review requests identify the proposed normative candidate SHA, its three reviews run sequentially as specified below, and its manifest-only commit is the Task 0 attestation. Task 0B is the one-time exception to the preexisting requirement-registry receipt because it creates that registry; it still uses TDD, a note, candidate and two ordered reviews. Tasks 1-14 follow the complete registry/note/candidate/attestation protocol.
 - Do not copy the prototype wholesale. Read the prototype only to migrate a named domain rule, test or presentation component.
 - Do not implement more than one task before its tests and two reviews are complete.
 - Do not use a fixture to prove a requirement that says real provider, real database, real browser or real observability.
@@ -24,6 +24,7 @@
 - The note draft contains exact RED command/output/exit code, GREEN command/output/test count, implementer agent ID, base SHA and real-evidence limitations. The attestation adds the final reviewed candidate SHA, specification reviewer/result/findings/disposition and code-quality reviewer/result/findings/disposition. Code-quality review cannot start before specification approval, and no production/test/config file may change in the attestation commit.
 - Every test file listed by a task must be executed once in RED for the intended missing behavior, including integration/real/browser tests. If external credentials are unavailable, collection/import must still fail for the intended missing implementation before credential/skip logic; a skip is not RED.
 - Before each task's RED command, the controller uses the Task 0B structured registry tool to assign one accountable implementation role and concrete Agent ID to every requirement ID owned by that task, verifies source hashes/coverage, and writes an immutable pre-RED receipt containing the registry hash, owner assignments, timestamp and `NORMATIVE_SHA`. The task candidate stages the structured registry update, receipt and note draft. Placeholders, catch-all ownership or a RED timestamp preceding the receipt are rejected.
+- The mandatory shared file inventory appended to every Task 1-14 `Files` section is: Modify `docs/v2/requirements-registry.yaml`; Create `artifacts/v2-final/pre-red/task-N.json`; Modify/Create that task's implementation note. Immediately before every candidate commit run `verify_requirements.py --phase candidate --task N --receipt artifacts/v2-final/pre-red/task-N.json --check-index`; it verifies the staged registry/receipt hashes, concrete Agent ID, `NORMATIVE_SHA`, timestamps and exact RED command against the pre-RED record. The candidate must force-stage the ignored receipt and include all three shared paths.
 
 ## Task 0: Commit the Immutable Normative Baseline
 
@@ -184,7 +185,9 @@ uv run langgraph dev --help
 - [ ] **Step 5: Create the candidate commit, run both reviews, then attest**
 
 ```bash
-git add backend deploy/agent-server-image.lock tools/v2/probe_agent_server.sh artifacts/v2-final/versions.json docs/v2/implementation/2026-07-13-task-01-foundation.md
+git add backend deploy/agent-server-image.lock tools/v2/probe_agent_server.sh docs/v2/requirements-registry.yaml docs/v2/implementation/2026-07-13-task-01-foundation.md
+git add -f artifacts/v2-final/versions.json artifacts/v2-final/pre-red/task-1.json
+python3.12 tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase candidate --task 1 --receipt artifacts/v2-final/pre-red/task-1.json --check-index
 git commit -m "build: lock v2 official framework dependencies"
 ```
 
@@ -1140,6 +1143,8 @@ Commit: `feat: add restricted background deep research`
 
 Task 14 is intentionally split into packaging, release-source, deployment-governance and evidence slices because later proof must reference earlier immutable commits. Packaging and release-source candidate commits stage the current Task 14 implementation-note draft, are reviewed first for specification compliance and then code/release quality, and are followed by an attestation-only commit that changes only that note before the next slice begins. Deployment-governance is a normative-baseline transition: after its full Task 0 review chain, its attestation commit may add only the regenerated `normative-baseline.json`, transitioned requirement-registry entries, fixed `governance-candidate-sha.txt` pointer and Task 14 note; it may not change the already-reviewed ADR or runtime evidence. The note draft records the base SHA and executed RED/GREEN evidence; it must not claim the candidate SHA before the candidate exists. Its attestation records the actual reviewed candidate SHA and reviewer dispositions. The Step 10 evidence commit is the immutable candidate for the final independent review; Step 11 keeps that evidence byte-for-byte unchanged and adds only the separate review note plus signed final-review attestation files.
 
+Before any pre-`SOURCE_SHA` proof, set `V2_EVIDENCE_STAGING_ROOT` to a content-addressed directory outside every repository/worktree and verify it is not a symlink into the repo. Baseline, local recovery/lifecycle/load/SLO and V1 inventory/signature outputs are written only there, with a canonical staged-evidence manifest. No pre-source proof writes under repository `artifacts/`. After the source candidate and its attestation are immutable, `import_staged_evidence.py` verifies every hash/signature/source identity and imports the approved files into `artifacts/v2-final/` for the Step 10 evidence candidate.
+
 **Files:**
 - Create: `.github/workflows/v2-ci.yml`
 - Create: `backend/Dockerfile`
@@ -1155,6 +1160,8 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `backend/tests/contract/test_authority_consistency.py`
 - Create: `backend/tests/contract/test_alert_rules.py`
 - Create: `backend/tests/contract/test_release_source_manifest.py`
+- Create: `backend/tests/contract/test_baseline_attestation.py`
+- Create: `backend/tests/contract/test_staged_evidence_import.py`
 - Create: `backend/tests/performance/test_slo_contract.py`
 - Create: `backend/tests/performance/test_concurrency_stream_load.py`
 - Create after baseline proof: `backend/alembic/versions/0002_release_metadata.py`
@@ -1180,6 +1187,9 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `tools/v2/verify_production_alerts.sh`
 - Create: `tools/v2/verify_attestation_identities.py`
 - Create: `tools/v2/build_final_review_attestation.py`
+- Create: `tools/v2/build_baseline_attestation.py`
+- Create: `tools/v2/verify_baseline_attestation.py`
+- Create: `tools/v2/import_staged_evidence.py`
 - Create: `tools/v2/stage_release_source.sh`
 - Create: `tools/v2/build_release_source_manifest.py`
 - Create: `docs/v2/legacy-parity-map.yaml`
@@ -1193,6 +1203,9 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `artifacts/v2-final/deployment/baseline-attestation.json`
 - Create: `artifacts/v2-final/deployment/baseline-attestation.sigstore.json`
 - Create: `artifacts/v2-final/deployment/baseline-verification.json`
+- Create: `artifacts/v2-final/deployment/baseline-source-sha.txt`
+- Create: `artifacts/v2-final/deployment/baseline-digest.txt`
+- Create: `artifacts/v2-final/deployment/source-sha.txt`
 - Create: `artifacts/v2-final/deployment/staged-source.json`
 - Create: `artifacts/v2-final/deployment/governance-candidate-sha.txt`
 - Create: `artifacts/v2-final/deployment/preflight.json`
@@ -1220,7 +1233,9 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `docs/v2/runbooks/production.md`
 - Create: `deploy/alerts.yaml`
 - Create: `deploy/attestation-policy.yaml`
+- Create: `deploy/release-source-policy.json`
 - Create: `deploy/release-source-manifest.txt`
+- Create: `artifacts/v2-final/pre-source-evidence-manifest.json`
 - Modify: `docs/README.md`
 - Modify after deployment-profile preflight and before hosted proof: `docs/v2/adr/0008-production-deployment-profile.md`
 - Modify: `README.md`
@@ -1287,12 +1302,16 @@ Task 14 fills observed evidence fields in the Task 0B registry but never creates
 
 `test_release_source_manifest.py` validates the canonical newline-delimited UTF-8/LF path schema, sorted unique paths, allowed roots, explicit exclusions, manifest self-inclusion and complete release-critical coverage against `git ls-files`. It fails if application/backend/frontend source, tests, migrations, locks, Dockerfiles, deployment/profile config, CI, build/deploy/probe/secret/parity/requirement/source-identity/alert verifiers, or the manifest itself are omitted, or if unrelated local/runtime/evidence files are included.
 
+`test_baseline_attestation.py` requires deterministic canonical JSON and verifies that baseline provenance binds the exact Task 13 `BASELINE_SHA`, reviewed packaging candidate SHA, image digest, migration/database checksum manifest, hosted profile/environment and timestamps. It rejects nonexistent commits, mutable image tags, mismatched hashes, absent probe fields and signing before the binding verifier passes.
+
+`test_staged_evidence_import.py` rejects staging roots inside/symlinked into any repository, requires a content-addressed manifest for every external pre-source artifact, verifies source/tool/signature bindings, refuses unexpected or changed files, and imports only the allowlisted evidence paths after `SOURCE_SHA` plus governance attestation exist.
+
 - [ ] **Step 2: Confirm release gates fail before evidence exists**
 
 Run:
 
 ```bash
-(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
+(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/contract/test_baseline_attestation.py tests/contract/test_staged_evidence_import.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
 (cd backend && uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py -q)
 uv run --project backend python tools/v2/verify_legacy_parity.py --check
 uv run --project backend python tools/v2/verify_requirements.py --check
@@ -1308,22 +1327,32 @@ Production images use the locked Python/Node runtimes, non-root users, health ch
 
 CI installs from locks, verifies each code slice added a new implementation note with required front matter, runs backend/frontend tests, migration smoke tests, Agent Server schema contracts, secret/SBOM scans, parity/evidence verifiers and Playwright fixture suite. Real-provider, real-observability, backup/restore, production-image, load, hosted Playwright and SLO jobs run in a protected environment and are required for release tags. `deploy/alerts.yaml` covers readiness, market/search/model failures, independent LangSmith/Langfuse delivery exhaustion, projection lag, stale workers, outbox/DLQ, security and error-budget burn; alert tests inject positive canaries and record query/result hashes. The runbook documents deploy/rollback, incidents, backup/restore, key rotation, quota/entitlement failures, deletion and provider/observability outages.
 
-`deploy/release-source-manifest.txt` is a sorted, unique, repository-relative, newline-delimited UTF-8/LF path manifest. It includes itself and every tracked release-critical path under backend application/tests/migrations/locks, frontend source/tests/dependency/config files, production Dockerfiles/Compose/profile configuration, `.github/workflows/v2-ci.yml`, `tools/v2/`, accepted V2 normative/ADR/implementation records and root release metadata. It explicitly excludes secrets, local environments, caches, generated runtime/evidence outputs, V1/archive-only paths and developer-machine files. `build_release_source_manifest.py` generates/checks this schema against `git ls-files`, applies the exact include/exclude policy, fails on any omitted release-critical or unexpected path, and emits a deterministic manifest SHA-256. `stage_release_source.sh` compares the dirty tree against that verified manifest and the explicitly permitted Task 14 note, refuses unlisted/untracked paths, stages only manifest entries with path-safe Git plumbing, and emits a staged-path/hash report. It never stages an unreviewed working-tree path or absorbs unrelated changes.
+`deploy/release-source-policy.json` defines the exact include/exclude roots. `deploy/release-source-manifest.txt` is generated only for the final source candidate, after every Task 14 source addition/change/deletion has been staged in the Git index. It is a sorted, unique, repository-relative, newline-delimited UTF-8/LF path manifest that includes itself and every staged/tracked release-critical path under backend application/tests/migrations/locks, frontend source/tests/dependency/config files, production Dockerfiles/Compose/profile configuration, `.github/workflows/v2-ci.yml`, `tools/v2/`, accepted V2 normative/ADR/implementation records and root release metadata. It explicitly excludes secrets, local environments, caches, generated runtime/evidence outputs, V1/archive-only paths and developer-machine files. `build_release_source_manifest.py` generates/checks the manifest against the staged index and policy, fails on any omitted release-critical or unexpected path, and emits a deterministic SHA-256. `stage_release_source.sh` prepares/verifies that index and emits a staged-path/hash report; it never stages an unreviewed path or absorbs unrelated changes.
 
-Before the packaging candidate exists, record the already-green Task 13 attestation commit as `BASELINE_SHA` in the Task 14 note draft and `baseline-source-sha.txt`. Commit packaging code, tests/tooling and the note draft together as an early tooling-only candidate. Review that immutable candidate, apply fixes through new candidates and re-review, then create the note-only attestation commit. Build the recorded Task 13 baseline source with the reviewed committed tooling, deploy it to non-production, run smoke/migration/checksum tests and store a signed known-good baseline digest. This distinct baseline, not two builds of the same candidate, is required by the final rollback gate.
+Before the packaging candidate exists, record the already-green Task 13 attestation commit as `BASELINE_SHA` in the Task 14 note draft and under the external staged-evidence root. Commit only packaging policy/code/tests/tooling, the Task 14 registry/receipt and note draft as the early tooling candidate; the final source manifest does not exist yet. Review that immutable candidate, apply fixes through new candidates and re-review, then create the note-only attestation commit. Build the recorded Task 13 baseline source with the reviewed committed tooling, deploy it to non-production, run smoke/migration/checksum tests and store signed known-good baseline evidence outside the source worktree. This distinct baseline, not two builds of the same candidate, is required by the final rollback gate.
 
 Run:
 
 ```bash
-git rev-parse HEAD > artifacts/v2-final/deployment/baseline-source-sha.txt
-uv run --project backend python tools/v2/build_release_source_manifest.py --write deploy/release-source-manifest.txt
-uv run --project backend python tools/v2/build_release_source_manifest.py --check deploy/release-source-manifest.txt
-git add .github/workflows/v2-ci.yml backend/Dockerfile backend/tests/contract/test_alert_rules.py backend/tests/contract/test_release_source_manifest.py frontend/Dockerfile deploy/docker-compose.production.yml deploy/env.production.example deploy/alerts.yaml deploy/attestation-policy.yaml deploy/release-source-manifest.txt .dockerignore .env.example tools/v2/build_production_images.sh tools/v2/probe_production_stack.sh tools/v2/upgrade_rollback_drill.sh tools/v2/deployment_exit_drill.sh tools/v2/secret_scan.sh tools/v2/build_release_source_manifest.py tools/v2/stage_release_source.sh tools/v2/verify_production_alerts.sh artifacts/v2-final/deployment/baseline-source-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
+python3.12 tools/v2/import_staged_evidence.py --validate-root "$V2_EVIDENCE_STAGING_ROOT"
+git rev-parse HEAD > "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt"
+git add .github/workflows/v2-ci.yml backend/Dockerfile backend/tests/contract/test_alert_rules.py backend/tests/contract/test_release_source_manifest.py backend/tests/contract/test_baseline_attestation.py backend/tests/contract/test_staged_evidence_import.py frontend/Dockerfile deploy/docker-compose.production.yml deploy/env.production.example deploy/alerts.yaml deploy/attestation-policy.yaml deploy/release-source-policy.json .dockerignore .env.example tools/v2/build_production_images.sh tools/v2/probe_production_stack.sh tools/v2/upgrade_rollback_drill.sh tools/v2/deployment_exit_drill.sh tools/v2/secret_scan.sh tools/v2/build_release_source_manifest.py tools/v2/stage_release_source.sh tools/v2/verify_production_alerts.sh tools/v2/build_baseline_attestation.py tools/v2/verify_baseline_attestation.py tools/v2/import_staged_evidence.py docs/v2/requirements-registry.yaml docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add -f artifacts/v2-final/pre-red/task-14.json
+uv run --project backend python tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase candidate --task 14 --receipt artifacts/v2-final/pre-red/task-14.json --check-index
 git commit -m "build: add v2 release packaging and rollback tooling"
-./tools/v2/build_production_images.sh --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --output-digest artifacts/v2-final/deployment/baseline-digest.txt
-./tools/v2/probe_production_stack.sh --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)"
-cosign sign-blob --yes --bundle artifacts/v2-final/deployment/baseline-attestation.sigstore.json artifacts/v2-final/deployment/baseline-attestation.json
-cosign verify-blob --output json --bundle artifacts/v2-final/deployment/baseline-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_signer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_signer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/deployment/baseline-attestation.json > artifacts/v2-final/deployment/baseline-verification.json
+```
+
+After both reviews approve and the packaging note-only attestation is committed, run:
+
+```bash
+PACKAGING_CANDIDATE_SHA="$(git rev-parse HEAD^)"
+BASELINE_SHA="$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt")"
+./tools/v2/build_production_images.sh --source-sha "$BASELINE_SHA" --output-digest "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt"
+./tools/v2/probe_production_stack.sh --image-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")" --output "$V2_EVIDENCE_STAGING_ROOT/baseline-probe.json"
+uv run --project backend python tools/v2/build_baseline_attestation.py --baseline-sha "$BASELINE_SHA" --packaging-candidate-sha "$PACKAGING_CANDIDATE_SHA" --image-digest-file "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt" --probe-manifest "$V2_EVIDENCE_STAGING_ROOT/baseline-probe.json" --profile non-production-hosted --output "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.json"
+uv run --project backend python tools/v2/verify_baseline_attestation.py --attestation "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.json" --baseline-sha "$BASELINE_SHA" --packaging-candidate-sha "$PACKAGING_CANDIDATE_SHA" --image-digest-file "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt" --probe-manifest "$V2_EVIDENCE_STAGING_ROOT/baseline-probe.json"
+cosign sign-blob --yes --bundle "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.sigstore.json" "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.json"
+cosign verify-blob --output json --bundle "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.sigstore.json" --certificate-identity-regexp "$(yq '.release_signer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_signer.issuer' deploy/attestation-policy.yaml)" "$V2_EVIDENCE_STAGING_ROOT/baseline-attestation.json" > "$V2_EVIDENCE_STAGING_ROOT/baseline-verification.json"
 ```
 
 Only after the baseline is proven, write `test_release_migration_compatibility.py` and run its own explicit RED before adding the migration:
@@ -1346,34 +1375,34 @@ Run:
 
 ```bash
 (cd backend && uv run pytest tests/security -q)
-./tools/v2/backup_restore_drill.sh
-./tools/v2/data_lifecycle_drill.sh
-./tools/v2/key_rotation_drill.sh
-./tools/v2/entitlement_quota_drill.sh
-uv run --project backend python tools/v2/run_load_probe.py --release-tier internal_alpha --output artifacts/v2-final/load/results.json
-uv run --project backend python tools/v2/run_slo_probe.py --release-tier internal_alpha --output artifacts/v2-final/slo/results.json
+./tools/v2/backup_restore_drill.sh --output-root "$V2_EVIDENCE_STAGING_ROOT/local-recovery"
+./tools/v2/data_lifecycle_drill.sh --output-root "$V2_EVIDENCE_STAGING_ROOT/local-lifecycle"
+./tools/v2/key_rotation_drill.sh --output-root "$V2_EVIDENCE_STAGING_ROOT/local-security"
+./tools/v2/entitlement_quota_drill.sh --output-root "$V2_EVIDENCE_STAGING_ROOT/local-entitlement"
+uv run --project backend python tools/v2/run_load_probe.py --release-tier internal_alpha --output "$V2_EVIDENCE_STAGING_ROOT/local-load/results.json"
+uv run --project backend python tools/v2/run_slo_probe.py --release-tier internal_alpha --output "$V2_EVIDENCE_STAGING_ROOT/local-slo/results.json"
 (cd backend && uv run pytest tests/integration/test_release_migration_compatibility.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
 ```
 
-Expected: security tests pass; recovery proof under `artifacts/v2-final/recovery/` shows the same thread resumes after Agent Server and database restoration; lifecycle proof verifies export hashes, online-system deletion completion by day 30 and irreversible backup-set propagation by day 35 through a failed restore/list attempt for the deleted tenant; SLO results satisfy ADR 0006; no artifact contains a secret.
+Expected: security tests pass; staged recovery proof shows the same thread resumes after Agent Server and database restoration; lifecycle proof verifies export hashes, online-system deletion completion by day 30 and irreversible backup-set propagation by day 35 through a failed restore/list attempt for the deleted tenant; SLO results satisfy ADR 0006; no staged artifact contains a secret.
 
 These local results are development/preflight evidence only. They cannot satisfy hosted production recovery, real-user isolation, load or SLO requirements.
 
 - [ ] **Step 5: Prove parity, then remove the exact V1 paths**
 
-Before deletion, obtain the independently signed V1 data snapshot/zero-data attestation and verify both custodian identities against `deploy/attestation-policy.yaml`; verification output is part of the immutable evidence. Then run `uv run --project backend python tools/v2/build_legacy_inventory.py --v1-ref a44a7d24ba5ec02e784522fb684bb39b99802773 --prototype-ref b583e5a5fbdf7fc0df99e8182d1701c8df1f4082 --output artifacts/v2-final/pre-deletion-inventory.json`. Map every generated business rule/golden case, V1 table and V1 path. Table evidence records authoritative source/target row counts and checksums or a signed retired decision. Keep V1 available through the archived branch/tag, not in the V2 Final production tree.
+Before deletion, obtain the independently signed V1 data snapshot/zero-data attestation under the external staged-evidence root and verify both custodian identities against `deploy/attestation-policy.yaml`; verification output is part of the immutable evidence. Then run `uv run --project backend python tools/v2/build_legacy_inventory.py --v1-ref a44a7d24ba5ec02e784522fb684bb39b99802773 --prototype-ref b583e5a5fbdf7fc0df99e8182d1701c8df1f4082 --output "$V2_EVIDENCE_STAGING_ROOT/pre-deletion-inventory.json"`. Map every generated business rule/golden case, V1 table and V1 path. Table evidence records authoritative source/target row counts and checksums or a signed retired decision. Keep V1 available through the archived branch/tag, not in the V2 Final production tree.
 
 Run the two independent checks over the same canonical attestation and then verify role separation:
 
 ```bash
-cosign verify-blob --output json --bundle artifacts/v2-final/v1-data-attestation.data-custodian.sigstore.json --certificate-identity-regexp "$(yq '.data_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.data_custodian.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/v1-data-attestation.json > artifacts/v2-final/v1-data-attestation.data-custodian-verification.json
-cosign verify-blob --output json --bundle artifacts/v2-final/v1-data-attestation.platform-custodian.sigstore.json --certificate-identity-regexp "$(yq '.platform_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.platform_custodian.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/v1-data-attestation.json > artifacts/v2-final/v1-data-attestation.platform-custodian-verification.json
-uv run --project backend python tools/v2/verify_attestation_identities.py --policy deploy/attestation-policy.yaml --data-verification artifacts/v2-final/v1-data-attestation.data-custodian-verification.json --platform-verification artifacts/v2-final/v1-data-attestation.platform-custodian-verification.json --forbid-roles release_signer,release_reviewer,implementer,migration_process --output artifacts/v2-final/v1-data-attestation.identity-verdict.json
+cosign verify-blob --output json --bundle "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.data-custodian.sigstore.json" --certificate-identity-regexp "$(yq '.data_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.data_custodian.issuer' deploy/attestation-policy.yaml)" "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.json" > "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.data-custodian-verification.json"
+cosign verify-blob --output json --bundle "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.platform-custodian.sigstore.json" --certificate-identity-regexp "$(yq '.platform_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.platform_custodian.issuer' deploy/attestation-policy.yaml)" "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.json" > "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.platform-custodian-verification.json"
+uv run --project backend python tools/v2/verify_attestation_identities.py --policy deploy/attestation-policy.yaml --data-verification "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.data-custodian-verification.json" --platform-verification "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.platform-custodian-verification.json" --forbid-roles release_signer,release_reviewer,implementer,migration_process --output "$V2_EVIDENCE_STAGING_ROOT/v1-data-attestation.identity-verdict.json"
 ```
 
 The verifier fails unless the certificate identities are distinct, policy-trusted and different from every forbidden role. A missing database, unsigned attestation, self-signature or migration/implementer/release identity blocks deletion.
 
-The parity verifier first checks that the map covers every hashed pre-deletion inventory record, then validates dispositions. Run it before deletion. Only after it exits 0, delete exactly the paths listed in this task. Run frontend typecheck/build and generate the separate immutable `post-deletion-survivor-scan.json`; verify it against the frozen pre-deletion hash to prove no surviving source/test imports a removed module and all mapped V2 evidence remains available.
+The parity verifier first checks that the map covers every hashed staged pre-deletion inventory record, then validates dispositions. Run it before deletion. Only after it exits 0, delete exactly the paths listed in this task. Run frontend typecheck/build and generate the separate immutable `$V2_EVIDENCE_STAGING_ROOT/post-deletion-survivor-scan.json`; verify it against the frozen pre-deletion hash to prove no surviving source/test imports a removed module and all mapped V2 evidence remains available.
 
 - [ ] **Step 6: Create and review the clean immutable release-source candidate, then attest**
 
@@ -1383,7 +1412,12 @@ After parity deletion and all Task 14 code/tooling/config changes are ready, run
 ./tools/v2/secret_scan.sh
 uv run --project backend python tools/v2/verify_legacy_parity.py --check
 (cd frontend && npm run typecheck && npm run build)
-./tools/v2/stage_release_source.sh --manifest deploy/release-source-manifest.txt --note docs/v2/implementation/2026-07-13-task-14-production-gate.md --report artifacts/v2-final/deployment/staged-source.json
+./tools/v2/stage_release_source.sh --prepare-index --policy deploy/release-source-policy.json --note docs/v2/implementation/2026-07-13-task-14-production-gate.md --report "$V2_EVIDENCE_STAGING_ROOT/staged-source.json"
+uv run --project backend python tools/v2/build_release_source_manifest.py --from-index --policy deploy/release-source-policy.json --write deploy/release-source-manifest.txt
+git add deploy/release-source-manifest.txt
+uv run --project backend python tools/v2/build_release_source_manifest.py --check-index deploy/release-source-manifest.txt --policy deploy/release-source-policy.json
+./tools/v2/stage_release_source.sh --verify-index --manifest deploy/release-source-manifest.txt --note docs/v2/implementation/2026-07-13-task-14-production-gate.md --report "$V2_EVIDENCE_STAGING_ROOT/staged-source.json"
+uv run --project backend python tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase candidate --task 14 --receipt artifacts/v2-final/pre-red/task-14.json --check-index
 git commit -m "chore: prepare v2 release candidate"
 test -z "$(git status --porcelain)"
 ```
@@ -1397,7 +1431,8 @@ Write the reviewed release-source candidate SHA to `artifacts/v2-final/deploymen
 ```bash
 ./tools/v2/verify_hosted_release.sh --preflight --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/preflight.json
 ./tools/v2/deployment_exit_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/exit-drill.json
-git add docs/v2/adr/0008-production-deployment-profile.md docs/v2/adr/README.md docs/v2/README.md artifacts/v2-final/deployment/source-sha.txt artifacts/v2-final/deployment/preflight.json artifacts/v2-final/deployment/exit-drill.json docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add docs/v2/adr/0008-production-deployment-profile.md docs/v2/adr/README.md docs/v2/README.md docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add -f artifacts/v2-final/deployment/source-sha.txt artifacts/v2-final/deployment/preflight.json artifacts/v2-final/deployment/exit-drill.json
 git commit -m "docs: accept v2 production deployment profile"
 ```
 
@@ -1408,7 +1443,8 @@ git rev-parse HEAD > artifacts/v2-final/deployment/governance-candidate-sha.txt
 uv run --project backend python tools/v2/transition_normative_baseline.py --current-manifest docs/v2/normative-baseline.json --candidate-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --promote docs/v2/adr/0008-production-deployment-profile.md --review-note docs/v2/implementation/2026-07-13-task-14-production-gate.md --output docs/v2/normative-baseline.json
 uv run --project backend python tools/v2/build_requirement_registry.py --manifest docs/v2/normative-baseline.json --registry docs/v2/requirements-registry.yaml --transition-gate ADR-0008 --check
 uv run --project backend python tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase governance-transition --require-normative-sha "$(jq -er '.normative_sha' docs/v2/normative-baseline.json)"
-git add docs/v2/normative-baseline.json docs/v2/requirements-registry.yaml artifacts/v2-final/deployment/governance-candidate-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add docs/v2/normative-baseline.json docs/v2/requirements-registry.yaml docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add -f artifacts/v2-final/deployment/governance-candidate-sha.txt
 git commit -m "docs: attest accepted v2 deployment baseline"
 ```
 
@@ -1417,8 +1453,8 @@ Hosted release proof is forbidden before that reviewed governance candidate, new
 After the reviewed governance candidate is accepted, deploy the signed Task 13 baseline image to that accepted non-production hosted profile and execute the explicitly deferred browser RED:
 
 ```bash
-./tools/v2/verify_hosted_release.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)"
-./tools/v2/verify_production_alerts.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)" --output artifacts/v2-final/alerts/hosted-red.json
+./tools/v2/verify_hosted_release.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt")" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")"
+./tools/v2/verify_production_alerts.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt")" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")" --output artifacts/v2-final/alerts/hosted-red.json
 ```
 
 The commands must reach a healthy public HTTPS deployment. Browser RED collects `hosted-production.spec.ts` and `hosted-security.spec.ts` on both named desktop/Pixel projects and fails on the intentionally missing release-candidate proof/enforcement assertion. Alert RED independently exhausts LangSmith and Langfuse delivery and fails because the baseline monitoring stack does not produce the required rule/receipt. Unknown project, localhost/private/tunnel URL, credential skip, connection refusal, zero collected tests or failure to inject the canary is not RED evidence. The same browser and alert cases run GREEN only in Step 8 against `SOURCE_SHA`.
@@ -1428,10 +1464,10 @@ The commands must reach a healthy public HTTPS deployment. Browser RED collects 
 Run:
 
 ```bash
-./tools/v2/build_production_images.sh --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)"
+./tools/v2/build_production_images.sh --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --output-digest artifacts/v2-final/deployment/candidate-digest.txt
 ./tools/v2/probe_production_stack.sh --profile hosted-production --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)"
 ./tools/v2/verify_hosted_release.sh --run --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
-./tools/v2/upgrade_rollback_drill.sh --profile hosted-production --baseline-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)" --candidate-source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)"
+./tools/v2/upgrade_rollback_drill.sh --profile hosted-production --baseline-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")" --candidate-source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)"
 ./tools/v2/backup_restore_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/data_lifecycle_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/entitlement_quota_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
@@ -1472,9 +1508,9 @@ Every command writes an immutable, secret-redacted log under `artifacts/v2-final
 The Task 14 GREEN evidence must also execute every declared Task 14 test path by name, with machine-readable reports proving collection, execution, pass count and zero skips/deselections:
 
 ```bash
-(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py tests/security/test_internal_alpha_boundary.py tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py tests/integration/test_release_migration_compatibility.py -q --junitxml=../artifacts/v2-final/test-logs/task-14-backend-green.xml)
+(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py tests/security/test_internal_alpha_boundary.py tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/contract/test_baseline_attestation.py tests/contract/test_staged_evidence_import.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py tests/integration/test_release_migration_compatibility.py -q --junitxml=../artifacts/v2-final/test-logs/task-14-backend-green.xml)
 (cd frontend && PLAYWRIGHT_JUNIT_OUTPUT_FILE=../artifacts/v2-final/test-logs/task-14-hosted-green.xml npx playwright test tests/e2e/hosted-production.spec.ts tests/e2e/hosted-security.spec.ts --project=hosted-production-desktop --project=hosted-production-pixel-7 --reporter=line,junit)
-uv run --project backend python tools/v2/verify_task14_test_report.py --backend-junit artifacts/v2-final/test-logs/task-14-backend-green.xml --hosted-junit artifacts/v2-final/test-logs/task-14-hosted-green.xml --expected-backend-tests tests/security/test_protocol_secret_leak.py,tests/security/test_cross_tenant_matrix.py,tests/security/test_internal_alpha_boundary.py,tests/contract/test_legacy_parity.py,tests/contract/test_requirement_evidence.py,tests/contract/test_authority_consistency.py,tests/contract/test_alert_rules.py,tests/contract/test_release_source_manifest.py,tests/performance/test_slo_contract.py,tests/performance/test_concurrency_stream_load.py,tests/integration/test_release_migration_compatibility.py --expected-frontend-files frontend/tests/e2e/hosted-production.spec.ts,frontend/tests/e2e/hosted-security.spec.ts --expected-projects hosted-production-desktop,hosted-production-pixel-7
+uv run --project backend python tools/v2/verify_task14_test_report.py --backend-junit artifacts/v2-final/test-logs/task-14-backend-green.xml --hosted-junit artifacts/v2-final/test-logs/task-14-hosted-green.xml --expected-backend-tests tests/security/test_protocol_secret_leak.py,tests/security/test_cross_tenant_matrix.py,tests/security/test_internal_alpha_boundary.py,tests/contract/test_legacy_parity.py,tests/contract/test_requirement_evidence.py,tests/contract/test_authority_consistency.py,tests/contract/test_alert_rules.py,tests/contract/test_release_source_manifest.py,tests/contract/test_baseline_attestation.py,tests/contract/test_staged_evidence_import.py,tests/performance/test_slo_contract.py,tests/performance/test_concurrency_stream_load.py,tests/integration/test_release_migration_compatibility.py --expected-frontend-files frontend/tests/e2e/hosted-production.spec.ts,frontend/tests/e2e/hosted-security.spec.ts --expected-projects hosted-production-desktop,hosted-production-pixel-7
 ```
 
 `verify_task14_test_report.py` is a declared release verifier and fails on missing collection, deselection, skip, zero tests, wrong project, connection/setup-only failure or a report not bound to `SOURCE_SHA` and the accepted governance SHA.
@@ -1486,10 +1522,12 @@ Generate `requirements-evidence.json` from the complete requirement registry plu
 Run:
 
 ```bash
+uv run --project backend python tools/v2/import_staged_evidence.py --root "$V2_EVIDENCE_STAGING_ROOT" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --output-root artifacts/v2-final --manifest artifacts/v2-final/pre-source-evidence-manifest.json
 (cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_requirement_evidence.py -q)
 uv run --project backend python tools/v2/verify_requirements.py --check --phase pre_review
 uv run --project backend python tools/v2/verify_source_identity.py --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)"
-git add artifacts/v2-final docs/v2/implementation docs/v2/runbooks docs/v2/adr/0008-production-deployment-profile.md
+git add -f artifacts/v2-final
+git add docs/v2/implementation docs/v2/runbooks docs/v2/adr/0008-production-deployment-profile.md
 git commit -m "docs: stage v2 release evidence"
 test -z "$(git status --porcelain)"
 ```
@@ -1506,7 +1544,8 @@ After both approvals, keep `requirements-evidence.json` byte-for-byte immutable.
 uv run --project backend python tools/v2/build_final_review_attestation.py --evidence-sha "$(git rev-parse HEAD)" --requirements-evidence artifacts/v2-final/requirements-evidence.json --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --review-note docs/v2/implementation/final-independent-review.md --output artifacts/v2-final/final-review-attestation.json
 cosign sign-blob --yes --bundle artifacts/v2-final/final-review-attestation.sigstore.json artifacts/v2-final/final-review-attestation.json
 cosign verify-blob --bundle artifacts/v2-final/final-review-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_reviewer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_reviewer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/final-review-attestation.json
-git add docs/v2/implementation/final-independent-review.md artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json
+git add docs/v2/implementation/final-independent-review.md
+git add -f artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json
 git commit -m "docs: attest v2 final independent review"
 ```
 
@@ -1527,9 +1566,9 @@ uv run --project backend python tools/v2/verify_source_identity.py --source-sha 
 (cd backend && EVIDENCE_PHASE=post_review uv run pytest tests/contract/test_requirement_evidence.py -q)
 uv run --project backend python tools/v2/verify_requirements.py --check --phase post_review
 ./tools/v2/secret_scan.sh
-git diff --name-only "$EVIDENCE_SHA"..HEAD | LC_ALL=C sort > /tmp/v2-final-actual-paths.txt
-printf '%s\n' artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json docs/v2/implementation/final-independent-review.md | LC_ALL=C sort > /tmp/v2-final-expected-paths.txt
-diff -u /tmp/v2-final-expected-paths.txt /tmp/v2-final-actual-paths.txt
+ACTUAL_PATHS="$(git diff-tree --no-commit-id --name-only --no-renames -r HEAD | LC_ALL=C sort)"
+EXPECTED_PATHS="$(printf '%s\n' artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json docs/v2/implementation/final-independent-review.md | LC_ALL=C sort)"
+test "$ACTUAL_PATHS" = "$EXPECTED_PATHS"
 test -z "$(git status --porcelain)"
 ```
 
