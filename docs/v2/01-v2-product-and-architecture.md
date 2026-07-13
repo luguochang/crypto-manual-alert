@@ -1,6 +1,6 @@
 # Crypto Intelligence Agent V2 产品与架构设计
 
-> 状态：Proposed，待用户批准
+> 分类：Approved normative（2026-07-13 用户批准；冲突解释以 `13`/`14` 为准）
 >
 > 日期：2026-07-12
 >

@@ -12,6 +12,7 @@
 
 ## Execution Rules
 
+- Task 0 is the bootstrap exception to the later-task note and preexisting-`NORMATIVE_SHA` rules: its review requests identify the proposed normative candidate SHA, its three reviews run sequentially as specified below, and its manifest-only commit is the Task 0 attestation. Task 0B and Tasks 1-14 follow the normal implementation-note/candidate/attestation protocol.
 - Do not copy the prototype wholesale. Read the prototype only to migrate a named domain rule, test or presentation component.
 - Do not implement more than one task before its tests and two reviews are complete.
 - Do not use a fixture to prove a requirement that says real provider, real database, real browser or real observability.
@@ -20,7 +21,7 @@
 - Each task uses a realizable two-commit protocol. First create a Conventional **candidate commit** containing GREEN code/tests and an implementation-note draft. Reviewers inspect that immutable candidate SHA; fixes create new candidate commits and are re-reviewed. After specification approval and then code-quality approval, create a `docs: attest task NN reviews` **attestation-only commit** that changes only the implementation note. The task is incomplete until this attestation exists.
 - The note draft contains exact RED command/output/exit code, GREEN command/output/test count, implementer agent ID, base SHA and real-evidence limitations. The attestation adds the final reviewed candidate SHA, specification reviewer/result/findings/disposition and code-quality reviewer/result/findings/disposition. Code-quality review cannot start before specification approval, and no production/test/config file may change in the attestation commit.
 - Every test file listed by a task must be executed once in RED for the intended missing behavior, including integration/real/browser tests. If external credentials are unavailable, collection/import must still fail for the intended missing implementation before credential/skip logic; a skip is not RED.
-- Before each task's RED command, the controller assigns one accountable implementation role and concrete Agent ID to every requirement ID owned by that task, writes those assignments into the note draft/requirement registry, and rejects placeholders or catch-all ownership. Every candidate/reviewer request records the immutable `NORMATIVE_SHA` from Task 0.
+- Before each task's RED command, the controller uses the Task 0B structured registry tool to assign one accountable implementation role and concrete Agent ID to every requirement ID owned by that task, verifies source hashes/coverage, and writes an immutable pre-RED receipt containing the registry hash, owner assignments, timestamp and `NORMATIVE_SHA`. The task candidate stages the structured registry update, receipt and note draft. Placeholders, catch-all ownership or a RED timestamp preceding the receipt are rejected.
 
 ## Task 0: Commit the Immutable Normative Baseline
 
@@ -57,11 +58,48 @@ Run `git diff --check`, the forbidden-placeholder scan, secret-pattern scan and 
 
 - [ ] **Step 2: Create and review the normative candidate**
 
-Stage every reviewed normative V2 document explicitly, never with `git add -A`, and commit `docs: finalize v2 normative baseline`. Dispatch fresh specification, plan-executability and official-framework reviewers against that exact candidate SHA. Any Critical/Important finding creates a new documentation candidate and repeats all three reviews.
+Stage every reviewed V2 baseline document explicitly, never with a bulk working-tree add, and commit `docs: finalize v2 normative baseline`. Dispatch a fresh specification/authority reviewer against that exact proposed normative candidate SHA; fix findings through a new candidate and repeat until approved. Then dispatch the plan-executability reviewer against the approved candidate; any finding creates a new candidate and restarts specification review before plan review. Only after both approve, dispatch the official-framework reviewer; any finding again creates a new candidate and restarts all three reviews in order. Task 0 is complete only at zero Critical/Important findings from the sequential chain.
 
 - [ ] **Step 3: Attest the immutable baseline**
 
-After zero Critical/Important findings, generate `docs/v2/normative-baseline.json` containing schema version, the reviewed candidate SHA as `NORMATIVE_SHA`, the exact normative file allowlist, each file SHA-256, reviewer identities/results and timestamp. Commit only that manifest as `docs: attest v2 normative baseline`, verify a clean tree, and require every later implementation note, review request and release-evidence entry to reference `NORMATIVE_SHA`. Normative changes after this point require a new candidate, three fresh reviews, a new manifest and revalidation of affected implementation tasks.
+After zero Critical/Important findings, generate `docs/v2/normative-baseline.json` containing schema version, the reviewed candidate SHA as `NORMATIVE_SHA`, every reviewed candidate file with one explicit classification (`approved_normative`, `verified_evidence_index`, `informative`, `superseded`, or `proposed_gate`), replacement/priority metadata, each candidate-file SHA-256, all three reviewer identities/results and timestamp. The manifest explicitly excludes itself from its file-hash set to avoid a self-hash cycle. Commit only that manifest as `docs: attest v2 normative baseline`, verify a clean tree, and require every later implementation note, review request and release-evidence entry to reference `NORMATIVE_SHA`. Normative changes after this point require a new candidate, the full sequential review chain, a new manifest and revalidation of affected implementation tasks.
+
+## Task 0B: Bootstrap the Requirement Registry Before Any Product RED
+
+**Files:**
+- Create: `tools/v2/build_requirement_registry.py`
+- Create: `tools/v2/verify_requirements.py`
+- Create: `tools/v2/tests/test_requirement_registry.py`
+- Create: `docs/v2/requirements-registry.yaml`
+- Create: `docs/v2/implementation/2026-07-13-task-00b-requirements.md`
+
+- [ ] **Step 1: Write the registry/bootstrap tests**
+
+Tests load `normative-baseline.json`, require every `approved_normative` statement to have one stable versioned ID/source anchor/content hash/task owner, reject requirements extracted from informative/evidence/superseded files, reject missing child entries/catch-all mappings, and verify structured owner assignment plus pre-RED receipt generation.
+
+- [ ] **Step 2: Run RED**
+
+Run: `python3.12 tools/v2/tests/test_requirement_registry.py`
+
+Expected: FAIL because the generator, verifier and seed registry do not exist. A parse error or unavailable third-party dependency is not acceptable; before Task 1 dependencies exist, `requirements-registry.yaml` uses JSON-compatible YAML and the bootstrap tool parses it with Python 3.12's standard `json` module rather than ad hoc text manipulation.
+
+- [ ] **Step 3: Generate the complete seed and prove pre-RED assignment**
+
+Generate `requirements-registry.yaml` only from manifest files classified `approved_normative` or accepted ADR entries. Every source block has a stable ID, source/content hash and owning Task 1-14 before implementation starts. Run a dry assignment for Task 1 with a disposable test Agent ID, generate a receipt, verify it, then reset only that disposable assignment through the tested structured command so the committed seed has roles/tasks but no fake concrete implementer.
+
+Run:
+
+```bash
+python3.12 tools/v2/tests/test_requirement_registry.py
+python3.12 tools/v2/build_requirement_registry.py --manifest docs/v2/normative-baseline.json --registry docs/v2/requirements-registry.yaml --check
+python3.12 tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase bootstrap
+```
+
+- [ ] **Step 4: Create the candidate commit, run both reviews, then attest**
+
+Commit: `build: bootstrap v2 requirement registry`
+
+For every later Task N, before its first RED run execute the structured `--assign-owner` and `--phase pre-red --task N --receipt artifacts/v2-final/pre-red/task-N.json` commands. The verifier must exit 0 before RED; the candidate later includes the same registry hash/receipt and rejects reordered timestamps or changed ownership.
 
 ## Task 1: Dependency Lock and Agent Server Bootstrap
 
@@ -636,7 +674,7 @@ Commit: `feat: add product persistence and notification outbox`
 
 - [ ] **Step 1: Write tenant-scoped API tests**
 
-Test workspace membership/list/switch authorization, run list/detail, interrupt inbox, feedback, command admission, `cancel_run`, `cancel_task`, health/readiness and cross-tenant 404 behavior. Product endpoints use `/app/*` and do not shadow Agent Server system routes. `test_agent_server_protocol.py` loads the live Agent Server OpenAPI schema and asserts official assistants/threads/runs plus `POST /threads/{thread_id}/commands` and `POST /threads/{thread_id}/stream/events`; Product additions do not redefine them. Method-specific Protocol-shaped `run.start`, `input.respond` and batch respond validate against locked schemas. The compatibility test proves Protocol 0.0.18 types declare `state.fork` while Agent Server 0.11.0 returns `unknown_command`; Product fork admission must therefore map a checkpoint to a new official Run using SDK `forkFrom`/`config.configurable.checkpoint_id`, not send `state.fork`. Likewise Protocol `run.start` has no `durability` field. The Product dispatcher translates admitted submit/resume/fork commands into official Python Runs API calls such as `await client.runs.create(thread_id, assistant_id, input=run_input, durability="sync")`; resume uses the official `command={"resume": ..., "update": ..., "goto": ...}` parameter. Tests prove `sync` and `exit` are expressible and server-effective through the Runs API adapter, never inside Protocol params. Cancellation validates against Product schemas and official `langgraph-sdk` Runs cancel APIs because it is not in the Protocol v2 Command union. Write the hermetic `probe_product_api.sh` harness in this step so RED can start foundations/integration runtime and assert test failures rather than connection failures.
+Test workspace membership/list/switch authorization, run list/detail, interrupt inbox, feedback, command admission, `cancel_run`, `cancel_task`, health/readiness and cross-tenant 404 behavior. Product endpoints use `/app/*` and do not shadow Agent Server system routes. `test_agent_server_protocol.py` loads the live Agent Server OpenAPI schema and asserts official assistants/threads/runs plus `POST /threads/{thread_id}/commands` and `POST /threads/{thread_id}/stream/events`; Product additions do not redefine them. Method-specific Protocol-shaped `run.start`, `input.respond` and batch respond validate against locked schemas. The compatibility test proves Protocol 0.0.18 types declare `state.fork` while Agent Server 0.11.0 returns `unknown_command`; Product fork admission must therefore map a checkpoint to a new official Run, not send `state.fork`. React/JS `forkFrom` becomes Protocol `config.configurable.checkpoint_id`, but the Python `langgraph-sdk==0.4.2` Runs client requires the separate keyword-only `checkpoint_id=`. The dispatcher explicitly lifts the admitted config value and calls `await client.runs.create(thread_id, assistant_id, input=run_input, checkpoint_id=checkpoint_id, durability="sync", metadata=metadata)`; the outbound Runs REST JSON must contain top-level `"checkpoint_id"`. Retaining the config value for correlation is optional and cannot replace the top-level argument. Likewise Protocol `run.start` has no `durability` field. Resume uses the official `command={"resume": ..., "update": ..., "goto": ...}` parameter. Tests prove `sync` and `exit` are expressible and server-effective through the Runs API adapter, never inside Protocol params. Cancellation validates against Product schemas and official `langgraph-sdk` Runs cancel APIs because it is not in the Protocol v2 Command union. Write the hermetic `probe_product_api.sh` harness in this step so RED can start foundations/integration runtime and assert test failures rather than connection failures.
 
 `probe_protocol_v2.mjs` opens a real stream with the React root channel set including `checkpoints`, submits single and batched interrupt responses, verifies the locked `state.fork` rejection, reconnects with `since`, and proves replay/ordering. `test_agent_server_interrupt_routing.py` runs root and approved nested-subagent interrupts through the live Product admission and Agent Server paths, verifies namespace/checkpoint preservation, atomic respond-plus-allowed-state-update, restart replay and one-winner idempotency. `test_run_durability.py` creates `sync` and `exit` Runs through Product admission and the official Runs REST adapter, waits for committed state, restarts the integration Agent Server, reconnects and resumes the same Thread without losing the acknowledged Product/runtime state. The Product API returns Protocol-shaped success data expected by `AgentServerAdapter.send()` even though dispatch uses Runs REST internally. Both known Protocol/OpenAPI exceptions are accepted only if live capability probes pass and their exception documents record affected versions, validator rules, regression tests and removal conditions.
 
@@ -782,7 +820,7 @@ Expected: FAIL on the first inherited/missing exact dependency or because runtim
 
 - [ ] **Step 3: Implement same-origin BFF and one root stream**
 
-Auth.js uses a standard OIDC provider in production and a separately gated development provider only outside production. Both BFF proxies require a server-side session, resolve an allowed workspace membership and sign a rotating-key, short-lived internal JWT for backend calls; the browser never receives model/provider credentials or chooses authority claims. Browser reads/events connect through same-origin `/api/agent`; Product history and command admission use `/api/product`. `product-command-adapter.ts` implements the official `AgentServerAdapter` structural contract: `openEventStream/getState/getHistory` delegate to the Agent Server proxy, while durable command `send()` paths first call Product command admission and return only the official dispatched response. Admitted fork never emits the unsupported Protocol `state.fork`; it sends the selected checkpoint to Product admission, whose backend creates a new lineage Run through official `forkFrom`/checkpoint configuration and Runs REST. History reads use the official Thread history API. The root product hook exposes `threadId`, admitted submit/respond/respondAll/cancelRun/cancelTask/fork/retry, disconnect, pending interrupts and named live execution fields; it does not expose direct `stop()`, SDK `multitaskStrategy="enqueue"` or the entire raw Graph state. When a Run is active, `durable-submission-queue.ts` writes the next submit to Product command admission immediately and waits for the backend dispatcher instead of invoking the SDK-local in-memory queue. Product components consume typed selectors/View Models.
+Auth.js uses a standard OIDC provider in production and a separately gated development provider only outside production. Both BFF proxies require a server-side session, resolve an allowed workspace membership and sign a rotating-key, short-lived internal JWT for backend calls; the browser never receives model/provider credentials or chooses authority claims. Browser reads/events connect through same-origin `/api/agent`; Product history and command admission use `/api/product`. `product-command-adapter.ts` implements the official `AgentServerAdapter` structural contract: `openEventStream/getState/getHistory` delegate to the Agent Server proxy, while durable command `send()` paths first call Product command admission and return only the official dispatched response. Admitted fork never emits the unsupported Protocol `state.fork`; React `submit(input, { forkFrom: checkpointId })` semantics are normalized into Product admission with the selected checkpoint. The backend lifts `config.configurable.checkpoint_id` to the Python Runs REST client's top-level `checkpoint_id=` argument and creates a new lineage Run; frontend code never sends `forkFrom` to the Python client. History reads use the official Thread history API. The root product hook exposes `threadId`, admitted submit/respond/respondAll/cancelRun/cancelTask/fork/retry, disconnect, pending interrupts and named live execution fields; it does not expose direct `stop()`, SDK `multitaskStrategy="enqueue"` or the entire raw Graph state. When a Run is active, `durable-submission-queue.ts` writes the next submit to Product command admission immediately and waits for the backend dispatcher instead of invoking the SDK-local in-memory queue. Product components consume typed selectors/View Models.
 
 Replace the inherited V1 Playwright stack in the same task and define the base `fixture-desktop` and `fixture-pixel-7` projects with exact `testMatch` boundaries. The fixture profile uses deterministic V2-only market/search/model/notification adapters and a test-only scenario-reset route that is impossible to register outside `local/test`. The V2 config starts PostgreSQL, Redis, Agent Server, workers and Next.js through `tools/v2/start_stack.sh`; it must never invoke `tools/local_stack` or seed V1 SQLite data.
 
@@ -1112,6 +1150,8 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `backend/tests/contract/test_legacy_parity.py`
 - Create: `backend/tests/contract/test_requirement_evidence.py`
 - Create: `backend/tests/contract/test_authority_consistency.py`
+- Create: `backend/tests/contract/test_alert_rules.py`
+- Create: `backend/tests/contract/test_release_source_manifest.py`
 - Create: `backend/tests/performance/test_slo_contract.py`
 - Create: `backend/tests/performance/test_concurrency_stream_load.py`
 - Create after baseline proof: `backend/alembic/versions/0002_release_metadata.py`
@@ -1130,13 +1170,17 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `tools/v2/secret_scan.sh`
 - Create: `tools/v2/run_slo_probe.py`
 - Create: `tools/v2/verify_legacy_parity.py`
-- Create: `tools/v2/build_requirement_registry.py`
-- Create: `tools/v2/verify_requirements.py`
+- Modify: `tools/v2/build_requirement_registry.py`
+- Modify: `tools/v2/verify_requirements.py`
 - Create: `tools/v2/verify_source_identity.py`
 - Create: `tools/v2/verify_task14_test_report.py`
+- Create: `tools/v2/verify_production_alerts.sh`
+- Create: `tools/v2/verify_attestation_identities.py`
+- Create: `tools/v2/build_final_review_attestation.py`
 - Create: `tools/v2/stage_release_source.sh`
+- Create: `tools/v2/build_release_source_manifest.py`
 - Create: `docs/v2/legacy-parity-map.yaml`
-- Create: `docs/v2/requirements-registry.yaml`
+- Modify: `docs/v2/requirements-registry.yaml`
 - Create: `artifacts/v2-final/requirements-evidence.json`
 - Create: `artifacts/v2-final/final-review-attestation.json`
 - Create: `artifacts/v2-final/final-review-attestation.sigstore.json`
@@ -1145,6 +1189,7 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `artifacts/v2-final/deployment/.gitkeep`
 - Create: `artifacts/v2-final/deployment/baseline-attestation.json`
 - Create: `artifacts/v2-final/deployment/baseline-attestation.sigstore.json`
+- Create: `artifacts/v2-final/deployment/baseline-verification.json`
 - Create: `artifacts/v2-final/deployment/staged-source.json`
 - Create: `artifacts/v2-final/deployment/governance-candidate-sha.txt`
 - Create: `artifacts/v2-final/deployment/preflight.json`
@@ -1154,11 +1199,15 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 - Create: `artifacts/v2-final/slo/.gitkeep`
 - Create: `artifacts/v2-final/load/.gitkeep`
 - Create: `artifacts/v2-final/security/.gitkeep`
+- Create: `artifacts/v2-final/alerts/.gitkeep`
 - Create: `artifacts/v2-final/pre-deletion-inventory.json`
 - Create: `artifacts/v2-final/post-deletion-survivor-scan.json`
 - Create: `artifacts/v2-final/v1-data-attestation.json`
 - Create: `artifacts/v2-final/v1-data-attestation.data-custodian.sigstore.json`
 - Create: `artifacts/v2-final/v1-data-attestation.platform-custodian.sigstore.json`
+- Create: `artifacts/v2-final/v1-data-attestation.data-custodian-verification.json`
+- Create: `artifacts/v2-final/v1-data-attestation.platform-custodian-verification.json`
+- Create: `artifacts/v2-final/v1-data-attestation.identity-verdict.json`
 - Create: `frontend/tests/e2e/hosted-production.spec.ts`
 - Create: `frontend/tests/e2e/hosted-security.spec.ts`
 - Modify: `frontend/playwright.config.ts`
@@ -1225,34 +1274,38 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 
 `test_legacy_parity.py` requires three machine-readable sections: every retained V1 business rule/golden/presentation behavior maps to a named V2 test or explicit `retired` rationale; every V1 table maps to a V2 table or legacy-readonly decision with source/target row counts and checksums; every V1 path maps to migrate/delete/archive with verification. `build_legacy_inventory.py` generates the authoritative source inventory from full V1 commit `a44a7d24ba5ec02e784522fb684bb39b99802773`, prototype commit `b583e5a5fbdf7fc0df99e8182d1701c8df1f4082`, tracked paths/tests/schema definitions and the authoritative V1 data snapshot. `V1_DATA_DIR` is required when data exists; otherwise a signed zero-data attestation identifying searched hosts/paths/owners is required. Missing databases cannot be self-declared `no-data` by the migration script.
 
-`build_requirement_registry.py` extracts every normative statement from `03-v2-delivery-checklist.md`, approved decisions D01-D15 in `09-review-packet-and-decisions.md`, `11-core-object-access-recovery-contract.md`, `12-production-proof-slo-and-lifecycle.md`, Accepted ADR 0001-0007, ADR 0008 gates, `13-v2-final-rebuild-spec.md` and the complete Task 0-14 plus Final Completion Audit body of this plan. `requirements-registry.yaml` gives each extracted statement a stable versioned requirement ID, source anchor/content hash, accountable role and concrete Agent ID assigned before RED, implementation task/slice, RED command/log hash/exit code/intended-failure classification, GREEN command/log hash/test count, final proof artifact/environment, reviewer dispositions, `NORMATIVE_SHA` and applicable `SOURCE_SHA`. The generator/verifier fails when a normative source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
+Task 14 extends the Task 0B registry/evidence fields but never recreates requirement IDs retroactively. `build_requirement_registry.py` reads the complete source set exclusively from `normative-baseline.json`: every file classified `approved_normative` plus ADR entries that have reached Accepted; informative, verified-evidence, superseded and still-proposed sources are explicitly excluded or referenced only as supporting evidence. `requirements-registry.yaml` gives each normative statement a stable versioned requirement ID, source anchor/content hash, accountable role and concrete Agent ID assigned before RED, implementation task/slice, RED command/log hash/exit code/intended-failure classification, GREEN command/log hash/test count, final proof artifact/environment, reviewer dispositions, `NORMATIVE_SHA` and applicable `SOURCE_SHA`. The generator/verifier fails when a normative source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
 
 `test_requirement_evidence.py` supports explicit `EVIDENCE_PHASE=pre_review|post_review` and requires complete registry/evidence coverage for every extracted requirement. Both modes verify the immutable pre-review `requirements-evidence.json`; only `post_review` additionally verifies the separate final-review attestation without modifying the evidence snapshot. `test_slo_contract.py` requires `release_tier=internal_alpha` in every probe artifact and validates the complete Internal Alpha column plus frozen heartbeat/recovery timing. `test_concurrency_stream_load.py` validates concurrent Runs, long research, Protocol v2 stream connections, worker leases, quotas and reconnect under the accepted load profile. An authority-consistency test rejects contradictory status headers, unchecked approval prerequisites, unresolved owner placeholders and ADR/index/checklist disagreements.
 
 `test_protocol_secret_leak.py` injects canary credentials through model, search, market, notification and auth paths and scans Protocol frames, checkpoints, Product projections, traces, logs, screenshots and HTML reports. `test_cross_tenant_matrix.py` exercises every read/write/list/resume/cancel/fork endpoint for same-user cross-workspace, cross-user same-tenant and cross-tenant actors. `hosted-production.spec.ts` contains no fixture interception and requires the hosted proof identifiers, responsive rendering and shared Task/Run/Artifact continuity on desktop and Pixel 7 projects. `hosted-security.spec.ts` uses two real OIDC users, two tenants, two workspaces, a removed member and a least-privilege operator; it exercises list/read/write/resume/respond/cancel/retry/fork/feedback/export/delete through BFF, official SDK and UI, verifies non-disclosure denials plus operator action/reason audit, and proves invite-only Internal Alpha with no registration/trading/private-exchange capability.
+
+`test_alert_rules.py` validates the `deploy/alerts.yaml` schema, unique rule IDs, provider/fingerprint selectors, severity/routing, source labels and positive/negative fixtures for independent LangSmith and Langfuse delivery exhaustion. `verify_production_alerts.sh` later injects those failures into the accepted hosted monitoring stack and requires real alert receipts; a local structured-log fingerprint alone is insufficient.
+
+`test_release_source_manifest.py` validates the canonical newline-delimited UTF-8/LF path schema, sorted unique paths, allowed roots, explicit exclusions, manifest self-inclusion and complete release-critical coverage against `git ls-files`. It fails if application/backend/frontend source, tests, migrations, locks, Dockerfiles, deployment/profile config, CI, build/deploy/probe/secret/parity/requirement/source-identity/alert verifiers, or the manifest itself are omitted, or if unrelated local/runtime/evidence files are included.
 
 - [ ] **Step 2: Confirm release gates fail before evidence exists**
 
 Run:
 
 ```bash
-(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
+(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
 (cd backend && uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py -q)
 uv run --project backend python tools/v2/verify_legacy_parity.py --check
 uv run --project backend python tools/v2/verify_requirements.py --check
 ```
 
-Expected: FAIL because the parity map, SLO proof, secret/tenant enforcement and requirement evidence are incomplete. Hosted browser RED is intentionally deferred until the deployment profile is accepted in Step 7; ADR 0008 forbids hosted runtime proof before then. Contract tests must report missing requirement/rule IDs or missing enforcement behavior, not merely a generic missing-file error.
+Expected: FAIL because the parity map, SLO proof, secret/tenant enforcement, production alert rules and requirement evidence are incomplete. Hosted browser/alert-delivery RED is intentionally deferred until the deployment profile is accepted in Step 7; ADR 0008 forbids hosted runtime proof before then. Contract tests must report missing requirement/rule IDs or missing alert enforcement behavior, not merely a generic missing-file error.
 
 - [ ] **Step 3: Add production packaging and CI gates**
 
 Production images use the locked Python/Node runtimes, non-root users, health checks and immutable dependencies. `deploy/docker-compose.production.yml` starts PostgreSQL, Redis, Agent Server/Product API, workers and Next.js without development mounts or V1 services. `deploy/env.production.example` names required variables with empty values and contains no credential. `build_production_images.sh` builds immutable digests, generates SBOMs and runs Trivy filesystem/image scans. `probe_production_stack.sh` starts the actual production Compose profile, executes migrations, waits for all health checks, runs API/Agent schema smoke tests and always tears down through a trap.
 
-`deploy/attestation-policy.yaml` defines trusted Sigstore OIDC issuers and exact identity patterns for the protected release CI signer, data custodian and platform custodian. Detached bundles are verified with `cosign verify-blob`; a self-declared JSON `signature` field is invalid. Baseline provenance binds `BASELINE_SHA`, reviewed packaging candidate SHA, image digest, migration/database checksums, environment and signer. V1 data/zero-data evidence requires independent data-custodian and platform-custodian bundles over the same canonical attestation, including searched hosts/paths, timestamps, access results and snapshot/checksum identity; the migration script cannot sign its own evidence.
+`deploy/attestation-policy.yaml` defines trusted Sigstore OIDC issuers and exact identity patterns for four distinct roles: protected `release_signer`, independent `release_reviewer`, `data_custodian` and `platform_custodian`. Detached bundles are verified with `cosign verify-blob`; a self-declared JSON `signature` field is invalid. Baseline provenance binds `BASELINE_SHA`, reviewed packaging candidate SHA, image digest, migration/database checksums, environment and signer. V1 data/zero-data evidence requires independent data-custodian and platform-custodian bundles over the same canonical attestation, including searched hosts/paths, timestamps, access results and snapshot/checksum identity; the migration script cannot sign its own evidence.
 
 CI installs from locks, verifies each code slice added a new implementation note with required front matter, runs backend/frontend tests, migration smoke tests, Agent Server schema contracts, secret/SBOM scans, parity/evidence verifiers and Playwright fixture suite. Real-provider, real-observability, backup/restore, production-image, load, hosted Playwright and SLO jobs run in a protected environment and are required for release tags. `deploy/alerts.yaml` covers readiness, market/search/model failures, independent LangSmith/Langfuse delivery exhaustion, projection lag, stale workers, outbox/DLQ, security and error-budget burn; alert tests inject positive canaries and record query/result hashes. The runbook documents deploy/rollback, incidents, backup/restore, key rotation, quota/entitlement failures, deletion and provider/observability outages.
 
-`deploy/release-source-manifest.txt` is the exact path manifest for the release-critical source tree. `stage_release_source.sh` compares the dirty tree against that manifest and the explicitly permitted Task 14 note, refuses unlisted/untracked paths, stages only manifest entries with path-safe Git plumbing, and emits a staged-path/hash report. It never invokes `git add -A` or absorbs unrelated working-tree changes.
+`deploy/release-source-manifest.txt` is a sorted, unique, repository-relative, newline-delimited UTF-8/LF path manifest. It includes itself and every tracked release-critical path under backend application/tests/migrations/locks, frontend source/tests/dependency/config files, production Dockerfiles/Compose/profile configuration, `.github/workflows/v2-ci.yml`, `tools/v2/`, accepted V2 normative/ADR/implementation records and root release metadata. It explicitly excludes secrets, local environments, caches, generated runtime/evidence outputs, V1/archive-only paths and developer-machine files. `build_release_source_manifest.py` generates/checks this schema against `git ls-files`, applies the exact include/exclude policy, fails on any omitted release-critical or unexpected path, and emits a deterministic manifest SHA-256. `stage_release_source.sh` compares the dirty tree against that verified manifest and the explicitly permitted Task 14 note, refuses unlisted/untracked paths, stages only manifest entries with path-safe Git plumbing, and emits a staged-path/hash report. It never stages an unreviewed working-tree path or absorbs unrelated changes.
 
 Before the packaging candidate exists, record the already-green Task 13 attestation commit as `BASELINE_SHA` in the Task 14 note draft and `baseline-source-sha.txt`. Commit packaging code, tests/tooling and the note draft together as an early tooling-only candidate. Review that immutable candidate, apply fixes through new candidates and re-review, then create the note-only attestation commit. Build the recorded Task 13 baseline source with the reviewed committed tooling, deploy it to non-production, run smoke/migration/checksum tests and store a signed known-good baseline digest. This distinct baseline, not two builds of the same candidate, is required by the final rollback gate.
 
@@ -1260,12 +1313,14 @@ Run:
 
 ```bash
 git rev-parse HEAD > artifacts/v2-final/deployment/baseline-source-sha.txt
-git add backend/Dockerfile frontend/Dockerfile deploy .dockerignore .env.example tools/v2/build_production_images.sh tools/v2/probe_production_stack.sh tools/v2/upgrade_rollback_drill.sh tools/v2/deployment_exit_drill.sh artifacts/v2-final/deployment/baseline-source-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
+uv run --project backend python tools/v2/build_release_source_manifest.py --write deploy/release-source-manifest.txt
+uv run --project backend python tools/v2/build_release_source_manifest.py --check deploy/release-source-manifest.txt
+git add .github/workflows/v2-ci.yml backend/Dockerfile backend/tests/contract/test_alert_rules.py backend/tests/contract/test_release_source_manifest.py frontend/Dockerfile deploy/docker-compose.production.yml deploy/env.production.example deploy/alerts.yaml deploy/attestation-policy.yaml deploy/release-source-manifest.txt .dockerignore .env.example tools/v2/build_production_images.sh tools/v2/probe_production_stack.sh tools/v2/upgrade_rollback_drill.sh tools/v2/deployment_exit_drill.sh tools/v2/secret_scan.sh tools/v2/build_release_source_manifest.py tools/v2/stage_release_source.sh tools/v2/verify_production_alerts.sh artifacts/v2-final/deployment/baseline-source-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
 git commit -m "build: add v2 release packaging and rollback tooling"
 ./tools/v2/build_production_images.sh --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --output-digest artifacts/v2-final/deployment/baseline-digest.txt
 ./tools/v2/probe_production_stack.sh --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)"
 cosign sign-blob --yes --bundle artifacts/v2-final/deployment/baseline-attestation.sigstore.json artifacts/v2-final/deployment/baseline-attestation.json
-cosign verify-blob --bundle artifacts/v2-final/deployment/baseline-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_signer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_signer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/deployment/baseline-attestation.json
+cosign verify-blob --output json --bundle artifacts/v2-final/deployment/baseline-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_signer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_signer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/deployment/baseline-attestation.json > artifacts/v2-final/deployment/baseline-verification.json
 ```
 
 Only after the baseline is proven, write `test_release_migration_compatibility.py` and run its own explicit RED before adding the migration:
@@ -1305,7 +1360,15 @@ These local results are development/preflight evidence only. They cannot satisfy
 
 Before deletion, obtain the independently signed V1 data snapshot/zero-data attestation and verify both custodian identities against `deploy/attestation-policy.yaml`; verification output is part of the immutable evidence. Then run `uv run --project backend python tools/v2/build_legacy_inventory.py --v1-ref a44a7d24ba5ec02e784522fb684bb39b99802773 --prototype-ref b583e5a5fbdf7fc0df99e8182d1701c8df1f4082 --output artifacts/v2-final/pre-deletion-inventory.json`. Map every generated business rule/golden case, V1 table and V1 path. Table evidence records authoritative source/target row counts and checksums or a signed retired decision. Keep V1 available through the archived branch/tag, not in the V2 Final production tree.
 
-Run both required `cosign verify-blob` checks against `artifacts/v2-final/v1-data-attestation.data-custodian.sigstore.json` and `artifacts/v2-final/v1-data-attestation.platform-custodian.sigstore.json` over the same canonical attestation. Fail unless the certificate identities are distinct, trusted and present. A missing database, unsigned attestation or migration-script identity blocks deletion.
+Run the two independent checks over the same canonical attestation and then verify role separation:
+
+```bash
+cosign verify-blob --output json --bundle artifacts/v2-final/v1-data-attestation.data-custodian.sigstore.json --certificate-identity-regexp "$(yq '.data_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.data_custodian.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/v1-data-attestation.json > artifacts/v2-final/v1-data-attestation.data-custodian-verification.json
+cosign verify-blob --output json --bundle artifacts/v2-final/v1-data-attestation.platform-custodian.sigstore.json --certificate-identity-regexp "$(yq '.platform_custodian.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.platform_custodian.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/v1-data-attestation.json > artifacts/v2-final/v1-data-attestation.platform-custodian-verification.json
+uv run --project backend python tools/v2/verify_attestation_identities.py --policy deploy/attestation-policy.yaml --data-verification artifacts/v2-final/v1-data-attestation.data-custodian-verification.json --platform-verification artifacts/v2-final/v1-data-attestation.platform-custodian-verification.json --forbid-roles release_signer,release_reviewer,implementer,migration_process --output artifacts/v2-final/v1-data-attestation.identity-verdict.json
+```
+
+The verifier fails unless the certificate identities are distinct, policy-trusted and different from every forbidden role. A missing database, unsigned attestation, self-signature or migration/implementer/release identity blocks deletion.
 
 The parity verifier first checks that the map covers every hashed pre-deletion inventory record, then validates dispositions. Run it before deletion. Only after it exits 0, delete exactly the paths listed in this task. Run frontend typecheck/build and generate the separate immutable `post-deletion-survivor-scan.json`; verify it against the frozen pre-deletion hash to prove no surviving source/test imports a removed module and all mapped V2 evidence remains available.
 
@@ -1349,9 +1412,10 @@ After the reviewed governance candidate is accepted, deploy the signed Task 13 b
 
 ```bash
 ./tools/v2/verify_hosted_release.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)"
+./tools/v2/verify_production_alerts.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/baseline-source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/baseline-digest.txt)" --output artifacts/v2-final/alerts/hosted-red.json
 ```
 
-The command must reach a healthy public HTTPS deployment, collect `hosted-production.spec.ts` and `hosted-security.spec.ts` on both named desktop/Pixel projects, and fail on the intentionally missing release-candidate proof/enforcement assertion. Unknown project, localhost/private/tunnel URL, credential skip, connection refusal or zero collected tests is not RED evidence. The same projects run GREEN only in Step 8 against `SOURCE_SHA`.
+The commands must reach a healthy public HTTPS deployment. Browser RED collects `hosted-production.spec.ts` and `hosted-security.spec.ts` on both named desktop/Pixel projects and fails on the intentionally missing release-candidate proof/enforcement assertion. Alert RED independently exhausts LangSmith and Langfuse delivery and fails because the baseline monitoring stack does not produce the required rule/receipt. Unknown project, localhost/private/tunnel URL, credential skip, connection refusal, zero collected tests or failure to inject the canary is not RED evidence. The same browser and alert cases run GREEN only in Step 8 against `SOURCE_SHA`.
 
 - [ ] **Step 8: Build, scan, deploy, upgrade and rollback the clean source**
 
@@ -1365,6 +1429,7 @@ Run:
 ./tools/v2/backup_restore_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/data_lifecycle_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/entitlement_quota_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
+./tools/v2/verify_production_alerts.sh --run --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/alerts/hosted-green.json
 uv run --project backend python tools/v2/run_load_probe.py --profile hosted-production --base-url "$HOSTED_BASE_URL" --release-tier internal_alpha --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/load/hosted-results.json
 uv run --project backend python tools/v2/run_slo_probe.py --profile hosted-production --base-url "$HOSTED_BASE_URL" --release-tier internal_alpha --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/slo/hosted-results.json
 ```
@@ -1373,7 +1438,9 @@ uv run --project backend python tools/v2/run_slo_probe.py --profile hosted-produ
 
 `upgrade_rollback_drill.sh` requires the distinct signed known-good Task 13 baseline digest and candidate digest, applies forward-compatible migrations, waits for health/error thresholds, validates data checksums, upgrades, then rolls back to the baseline and revalidates. A same-source bootstrap mechanics run is supplemental only and cannot satisfy the normative rollback gate. Evidence is stored under `artifacts/v2-final/deployment/upgrade-rollback/`.
 
-All build/deploy/probe scripts materialize source from the committed `SOURCE_SHA` (git archive or isolated worktree) and refuse to copy application files from the current dirty evidence worktree. Hosted security/recovery/load/SLO commands require the accepted profile, public HTTPS URL, `SOURCE_SHA`, governance SHA and image digest; they reject localhost/private/tunnel/fixture targets, zero samples, skip/deselection, missing positive canary receipts and connection failures. Reproducible build labels, SBOMs and image annotations must contain the same source tree hash.
+`verify_production_alerts.sh` independently exhausts LangSmith and Langfuse delivery, requires the configured hosted monitoring backend to fire the corresponding exact fingerprint/rule, waits through pending-to-firing resolution, and stores rule/query hashes, correlation ID, alert receipt/state, timestamps, `SOURCE_SHA`, governance SHA and image digest under `artifacts/v2-final/alerts/`. It also proves a negative control does not fire.
+
+All build/deploy/probe scripts materialize source from the committed `SOURCE_SHA` (git archive or isolated worktree) and refuse to copy application files from the current dirty evidence worktree. Hosted security/recovery/load/SLO/alert commands require the accepted profile, public HTTPS URL, `SOURCE_SHA`, governance SHA and image digest; they reject localhost/private/tunnel/fixture targets, zero samples, skip/deselection, missing positive canary receipts and connection failures. Reproducible build labels, SBOMs and image annotations must contain the same source tree hash.
 
 - [ ] **Step 9: Run the complete pre-review matrix and freeze logs**
 
@@ -1388,6 +1455,7 @@ uv run --project backend python tools/v2/verify_legacy_parity.py --check
 ./tools/v2/data_lifecycle_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/key_rotation_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
 ./tools/v2/entitlement_quota_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
+./tools/v2/verify_production_alerts.sh --run --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/alerts/hosted-green.json
 uv run --project backend python tools/v2/run_load_probe.py --profile hosted-production --base-url "$HOSTED_BASE_URL" --release-tier internal_alpha --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/load/hosted-results.json
 uv run --project backend python tools/v2/run_slo_probe.py --profile hosted-production --base-url "$HOSTED_BASE_URL" --release-tier internal_alpha --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/slo/hosted-results.json
 ./tools/v2/verify_hosted_release.sh --run --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)"
@@ -1398,16 +1466,16 @@ Every command writes an immutable, secret-redacted log under `artifacts/v2-final
 The Task 14 GREEN evidence must also execute every declared Task 14 test path by name, with machine-readable reports proving collection, execution, pass count and zero skips/deselections:
 
 ```bash
-(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py tests/security/test_internal_alpha_boundary.py tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py tests/integration/test_release_migration_compatibility.py -q --junitxml=../artifacts/v2-final/test-logs/task-14-backend-green.xml)
+(cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/security/test_protocol_secret_leak.py tests/security/test_cross_tenant_matrix.py tests/security/test_internal_alpha_boundary.py tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_alert_rules.py tests/contract/test_release_source_manifest.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py tests/integration/test_release_migration_compatibility.py -q --junitxml=../artifacts/v2-final/test-logs/task-14-backend-green.xml)
 (cd frontend && PLAYWRIGHT_JUNIT_OUTPUT_FILE=../artifacts/v2-final/test-logs/task-14-hosted-green.xml npx playwright test tests/e2e/hosted-production.spec.ts tests/e2e/hosted-security.spec.ts --project=hosted-production-desktop --project=hosted-production-pixel-7 --reporter=line,junit)
-uv run --project backend python tools/v2/verify_task14_test_report.py --backend-junit artifacts/v2-final/test-logs/task-14-backend-green.xml --hosted-junit artifacts/v2-final/test-logs/task-14-hosted-green.xml --expected-backend-tests tests/security/test_protocol_secret_leak.py,tests/security/test_cross_tenant_matrix.py,tests/security/test_internal_alpha_boundary.py,tests/contract/test_legacy_parity.py,tests/contract/test_requirement_evidence.py,tests/contract/test_authority_consistency.py,tests/performance/test_slo_contract.py,tests/performance/test_concurrency_stream_load.py,tests/integration/test_release_migration_compatibility.py --expected-frontend-files frontend/tests/e2e/hosted-production.spec.ts,frontend/tests/e2e/hosted-security.spec.ts --expected-projects hosted-production-desktop,hosted-production-pixel-7
+uv run --project backend python tools/v2/verify_task14_test_report.py --backend-junit artifacts/v2-final/test-logs/task-14-backend-green.xml --hosted-junit artifacts/v2-final/test-logs/task-14-hosted-green.xml --expected-backend-tests tests/security/test_protocol_secret_leak.py,tests/security/test_cross_tenant_matrix.py,tests/security/test_internal_alpha_boundary.py,tests/contract/test_legacy_parity.py,tests/contract/test_requirement_evidence.py,tests/contract/test_authority_consistency.py,tests/contract/test_alert_rules.py,tests/contract/test_release_source_manifest.py,tests/performance/test_slo_contract.py,tests/performance/test_concurrency_stream_load.py,tests/integration/test_release_migration_compatibility.py --expected-frontend-files frontend/tests/e2e/hosted-production.spec.ts,frontend/tests/e2e/hosted-security.spec.ts --expected-projects hosted-production-desktop,hosted-production-pixel-7
 ```
 
 `verify_task14_test_report.py` is a declared release verifier and fails on missing collection, deselection, skip, zero tests, wrong project, connection/setup-only failure or a report not bound to `SOURCE_SHA` and the accepted governance SHA.
 
 - [ ] **Step 10: Generate, verify and commit the pre-review evidence snapshot**
 
-Generate `requirements-evidence.json` from the complete requirement registry plus frozen logs, versions/SBOMs, provider/migration/Playwright/observability/recovery/lifecycle/load/SLO/hosted/parity proof. Every requirement entry records its stable ID, source hash, accountable owner role/Agent ID, implementation task/slice, RED command/exit/log hash/intended failure, GREEN command/pass count/log hash, final proof artifact/classification/environment, reviewer dispositions, `NORMATIVE_SHA`, `SOURCE_SHA`, governance commit, artifact SHA-256 and redaction result. No parent/meta entry may stand in for its child requirements.
+Generate `requirements-evidence.json` from the complete requirement registry plus frozen logs, versions/SBOMs, provider/migration/Playwright/observability/production-alert/recovery/lifecycle/load/SLO/hosted/parity proof. Every requirement entry records its stable ID, source hash, accountable owner role/Agent ID, implementation task/slice, RED command/exit/log hash/intended failure, GREEN command/pass count/log hash, final proof artifact/classification/environment, reviewer dispositions, `NORMATIVE_SHA`, `SOURCE_SHA`, governance commit, artifact SHA-256 and redaction result. No parent/meta entry may stand in for its child requirements.
 
 Run:
 
@@ -1418,19 +1486,18 @@ uv run --project backend python tools/v2/verify_source_identity.py --source-sha 
 git add artifacts/v2-final docs/v2/implementation docs/v2/runbooks docs/v2/adr/0008-production-deployment-profile.md
 git commit -m "docs: stage v2 release evidence"
 test -z "$(git status --porcelain)"
-git rev-parse HEAD > /tmp/v2-evidence-sha
-shasum -a 256 artifacts/v2-final/requirements-evidence.json > /tmp/v2-requirements-evidence.sha256
 ```
 
 This commit includes the current Task 14 note draft and is the immutable evidence candidate. Do not insert its own SHA into the draft before committing it; the final independent review in Step 11 supplies that SHA and disposition in the attestation-only closeout.
 
 - [ ] **Step 11: Run the independent review as the last release gate**
 
-Dispatch a fresh architecture/release reviewer against the exact clean commit in `/tmp/v2-evidence-sha`. The reviewer may read runtime source, tests, tooling and all evidence but must not edit them. Any Critical/Important finding invalidates the evidence; any change to application, tests, migrations, Dockerfiles, deployment/profile config, CI or release-verification tooling creates a new `SOURCE_SHA` and repeats Steps 7-10.
+Set `EVIDENCE_SHA` to the exact current clean commit and dispatch a fresh evidence-specification reviewer against it. Fix any finding through a new evidence candidate and repeat the specification review until approved. Only then dispatch a different release-evidence quality reviewer against the same immutable candidate; any quality finding creates a new evidence candidate and repeats both reviews in order. The reviewers may read runtime source, tests, tooling and all evidence but must not edit them. Any Critical/Important finding invalidates the evidence; any change to application, tests, migrations, Dockerfiles, deployment/profile config, CI or release-verification tooling creates a new `SOURCE_SHA` and repeats Steps 7-10.
 
-After approval, keep `requirements-evidence.json` byte-for-byte immutable. Write the reviewer result to `final-independent-review.md` and create `final-review-attestation.json` containing `EVIDENCE_SHA`, reviewer identity/result, the immutable evidence-manifest SHA-256, reviewed source/governance/image identities and timestamp. Sign that canonical attestation with the trusted release-reviewer identity and verify the detached Sigstore bundle before committing only these attestation artifacts:
+After both approvals, keep `requirements-evidence.json` byte-for-byte immutable. Write both reviewer results to `final-independent-review.md` and create `final-review-attestation.json` containing `EVIDENCE_SHA`, specification and quality reviewer identities/results/findings/dispositions, the immutable evidence-manifest SHA-256, reviewed source/governance/image identities and timestamp. Sign that canonical attestation with the trusted release-reviewer identity and verify the detached Sigstore bundle before committing only these attestation artifacts:
 
 ```bash
+uv run --project backend python tools/v2/build_final_review_attestation.py --evidence-sha "$(git rev-parse HEAD)" --requirements-evidence artifacts/v2-final/requirements-evidence.json --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --review-note docs/v2/implementation/final-independent-review.md --output artifacts/v2-final/final-review-attestation.json
 cosign sign-blob --yes --bundle artifacts/v2-final/final-review-attestation.sigstore.json artifacts/v2-final/final-review-attestation.json
 cosign verify-blob --bundle artifacts/v2-final/final-review-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_reviewer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_reviewer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/final-review-attestation.json
 git add docs/v2/implementation/final-independent-review.md artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json
@@ -1439,23 +1506,30 @@ git commit -m "docs: attest v2 final independent review"
 
 - [ ] **Step 12: Verify the exact final attestation commit and stop changing files**
 
-The diff from `EVIDENCE_SHA` to final HEAD may contain only `final-independent-review.md` and the two separate final-review attestation files. `requirements-evidence.json` must match its pre-review SHA-256 exactly. The source-identity verifier hashes application, tests, migrations, Dockerfiles, deployment/profile config, CI, dependency locks and every release-verification/secret-scan/source-identity tool against `SOURCE_SHA`.
+The signed committed `final-review-attestation.json` is the only authority for `EVIDENCE_SHA` and the frozen requirements-evidence hash. The attested `EVIDENCE_SHA` must equal `HEAD^`; the diff may contain only `final-independent-review.md` and the two separate final-review attestation files. `requirements-evidence.json` must match the attested SHA-256 exactly. The source-identity verifier hashes application, tests, migrations, Dockerfiles, deployment/profile config, CI, dependency locks and every release-verification/secret-scan/source-identity tool against `SOURCE_SHA`.
 
 Run:
 
 ```bash
+set -euo pipefail
+cosign verify-blob --bundle artifacts/v2-final/final-review-attestation.sigstore.json --certificate-identity-regexp "$(yq '.release_reviewer.identity_regexp' deploy/attestation-policy.yaml)" --certificate-oidc-issuer "$(yq '.release_reviewer.issuer' deploy/attestation-policy.yaml)" artifacts/v2-final/final-review-attestation.json
+EVIDENCE_SHA="$(jq -er '.evidence_sha' artifacts/v2-final/final-review-attestation.json)"
+EVIDENCE_MANIFEST_SHA256="$(jq -er '.requirements_evidence_sha256' artifacts/v2-final/final-review-attestation.json)"
+test "$EVIDENCE_SHA" = "$(git rev-parse HEAD^)"
+printf '%s  %s\n' "$EVIDENCE_MANIFEST_SHA256" artifacts/v2-final/requirements-evidence.json | shasum -a 256 --check -
 uv run --project backend python tools/v2/verify_source_identity.py --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)"
 (cd backend && EVIDENCE_PHASE=post_review uv run pytest tests/contract/test_requirement_evidence.py -q)
 uv run --project backend python tools/v2/verify_requirements.py --check --phase post_review
 ./tools/v2/secret_scan.sh
-shasum -a 256 --check /tmp/v2-requirements-evidence.sha256
-if git diff --name-only "$(cat /tmp/v2-evidence-sha)"..HEAD | rg -v '^(docs/v2/implementation/final-independent-review\.md|artifacts/v2-final/final-review-attestation\.json|artifacts/v2-final/final-review-attestation\.sigstore\.json)$'; then exit 1; fi
+git diff --name-only "$EVIDENCE_SHA"..HEAD | LC_ALL=C sort > /tmp/v2-final-actual-paths.txt
+printf '%s\n' artifacts/v2-final/final-review-attestation.json artifacts/v2-final/final-review-attestation.sigstore.json docs/v2/implementation/final-independent-review.md | LC_ALL=C sort > /tmp/v2-final-expected-paths.txt
+diff -u /tmp/v2-final-expected-paths.txt /tmp/v2-final-actual-paths.txt
 test -z "$(git status --porcelain)"
 ```
 
 ## Final Completion Audit
 
-- [ ] Every normative requirement in `03`, approved D01-D15 in `09`, Approved `11/12`, Accepted ADR 0001-0007, ADR 0008 evidence gates, `13`, the complete body of this plan and the final independent review maps to an individually owned RED/GREEN/final-proof registry entry.
+- [ ] Every normative requirement in `03`, approved D01-D15 in `09`, Approved `11/12`, Accepted ADR 0001-0007, ADR 0008 evidence gates, `13` and the complete body of this plan maps to an individually owned RED/GREEN/final-proof registry entry. The final independent review is a separate signed post-review gate over that frozen registry/evidence snapshot, not a retrospectively extracted normative requirement.
 - [ ] Backend unit, contract, integration, real-provider and security suites pass.
 - [ ] Frontend lint, typecheck, unit, build and all Playwright projects pass.
 - [ ] PostgreSQL migrations and backup/restore drill pass.

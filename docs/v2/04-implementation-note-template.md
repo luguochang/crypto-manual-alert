@@ -1,6 +1,8 @@
 # V2 每轮实施说明模板
 
-> 文件名：`docs/v2/implementation/YYYY-MM-DD-<phase>-<slice>.md`
+> 分类：Informative template（定义记录格式，不单独新增产品规范；实际说明不得保留示例值）
+>
+> 文件名格式：`docs/v2/implementation/YYYY-MM-DD-phase-N-slice-name.md`
 >
 > 每一轮涉及代码、依赖、配置、数据库、测试或产品行为的变更都必须填写。
 

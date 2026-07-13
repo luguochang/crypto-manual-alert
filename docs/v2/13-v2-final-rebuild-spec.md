@@ -10,10 +10,11 @@
 
 ## 0. 权威与优先级
 
-- 本规格和 `14-v2-final-implementation-plan.md` 是实施入口，但不缩减 `03-v2-delivery-checklist.md`、`11-core-object-access-recovery-contract.md`、`12-production-proof-slo-and-lifecycle.md` 与 Accepted ADR 0001-0007 的规范性要求。
+- Task 0 生成的 `normative-baseline.json` 是文件分类的机器可读唯一来源。Approved normative 集合包含 `01`、`02`、`03`、`06`、`08`、`09` 的 D01-D15、`11`、`12`、本规格、`14` 与 Accepted ADR；`04`/README 是 Informative，`05`/`07` 是 Verified evidence index，`10` 的执行语义已由 `14` 取代。
+- 本规格和 `14-v2-final-implementation-plan.md` 是实施入口，但不缩减 manifest 中其余 Approved normative 来源的更严格要求。
 - ADR 0008 在部署 Profile preflight（许可、区域、网络、Auth、Persistence、HA/SLO、成本、退出）通过前保持 Provisionally Accepted；preflight 通过后必须先改为 Accepted，才能执行 hosted runtime proof。Accepted 不等于 hosted release gate 已通过，本地 Compose 也不能替代真实 hosted 证据。
 - 如早期文档与本规格存在状态枚举或职责表达冲突，以本规格的标准 Run 状态、`recovery_status/failure_code`、Checkpoint/Product DB/live projection 三分权威为准；其余更严格要求继续有效。
-- 最终 requirement-to-evidence verifier 必须覆盖上述全部规范性来源，不得只检查本文件。
+- requirement registry 和最终 requirement-to-evidence verifier 必须从 manifest 读取完整 Approved normative 集合；不得静默省略来源、把 Informative/Verified/Superseded 文档当作新规范，或只检查本文件。
 
 ## 1. 目标
 
@@ -259,7 +260,7 @@ START
 - Dispatcher 以 `thread_id` 作为唯一串行租约键，按同一 Thread 的全局 sequence 派发到官方 Agent Server Run/Command API，并记录官方 run/command 引用。两个 Task 共享 Thread 时也不得并发修改同一 Checkpoint；Scenario Compare 通过新 lineage Thread 并行。
 - Product `task_commands` 是唯一持久排队 owner；Dispatcher 只在 Thread 可派发时创建官方 Run，不提前创建 Agent Server pending/enqueued Run。短暂客户端 queue 仅是未承诺的 ephemeral UX。
 - 重复、过期、无权限或与当前Interrupt不匹配的命令必须被明确拒绝，不得静默成功。
-- 前端使用官方 `AgentServerAdapter` 结构实现 Product Command Bridge：读取/事件流仍代理 Agent Server，Protocol-shaped `run.start/input.respond` 必须先通过 Product command admission 事务，事务提交前不得向 Agent Server 发送命令；后端 Dispatcher 将已准入命令翻译为官方 Runs REST API `runs.create(..., durability=...)`，resume 使用官方 `command` 参数。锁定的 Protocol 0.0.18 虽声明 `state.fork`，但 Agent Server 0.11.0 不实现该命令，因此 fork/time travel 也先进入 Product admission，再通过官方 `run.start`/SDK `forkFrom` 语义和 `config.configurable.checkpoint_id` 创建新的 lineage Run；历史读取使用官方 Thread history API。`cancel_run/cancel_task` 不是 Protocol v2 Command，必须通过独立 Product API：前者在提交后调用官方 Runs cancel API，后者为产品复合事务。
+- 前端使用官方 `AgentServerAdapter` 结构实现 Product Command Bridge：读取/事件流仍代理 Agent Server，Protocol-shaped `run.start/input.respond` 必须先通过 Product command admission 事务，事务提交前不得向 Agent Server 发送命令；后端 Dispatcher 将已准入命令翻译为官方 Runs REST API `runs.create(..., durability=...)`，resume 使用官方 `command` 参数。锁定的 Protocol 0.0.18 虽声明 `state.fork`，但 Agent Server 0.11.0 不实现该命令，因此 fork/time travel 也先进入 Product admission；React/JS SDK 的 `forkFrom` 会落为 Protocol `config.configurable.checkpoint_id`，Dispatcher 必须在调用 Python `langgraph-sdk==0.4.2` 时把该值提升为顶层 `checkpoint_id=checkpoint_id`，再创建新的 lineage Run，不能只传 config 或把 `forkFrom` 传给 Python 客户端。历史读取使用官方 Thread history API。`cancel_run/cancel_task` 不是 Protocol v2 Command，必须通过独立 Product API：前者在提交后调用官方 Runs cancel API，后者为产品复合事务。
 - UI 不直接调用 `useStream.stop()` 取消服务端 Run；取消先写入 Product `cancel_run/cancel_task` 命令，再仅断开当前客户端 stream。
 - 产品级 submit 不允许使用 SDK 内存 `multitaskStrategy="enqueue"` 作为持久语义。如 UI 提供短暂本页排队，必须命名为 ephemeral 且不得返回“已提交”；可恢复排队必须在调用 SDK 前先创建 `task_commands`。
 

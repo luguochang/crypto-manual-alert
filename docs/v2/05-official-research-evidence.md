@@ -2,6 +2,8 @@
 
 > 调研日期：2026-07-12
 >
+> 分类：Verified evidence index（提供官方来源证据，不单独新增产品规范）
+>
 > 来源限制：只引用 LangChain、LangGraph、Deep Agents、LangSmith、Langfuse 官方文档、官方 GitHub 仓库和官方包注册表。
 >
 > 使用方式：实施每个阶段前重新核验对应链接和锁定版本；本文不是永久版本保证。
