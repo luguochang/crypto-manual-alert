@@ -54,7 +54,7 @@
 
 - [ ] **Step 1: Verify the allowlisted documentation tree**
 
-Run `git diff --check`, the forbidden-placeholder scan, secret-pattern scan and an authority-consistency scan that compares status/approval state across the checklist, index and ADR registry. Fail if the dirty tree contains anything outside the reviewed V2 documentation allowlist.
+Run `git diff --check`, the forbidden-placeholder scan, secret-pattern scan and an authority-consistency scan that compares status/approval state across the checklist, index and ADR registry. Require every allowlisted file to declare exactly one file classification, with optional explicit normative-region anchors only for `mixed` files; fail on missing/duplicate classification or any dirty path outside the reviewed V2 documentation allowlist.
 
 - [ ] **Step 2: Create and review the normative candidate**
 
@@ -62,20 +62,21 @@ Stage every reviewed V2 baseline document explicitly, never with a bulk working-
 
 - [ ] **Step 3: Attest the immutable baseline**
 
-After zero Critical/Important findings, generate `docs/v2/normative-baseline.json` containing schema version, the reviewed candidate SHA as `NORMATIVE_SHA`, every reviewed candidate file with one explicit classification (`approved_normative`, `verified_evidence_index`, `informative`, `superseded`, or `proposed_gate`), replacement/priority metadata, each candidate-file SHA-256, all three reviewer identities/results and timestamp. The manifest explicitly excludes itself from its file-hash set to avoid a self-hash cycle. Commit only that manifest as `docs: attest v2 normative baseline`, verify a clean tree, and require every later implementation note, review request and release-evidence entry to reference `NORMATIVE_SHA`. Normative changes after this point require a new candidate, the full sequential review chain, a new manifest and revalidation of affected implementation tasks.
+After zero Critical/Important findings, generate `docs/v2/normative-baseline.json` containing schema version, the reviewed candidate SHA as `NORMATIVE_SHA`, every reviewed candidate file with one explicit classification (`approved_normative`, `mixed`, `verified_evidence_index`, `informative`, `superseded`, or `proposed_gate`), explicit `normative_regions` anchors for mixed files, replacement/priority metadata, each candidate-file SHA-256, all three reviewer identities/results and timestamp. The manifest explicitly excludes itself from its file-hash set to avoid a self-hash cycle. Commit only that manifest as `docs: attest v2 normative baseline`, verify a clean tree, and require every later implementation note, review request and release-evidence entry to reference `NORMATIVE_SHA`. Normative changes after this point require a new candidate, the full sequential review chain, a new manifest and revalidation of affected implementation tasks.
 
 ## Task 0B: Bootstrap the Requirement Registry Before Any Product RED
 
 **Files:**
 - Create: `tools/v2/build_requirement_registry.py`
 - Create: `tools/v2/verify_requirements.py`
+- Create: `tools/v2/transition_normative_baseline.py`
 - Create: `tools/v2/tests/test_requirement_registry.py`
 - Create: `docs/v2/requirements-registry.yaml`
 - Create: `docs/v2/implementation/2026-07-13-task-00b-requirements.md`
 
 - [ ] **Step 1: Write the registry/bootstrap tests**
 
-Tests load `normative-baseline.json`, require every `approved_normative` statement to have one stable versioned ID/source anchor/content hash/task owner, reject requirements extracted from informative/evidence/superseded files, reject missing child entries/catch-all mappings, and verify structured owner assignment plus pre-RED receipt generation.
+Tests load `normative-baseline.json`, require every `approved_normative` statement and every declared `mixed.normative_regions` statement to have one stable versioned ID/source anchor/content hash/task owner, create non-normative gate entries for `proposed_gate` statements, reject requirements extracted from informative/evidence/superseded regions, reject missing child entries/catch-all mappings, and verify structured owner assignment plus pre-RED receipt generation. Transition tests promote a reviewed proposed gate to approved normative in a new manifest generation, preserve its stable gate IDs, attach the new review chain/NORMATIVE_SHA and reject promotion without all required reviewers/evidence.
 
 - [ ] **Step 2: Run RED**
 
@@ -85,7 +86,7 @@ Expected: FAIL because the generator, verifier and seed registry do not exist. A
 
 - [ ] **Step 3: Generate the complete seed and prove pre-RED assignment**
 
-Generate `requirements-registry.yaml` only from manifest files classified `approved_normative` or accepted ADR entries. Every source block has a stable ID, source/content hash and owning Task 1-14 before implementation starts. Run a dry assignment for Task 1 with a disposable test Agent ID, generate a receipt, verify it, then reset only that disposable assignment through the tested structured command so the committed seed has roles/tasks but no fake concrete implementer.
+Generate `requirements-registry.yaml` only from manifest files/regions classified `approved_normative`/`mixed.normative_regions`, plus stable non-normative gate entries for `proposed_gate` sources such as ADR 0008. Before implementation starts, every entry freezes its stable ID, source/content hash, implementation task/slice, accountable role, intended RED test/command and expected missing behavior, intended GREEN test/command, proof classification, final proof target and required environment. Production requirements and proposed production gates require `hosted-production` final proof. Run a dry assignment for Task 1 with a disposable test Agent ID, generate a receipt, verify it, then reset only that disposable assignment through the tested structured command so the committed seed has roles/tasks/proof mappings but no fake concrete implementer.
 
 Run:
 
@@ -1135,7 +1136,7 @@ Commit: `feat: add restricted background deep research`
 
 ## Task 14: Production Gates and Legacy Removal
 
-Task 14 is intentionally split into packaging, release-source, deployment-governance and evidence slices because later proof must reference earlier immutable commits. Packaging and release-source candidate commits stage the current Task 14 implementation-note draft, are reviewed first for specification compliance and then code/release quality, and are followed by an attestation-only commit that changes only that note before the next slice begins. The deployment-governance attestation may additionally add the fixed `governance-candidate-sha.txt` pointer because that SHA cannot exist inside its own candidate; it may not change ADR content or runtime evidence. The note draft records the base SHA and executed RED/GREEN evidence; it must not claim the candidate SHA before the candidate exists. Its attestation records the actual reviewed candidate SHA and reviewer dispositions. The Step 10 evidence commit is the immutable candidate for the final independent review; Step 11 keeps that evidence byte-for-byte unchanged and adds only the separate review note plus signed final-review attestation files.
+Task 14 is intentionally split into packaging, release-source, deployment-governance and evidence slices because later proof must reference earlier immutable commits. Packaging and release-source candidate commits stage the current Task 14 implementation-note draft, are reviewed first for specification compliance and then code/release quality, and are followed by an attestation-only commit that changes only that note before the next slice begins. Deployment-governance is a normative-baseline transition: after its full Task 0 review chain, its attestation commit may add only the regenerated `normative-baseline.json`, transitioned requirement-registry entries, fixed `governance-candidate-sha.txt` pointer and Task 14 note; it may not change the already-reviewed ADR or runtime evidence. The note draft records the base SHA and executed RED/GREEN evidence; it must not claim the candidate SHA before the candidate exists. Its attestation records the actual reviewed candidate SHA and reviewer dispositions. The Step 10 evidence commit is the immutable candidate for the final independent review; Step 11 keeps that evidence byte-for-byte unchanged and adds only the separate review note plus signed final-review attestation files.
 
 **Files:**
 - Create: `.github/workflows/v2-ci.yml`
@@ -1274,7 +1275,7 @@ Task 14 is intentionally split into packaging, release-source, deployment-govern
 
 `test_legacy_parity.py` requires three machine-readable sections: every retained V1 business rule/golden/presentation behavior maps to a named V2 test or explicit `retired` rationale; every V1 table maps to a V2 table or legacy-readonly decision with source/target row counts and checksums; every V1 path maps to migrate/delete/archive with verification. `build_legacy_inventory.py` generates the authoritative source inventory from full V1 commit `a44a7d24ba5ec02e784522fb684bb39b99802773`, prototype commit `b583e5a5fbdf7fc0df99e8182d1701c8df1f4082`, tracked paths/tests/schema definitions and the authoritative V1 data snapshot. `V1_DATA_DIR` is required when data exists; otherwise a signed zero-data attestation identifying searched hosts/paths/owners is required. Missing databases cannot be self-declared `no-data` by the migration script.
 
-Task 14 extends the Task 0B registry/evidence fields but never recreates requirement IDs retroactively. `build_requirement_registry.py` reads the complete source set exclusively from `normative-baseline.json`: every file classified `approved_normative` plus ADR entries that have reached Accepted; informative, verified-evidence, superseded and still-proposed sources are explicitly excluded or referenced only as supporting evidence. `requirements-registry.yaml` gives each normative statement a stable versioned requirement ID, source anchor/content hash, accountable role and concrete Agent ID assigned before RED, implementation task/slice, RED command/log hash/exit code/intended-failure classification, GREEN command/log hash/test count, final proof artifact/environment, reviewer dispositions, `NORMATIVE_SHA` and applicable `SOURCE_SHA`. The generator/verifier fails when a normative source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
+Task 14 fills observed evidence fields in the Task 0B registry but never creates requirement IDs or intended proof mappings retroactively. `build_requirement_registry.py` reads the complete source set exclusively from `normative-baseline.json`: files/regions classified `approved_normative`/`mixed.normative_regions` become normative entries, `proposed_gate` sources retain stable non-normative gate entries, and informative/verified/superseded regions are excluded or referenced only as supporting evidence. When ADR 0008 is accepted through the new Task 0 manifest, its existing gate IDs transition to normative without recreation. `requirements-registry.yaml` records observed RED/GREEN commands, hashes/counts, final proof receipts, reviewer dispositions, the applicable `NORMATIVE_SHA` generation and `SOURCE_SHA` against the intended mappings frozen in Task 0B. The generator/verifier fails when a source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
 
 `test_requirement_evidence.py` supports explicit `EVIDENCE_PHASE=pre_review|post_review` and requires complete registry/evidence coverage for every extracted requirement. Both modes verify the immutable pre-review `requirements-evidence.json`; only `post_review` additionally verifies the separate final-review attestation without modifying the evidence snapshot. `test_slo_contract.py` requires `release_tier=internal_alpha` in every probe artifact and validates the complete Internal Alpha column plus frozen heartbeat/recovery timing. `test_concurrency_stream_load.py` validates concurrent Runs, long research, Protocol v2 stream connections, worker leases, quotas and reconnect under the accepted load profile. An authority-consistency test rejects contradictory status headers, unchecked approval prerequisites, unresolved owner placeholders and ADR/index/checklist disagreements.
 
@@ -1389,24 +1390,27 @@ Review this immutable release-source candidate for specification compliance and 
 
 - [ ] **Step 7: Accept the deployment profile before hosted runtime proof**
 
-Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. In the accepted non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. Only after license/region/egress/Auth/persistence/HA/SLO/cost plus this real exit evidence pass may ADR 0008 become `Accepted` in a governance candidate:
+Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. In the candidate non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. Only after license/region/egress/Auth/persistence/HA/SLO/cost plus this real exit evidence pass may the governance candidate change ADR 0008 from `Proposed` to `Accepted`. The same candidate updates the root/ADR indexes consistently but does not yet mutate `normative-baseline.json`:
 
 ```bash
 ./tools/v2/verify_hosted_release.sh --preflight --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/preflight.json
 ./tools/v2/deployment_exit_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/exit-drill.json
-git add docs/v2/adr/0008-production-deployment-profile.md artifacts/v2-final/deployment/source-sha.txt artifacts/v2-final/deployment/preflight.json artifacts/v2-final/deployment/exit-drill.json docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git add docs/v2/adr/0008-production-deployment-profile.md docs/v2/adr/README.md docs/v2/README.md artifacts/v2-final/deployment/source-sha.txt artifacts/v2-final/deployment/preflight.json artifacts/v2-final/deployment/exit-drill.json docs/v2/implementation/2026-07-13-task-14-production-gate.md
 git commit -m "docs: accept v2 production deployment profile"
 ```
 
-Review that exact governance candidate for architecture/specification and release quality. Apply fixes through new governance candidates and repeat both reviews. After approval, write the reviewed candidate SHA to `governance-candidate-sha.txt`, update only the Task 14 review attestation, and commit those metadata files:
+Treat that exact governance candidate as a new proposed normative baseline. Run the complete Task 0 sequence: specification/authority review to approval, then plan-executability review to approval, then official-framework review to approval; any finding creates a new governance candidate and restarts all three reviews in order. After zero Critical/Important findings, write the reviewed candidate SHA, generate a new manifest generation that promotes ADR 0008 from `proposed_gate` to `approved_normative`, and transition the existing stable gate requirement IDs without recreation. Revalidate every affected deployment/hosted registry entry before committing only the transition metadata:
 
 ```bash
 git rev-parse HEAD > artifacts/v2-final/deployment/governance-candidate-sha.txt
-git add artifacts/v2-final/deployment/governance-candidate-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
-git commit -m "docs: attest v2 deployment governance"
+uv run --project backend python tools/v2/transition_normative_baseline.py --current-manifest docs/v2/normative-baseline.json --candidate-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --promote docs/v2/adr/0008-production-deployment-profile.md --review-note docs/v2/implementation/2026-07-13-task-14-production-gate.md --output docs/v2/normative-baseline.json
+uv run --project backend python tools/v2/build_requirement_registry.py --manifest docs/v2/normative-baseline.json --registry docs/v2/requirements-registry.yaml --transition-gate ADR-0008 --check
+uv run --project backend python tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase governance-transition --require-normative-sha "$(jq -er '.normative_sha' docs/v2/normative-baseline.json)"
+git add docs/v2/normative-baseline.json docs/v2/requirements-registry.yaml artifacts/v2-final/deployment/governance-candidate-sha.txt docs/v2/implementation/2026-07-13-task-14-production-gate.md
+git commit -m "docs: attest accepted v2 deployment baseline"
 ```
 
-Hosted release proof is forbidden before that reviewed governance candidate and attestation exist.
+Hosted release proof is forbidden before that reviewed governance candidate, new manifest generation, transitioned registry and attestation exist. All subsequent evidence records the new `NORMATIVE_SHA` plus the unchanged application `SOURCE_SHA`.
 
 After the reviewed governance candidate is accepted, deploy the signed Task 13 baseline image to that accepted non-production hosted profile and execute the explicitly deferred browser RED:
 

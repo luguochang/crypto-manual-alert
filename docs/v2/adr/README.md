@@ -1,6 +1,8 @@
 # V2 Architecture Decision Records
 
-> 状态：ADR 0001-0007 Accepted；ADR 0008 保留生产证据门禁
+> 分类：Informative index（子 ADR 各自声明权威状态）
+>
+> 状态摘要：ADR 0001-0007 Accepted；ADR 0008 Proposed，保留生产证据门禁
 
 ADR 在用户批准前均不得视为实现授权。
 
@@ -13,7 +15,7 @@ ADR 在用户批准前均不得视为实现授权。
 | [0005](./0005-observability-and-prompt-source.md) | LangSmith/Langfuse 与 Prompt 发布源 | Accepted |
 | [0006](./0006-production-slo-retention-and-outcome.md) | 生产 SLO、保留、删除与 Outcome 门禁 | Accepted |
 | [0007](./0007-launch-and-financial-product-boundary.md) | 上线范围与金融产品边界 | Accepted |
-| [0008](./0008-production-deployment-profile.md) | 生产部署 Profile 与退出方案 | Provisionally Accepted，证据门禁 |
+| [0008](./0008-production-deployment-profile.md) | 生产部署 Profile 与退出方案 | Proposed，证据门禁 |
 
 状态只能按以下顺序变化：
 

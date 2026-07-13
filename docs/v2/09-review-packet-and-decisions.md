@@ -1,6 +1,6 @@
 # V2 评审包与统一决策表
 
-> 状态：Approved for V2 Final Implementation
+> 分类：Mixed（D01-D15 表格行为 Approved normative regions；其余内容为 Informative review packet）
 >
 > 日期：2026-07-13
 >
@@ -13,7 +13,7 @@
 3. 阅读 `02-official-framework-constraints.md`，确认禁止自研边界。
 4. 阅读 `06-c-end-agent-product-blueprint.md`，确认最终 C 端产品范围。
 5. 阅读 `08-production-governance-and-nonfunctional.md`，确认数据权威、安全、恢复和 SLO。
-6. 阅读 `10-implementation-roadmap.md`，确认实施顺序和每阶段停止条件。
+6. 阅读 `14-v2-final-implementation-plan.md`，确认当前实施顺序和每阶段停止条件；`10` 仅保留为已取代的历史路线图。
 7. 需要核对官方事实时再查 `05` 和 `07`；需要验收条款时查 `03`。
 
 ## 2. 一句话方案
@@ -107,5 +107,5 @@ D07 修改为 Tavily 固定主 Provider；其余批准。
 - ADR 0001-0007 已变更为 Accepted；ADR 0008 在生产发布前继续执行证据门禁。
 - ADR 0008 在进入 Production Proof 前有完整证据并 Accepted；此前最多到 Internal Alpha/Beta 技术准备，不宣称生产部署完成。
 - 产品、Graph、数据、前端、观测、测试和 V1 删除边界之间没有矛盾。
-- `10-implementation-roadmap.md` 的阶段顺序和停止条件获批。
+- `14-v2-final-implementation-plan.md` 的阶段顺序和停止条件获批；`10` 不再作为当前执行权威。
 - 才能进入逐文件、逐测试的实施计划，不得直接开始编码。

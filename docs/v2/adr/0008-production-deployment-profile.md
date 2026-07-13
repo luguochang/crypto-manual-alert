@@ -1,6 +1,6 @@
 # ADR 0008：生产部署 Profile 与退出方案
 
-> 状态：Provisionally Accepted，生产发布仍需证据门禁
+> 状态：Proposed，生产证据门禁和完整 Task 0 复审通过后才能 Accepted
 >
 > 日期：2026-07-12
 
