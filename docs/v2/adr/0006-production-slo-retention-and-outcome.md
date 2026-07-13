@@ -1,5 +1,7 @@
 # ADR 0006：生产 SLO、保留、删除与 Outcome 门禁
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

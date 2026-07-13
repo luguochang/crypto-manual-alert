@@ -1,5 +1,7 @@
 # ADR 0002：Web Search Provider 与降级策略
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

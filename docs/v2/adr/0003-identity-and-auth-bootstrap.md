@@ -1,5 +1,7 @@
 # ADR 0003：默认开发身份与正式鉴权
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

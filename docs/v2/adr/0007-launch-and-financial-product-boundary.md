@@ -1,5 +1,7 @@
 # ADR 0007：上线范围与金融产品边界
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

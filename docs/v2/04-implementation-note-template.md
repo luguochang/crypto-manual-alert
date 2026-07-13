@@ -1,5 +1,7 @@
 # V2 每轮实施说明模板
 
+> authority_class: informative
+>
 > 分类：Informative template（定义记录格式，不单独新增产品规范；实际说明不得保留示例值）
 >
 > 文件名格式：`docs/v2/implementation/YYYY-MM-DD-phase-N-slice-name.md`

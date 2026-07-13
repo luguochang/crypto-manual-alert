@@ -1,5 +1,7 @@
 # V2 Architecture Decision Records
 
+> authority_class: informative
+>
 > 分类：Informative index（子 ADR 各自声明权威状态）
 >
 > 状态摘要：ADR 0001-0007 Accepted；ADR 0008 Proposed，保留生产证据门禁

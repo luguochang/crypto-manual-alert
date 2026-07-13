@@ -1,5 +1,7 @@
 # V2 Final 选择性重构规格
 
+> authority_class: approved_normative
+>
 > 状态：Approved
 >
 > 批准日期：2026-07-13

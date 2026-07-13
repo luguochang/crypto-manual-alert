@@ -1,5 +1,7 @@
 # V2 评审后实施路线图
 
+> authority_class: superseded
+>
 > 分类：Superseded by `14-v2-final-implementation-plan.md`（产品阶段意图保留，执行顺序和门禁以 `14` 为准）
 >
 > 日期：2026-07-12

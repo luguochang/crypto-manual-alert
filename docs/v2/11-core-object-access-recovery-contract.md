@@ -1,5 +1,7 @@
 # V2 核心对象、权限与恢复契约
 
+> authority_class: approved_normative
+>
 > 状态：Approved
 >
 > 日期：2026-07-12

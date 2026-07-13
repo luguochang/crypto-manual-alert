@@ -1,5 +1,7 @@
 # ADR 0008：生产部署 Profile 与退出方案
 
+> authority_class: proposed_gate
+>
 > 状态：Proposed，生产证据门禁和完整 Task 0 复审通过后才能 Accepted
 >
 > 日期：2026-07-12
@@ -24,7 +26,7 @@
 
 ## 决策规则
 
-- 先完成上表部署 Profile preflight 证据；全部通过后状态改为 Accepted，才允许执行 Phase 6 hosted runtime proof。
+- 先完成上表部署 Profile preflight 与退出证据；这只允许创建 Task 14 Step 7 的 acceptance candidate。Hosted RED 仍被禁止，直到该候选依次通过 Task 0 specification/authority、plan-executability、official-framework 三路串行复审，新 `normative-baseline.json` 将本 ADR 从 `proposed_gate` 提升为 `approved_normative`，原稳定 gate ID 在 registry 中完成无重建转换、受影响映射重新验证，并提交 transition attestation。
 - ADR 状态 Accepted 只证明选定的部署 Profile 可进入真实验证，不等于 hosted release gate 已通过；后者仍必须完成真实部署、Playwright、恢复和回滚证据。
 - 任何 P0 不通过：不得进入公开生产；新增自管/混合部署 ADR。
 - 只有架构偏好、没有实际账户/网络/恢复证据时，不能把本 ADR 标记 Accepted。

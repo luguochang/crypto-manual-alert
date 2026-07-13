@@ -1,5 +1,7 @@
 # V2 LangChain 官方文档覆盖索引
 
+> authority_class: verified_evidence_index
+>
 > 分类：Verified evidence index（覆盖核对清单；锁定接口以 ADR、`13`/`14` 和实际包源码为准）
 >
 > 基线日期：2026-07-12

@@ -1,5 +1,9 @@
 # V2 评审包与统一决策表
 
+> authority_class: mixed
+>
+> normative_regions: D01,D02,D03,D04,D05,D06,D07,D08,D09,D10,D11,D12,D13,D14,D15
+>
 > 分类：Mixed（D01-D15 表格行为 Approved normative regions；其余内容为 Informative review packet）
 >
 > 日期：2026-07-13
@@ -54,7 +58,7 @@ V2 是一个以 LangGraph Agent Server 为唯一运行时、以 LangChain Agent/
 | D12 | 实施纪律 | 每轮中文实施说明、适当中文注释、官方接口证据、测试和真实运行证据缺一不可 | 代码不可追踪，后续维护再次依赖猜测 |
 | D13 | 生产证明 | 接受 `12-production-proof-slo-and-lifecycle.md` 的量化 SLO、hosted Playwright、删除和 Outcome 分级门禁 | 可以用本地 mock、单样本或手工截图冒充生产完成 |
 | D14 | 上线边界 | 法律/产品风险评审完成前只允许 Internal Alpha；公开发布需冻结司法辖区、年龄、披露和个性化边界 | 用免责声明替代真正的产品与合规决策 |
-| D15 | 生产部署 | 初始生产证明优先 LangSmith Deployment Cloud；进入 Phase 6 前必须完成 ADR 0008 的许可、区域、网络、Auth、成本和退出证据 | 在部署能力未知时把“默认采用”写成已验证事实 |
+| D15 | 生产部署 | 初始生产证明优先 LangSmith Deployment Cloud；进入 Task 14 Step 7 hosted RED 前必须完成 ADR 0008 preflight/退出证据、三路 Task 0 串行复审、新 manifest、稳定 gate ID 转换和 transition attestation | 在部署能力未知或治理转换未完成时把“默认采用”写成已验证事实 |
 
 ## 4. 推荐 ADR 结论
 

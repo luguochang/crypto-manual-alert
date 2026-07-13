@@ -1,5 +1,7 @@
 # V2 官方框架使用与禁止自研约束
 
+> authority_class: approved_normative
+>
 > 分类：Approved normative（2026-07-13 用户批准；冲突解释以 `13`/`14` 为准）
 >
 > 目的：把“优先使用现成官方框架”变成代码审查和 CI 可以执行的规则

@@ -1,5 +1,7 @@
 # V2 Final Implementation Plan
 
+> authority_class: approved_normative
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Every production change follows red-green-refactor and receives specification review before code-quality review.
 
 **Goal:** Build and verify the final multi-user crypto intelligence Agent product using the official LangChain, LangGraph, Deep Agents, Agent Server, LangSmith, Langfuse and React SDK contracts.
@@ -54,7 +56,7 @@
 
 - [ ] **Step 1: Verify the allowlisted documentation tree**
 
-Run `git diff --check`, the forbidden-placeholder scan, secret-pattern scan and an authority-consistency scan that compares status/approval state across the checklist, index and ADR registry. Require every allowlisted file to declare exactly one file classification, with optional explicit normative-region anchors only for `mixed` files; fail on missing/duplicate classification or any dirty path outside the reviewed V2 documentation allowlist.
+Run `git diff --check`, the forbidden-placeholder scan, secret-pattern scan and an authority-consistency scan that compares status/approval state across the checklist, index and ADR registry. Require every allowlisted file to declare exactly one machine-readable blockquote field `authority_class: approved_normative|mixed|verified_evidence_index|informative|superseded|proposed_gate`, with explicit normative-region anchors for `mixed` files; fail on missing/duplicate/unknown classification or any dirty path outside the reviewed V2 documentation allowlist.
 
 - [ ] **Step 2: Create and review the normative candidate**
 
@@ -1390,7 +1392,7 @@ Review this immutable release-source candidate for specification compliance and 
 
 - [ ] **Step 7: Accept the deployment profile before hosted runtime proof**
 
-Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. In the candidate non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. Only after license/region/egress/Auth/persistence/HA/SLO/cost plus this real exit evidence pass may the governance candidate change ADR 0008 from `Proposed` to `Accepted`. The same candidate updates the root/ADR indexes consistently but does not yet mutate `normative-baseline.json`:
+Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. In the candidate non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. Only after license/region/egress/Auth/persistence/HA/SLO/cost plus this real exit evidence pass may the governance candidate change ADR 0008 from `Proposed`/`authority_class: proposed_gate` to `Accepted`/`authority_class: approved_normative`. The same candidate updates the root/ADR indexes consistently but does not yet mutate `normative-baseline.json`:
 
 ```bash
 ./tools/v2/verify_hosted_release.sh --preflight --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/preflight.json
@@ -1533,7 +1535,7 @@ test -z "$(git status --porcelain)"
 
 ## Final Completion Audit
 
-- [ ] Every normative requirement in `03`, approved D01-D15 in `09`, Approved `11/12`, Accepted ADR 0001-0007, ADR 0008 evidence gates, `13` and the complete body of this plan maps to an individually owned RED/GREEN/final-proof registry entry. The final independent review is a separate signed post-review gate over that frozen registry/evidence snapshot, not a retrospectively extracted normative requirement.
+- [ ] Every requirement and proposed gate extracted from the current `normative-baseline.json` generation, covering all `approved_normative`, `mixed.normative_regions` and `proposed_gate` entries, maps to its frozen intended RED/GREEN/final-proof target and observed individually owned evidence. This manifest-derived verifier is authoritative over any human-readable source summary. The final independent review is a separate signed post-review gate over that frozen registry/evidence snapshot, not a retrospectively extracted normative requirement.
 - [ ] Backend unit, contract, integration, real-provider and security suites pass.
 - [ ] Frontend lint, typecheck, unit, build and all Playwright projects pass.
 - [ ] PostgreSQL migrations and backup/restore drill pass.

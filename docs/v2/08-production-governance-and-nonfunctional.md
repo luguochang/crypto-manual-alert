@@ -1,5 +1,7 @@
 # V2 生产治理与非功能规范
 
+> authority_class: approved_normative
+>
 > 分类：Approved normative（2026-07-13 用户批准；冲突解释以 `11`/`12`/`13`/`14` 为准）
 >
 > 日期：2026-07-12

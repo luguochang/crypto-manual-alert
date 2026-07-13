@@ -1,5 +1,7 @@
 # V2 官方文档调研证据矩阵
 
+> authority_class: verified_evidence_index
+>
 > 调研日期：2026-07-12
 >
 > 分类：Verified evidence index（提供官方来源证据，不单独新增产品规范）

@@ -1,5 +1,7 @@
 # V2 生产证明、SLO 与数据生命周期契约
 
+> authority_class: approved_normative
+>
 > 状态：Approved
 >
 > 日期：2026-07-12

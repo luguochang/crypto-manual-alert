@@ -1,5 +1,7 @@
 # ADR 0001：Agent Runtime、部署和持久化拓扑
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

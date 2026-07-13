@@ -1,5 +1,7 @@
 # V2 最终交付 Checklist
 
+> authority_class: approved_normative
+>
 > 状态：Approved，用户于 2026-07-13 明确确认“按你说的来进行完整重构和自测”
 >
 > 原则：主流程优先，但最终产品范围不缩水。所有阶段均通过后才能声明 V2 可交付。

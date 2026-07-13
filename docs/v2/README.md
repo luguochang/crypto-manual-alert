@@ -1,5 +1,7 @@
 # Crypto Intelligence Agent V2 设计索引
 
+> authority_class: informative
+>
 > 状态：已批准进入 V2 Final 实施
 >
 > 基线日期：2026-07-13

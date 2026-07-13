@@ -1,5 +1,7 @@
 # ADR 0005：LangSmith/Langfuse 与 Prompt 发布源
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12

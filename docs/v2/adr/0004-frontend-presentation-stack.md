@@ -1,5 +1,7 @@
 # ADR 0004：前端 Runtime 与视觉组件
 
+> authority_class: approved_normative
+>
 > 状态：Accepted
 >
 > 日期：2026-07-12
