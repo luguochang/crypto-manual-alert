@@ -4,15 +4,22 @@
 >
 > 每一轮涉及代码、依赖、配置、数据库、测试或产品行为的变更都必须填写。
 
-# <日期> <阶段> <本轮主题>
+# YYYY-MM-DD Phase N 本轮主题
 
 ```yaml
-slice_id: <唯一 ID>
-phase: <Phase 0-6>
-owner: <责任人或 Agent>
-commit_or_pr: <提交或 PR>
+slice_id: task-NN-short-name
+phase: phase-N
+owner_role: task_NN_implementer
+owner_agent_id: assigned-before-red
+normative_sha: immutable-task-0-candidate-sha
+base_sha: sha-before-red
+candidate_sha: added-only-in-review-attestation
+requirement_ids:
+  - V2-REQ-source-stable-id
 status: in_progress|verified|blocked
 ```
+
+创建本轮说明草稿时必须先把示例值替换为真实值。`owner_agent_id`、`normative_sha`、`base_sha` 和 `requirement_ids` 必须在执行 RED 前确定；`candidate_sha` 在候选提交产生并完成审查后，只能通过 attestation-only 提交补入。CI 对实际实施说明中的示例值或共享兜底 owner 直接失败。
 
 ## 1. 本轮目标
 
@@ -76,9 +83,10 @@ status: in_progress|verified|blocked
 
 ## 7. 测试证据
 
-| 命令 | 结果 | 覆盖范围 |
-| --- | --- | --- |
-| command | pass/fail/count | scope |
+| 阶段 | requirement_id | 命令 | 退出码 | 日志 SHA-256 | 预期/实际失败分类 | 测试数量 | 环境/证据 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| RED | V2-REQ-source-stable-id | exact command | non-zero | hash | intended missing behavior | collected count | profile |
+| GREEN | V2-REQ-source-stable-id | exact command | 0 | hash | pass | passed count | artifact path |
 
 不能只写“测试通过”，必须记录实际命令和结果。
 

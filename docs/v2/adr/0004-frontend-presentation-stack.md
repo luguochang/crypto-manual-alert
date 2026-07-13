@@ -1,8 +1,10 @@
 # ADR 0004：前端 Runtime 与视觉组件
 
-> 状态：Proposed
+> 状态：Accepted
 >
 > 日期：2026-07-12
+>
+> 批准：用户，2026-07-13
 
 ## 背景
 
@@ -10,7 +12,7 @@
 
 ## 决策
 
-- `@langchain/react` v1 是 Thread/Run/stream 的唯一客户端状态源。
+- `@langchain/react` v1 是当前连接的 Thread/Run/stream live projection 唯一客户端 Runtime；Product API/PostgreSQL 仍是历史和可查询产品状态权威。
 - `@langchain/langgraph-sdk` 负责官方 Server API 和类型。
 - 每个 Thread 只挂载一个根 `useStream`，业务组件通过 selector hooks 读取。
 - 视觉层推荐 AI Elements + shadcn/ui，原因是组件可编辑、不会强制第二个 Agent Runtime，便于建立 Market/Evidence/Risk/Artifact 专用组件。

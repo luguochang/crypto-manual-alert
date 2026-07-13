@@ -1,8 +1,10 @@
 # ADR 0002：Web Search Provider 与降级策略
 
-> 状态：Proposed
+> 状态：Accepted
 >
 > 日期：2026-07-12
+>
+> 批准：用户，2026-07-13
 
 ## 背景
 
@@ -15,7 +17,7 @@
 - 不支持时显式切换到 LangChain Tavily 官方集成；生产 readiness 必须要求 Tavily Key 和连通性。
 - 开发/CI 可使用确定性 fixture tool，但 UI、Trace 和测试必须明确标记 fixture，不能当作真实搜索证明。
 - 搜索结果必须保存 query、URL、标题、发布时间、抓取时间、摘要、引用和来源质量。
-- 搜索不可用时 Run 显示 `research_unavailable` 或明确降级，不生成伪来源，不用模型常识冒充搜索结果。
+- 所有已配置搜索 Provider 都失败时 Run 必须以 `failed` 结束并显示 `research_unavailable`，不生成伪来源，不用模型常识冒充搜索结果。只有 Provider 调用成功但可验证事实不足时，才允许确定性 `no_trade` 或通过 `completion_scope/warnings` 表达非终态完整度。
 
 ## 不采用
 

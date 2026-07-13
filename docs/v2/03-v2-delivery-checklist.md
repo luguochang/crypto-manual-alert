@@ -1,23 +1,23 @@
 # V2 最终交付 Checklist
 
-> 状态：Proposed，待用户批准
+> 状态：Approved，用户于 2026-07-13 明确确认“按你说的来进行完整重构和自测”
 >
 > 原则：主流程优先，但最终产品范围不缩水。所有阶段均通过后才能声明 V2 可交付。
 
 ## 0. 设计批准
 
-- [ ] 用户批准产品范围和 manual-only 边界。
-- [ ] 用户批准 Agent Server + Next.js BFF 架构。
-- [ ] 用户批准 Deep Agents 只用于受限研究域。
-- [ ] 用户批准默认开发身份和正式 Auth 后置策略。
-- [ ] 用户批准 LangSmith + Langfuse 职责划分。
-- [ ] 用户批准 V1 只读归档、业务语义迁移、基础设施实现废弃。
-- [ ] 用户批准 C 端 Agent Workspace 定位、产品模式和 Thread/Task/Artifact 第一等对象。
-- [ ] 用户批准三层事件架构、Middleware role matrix 和长任务/商业化边界。
-- [ ] 用户批准生产治理规范中的部署、数据权威、重试、Outbox、观测去重、保留、安全和量化门槛。
-- [ ] 用户批准 Internal Alpha 与公开 Beta/GA 的法律、年龄、披露和金融字段边界。
-- [ ] 用户批准 AI Elements 或 assistant-ui 的视觉组件 ADR，且 `@langchain/react` 保持唯一 Runtime 状态源。
-- [ ] `docs/v2/` 不存在未解释的占位标记、模糊完成条件和无责任人开放项。
+- [x] 用户批准产品范围和 manual-only 边界（2026-07-13 用户确认完整重构与自测）。
+- [x] 用户批准 Agent Server + Next.js BFF 架构（2026-07-13 用户确认按 V2 方案执行）。
+- [x] 用户批准 Deep Agents 只用于受限研究域（2026-07-13 用户确认按 V2 方案执行）。
+- [x] 用户批准默认开发身份和正式 Auth 后置策略（2026-07-13 用户进一步要求最终版本直接支持多用户）。
+- [x] 用户批准 LangSmith + Langfuse 职责划分（2026-07-13 用户明确要求同时接入）。
+- [x] 用户批准 V1 只读归档、业务语义迁移、基础设施实现废弃（2026-07-13 用户确认完整重构）。
+- [x] 用户批准 C 端 Agent Workspace 定位、产品模式和 Thread/Task/Artifact 第一等对象（2026-07-13 用户确认按 V2 方案执行）。
+- [x] 用户批准三层事件架构、Middleware role matrix 和长任务/商业化边界（2026-07-13 用户确认按 V2 方案执行）。
+- [x] 用户批准生产治理规范中的部署、数据权威、重试、Outbox、观测去重、保留、安全和量化门槛（2026-07-13 用户要求生产级最终版本）。
+- [x] 用户批准 Internal Alpha 与公开 Beta/GA 的法律、年龄、披露和金融字段边界（2026-07-13 用户确认按 V2 方案执行；公开发布仍受 ADR 0007 阻断）。
+- [x] 用户批准 AI Elements 或 assistant-ui 的视觉组件 ADR，且 `@langchain/react` 保持唯一 Runtime 状态源（2026-07-13 用户确认按 V2 方案执行）。
+- [x] `docs/v2/` 的实施/决策文档禁止未解释占位标记、模糊完成条件和无责任人开放项；`04-implementation-note-template.md` 中明确标注的字段格式示例不是开放项，实际实施说明不得保留示例值。最终提交前由 authority-consistency 和 requirement-registry 测试再次强制验证。
 
 完成证据：设计文档提交及用户明确确认。
 
@@ -129,16 +129,16 @@
 ### 4.1 官方 SDK
 
 - [ ] 每个 Thread 只有一个根 `useStream`。
-- [ ] 使用官方 submit/stop/respond/history。
+- [ ] 使用官方 Protocol submit/respond/history 和 Runs cancel API；所有可恢复命令先经 Product admission，不直接暴露 `useStream.stop()`。
 - [ ] 浏览器不保存 LangSmith Secret Key。
 - [ ] BFF 注入开发/生产身份和 correlation ID。
 - [ ] 刷新和网络断线后可重新附着运行中的 Thread。
 - [ ] `disconnect()` 不取消后台 Run，重新附着后无消息或 Tool card 重复。
-- [ ] `stop()` 取消当前服务端 Run，和 `disconnect()` 有不同控件、确认和状态结果。
+- [ ] Product `cancel_run` 提交后调用官方 Runs cancel API，和 `disconnect()` 有不同控件、确认和状态结果。
 - [ ] 首次创建 Thread 后通过 `onThreadId` 持久化 ID，rejoin 使用同一 ID。
 - [ ] Subagent selector 只在对应卡片展开/挂载时订阅 scoped stream。
 - [ ] 明确区分客户端 submission queue、Product task_commands dispatcher 和只执行已创建 Run 的 Agent Server worker queue。
-- [ ] 使用官方 multitask strategy 和 checkpoint fork，不建立私有 Agent queue/分支 Runtime。
+- [ ] Product `task_commands` 为唯一持久队列，Dispatcher 使用官方 Run/Command 和 checkpoint fork，不建立私有 Agent Runtime 或 SDK 内存持久队列。
 
 ### 4.2 页面
 
@@ -237,7 +237,7 @@
 ### 9.1 Background、Queue、Cron 与 Webhook
 
 - [ ] Background Run 可在页面关闭后继续，Tasks 页面可重新附着。
-- [ ] 同一 Thread 运行中追加消息使用官方 queue/multitask strategy。
+- [ ] 同一 Thread 运行中追加消息先进入 Product `task_commands`；Dispatcher 在 Thread 可派发时使用官方 Run API，不使用 SDK 内存 queue 或提前创建无法取消的 Agent Server pending Run。
 - [ ] 用户可同时运行多个 Task，取消语义区分 disconnect/run/task/cron。
 - [ ] Scheduled Monitor 使用 Agent Server cron，不使用应用进程内 timer。
 - [ ] 用户可从 Artifact 创建 Monitor，定义 thesis、条件、频率、有效期、静默时段和渠道。

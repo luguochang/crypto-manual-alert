@@ -1,6 +1,6 @@
 # ADR 0008：生产部署 Profile 与退出方案
 
-> 状态：Proposed，证据门禁
+> 状态：Provisionally Accepted，生产发布仍需证据门禁
 >
 > 日期：2026-07-12
 
@@ -24,6 +24,7 @@
 
 ## 决策规则
 
-- 证据全部通过：状态改为 Accepted，允许 Phase 6 hosted proof。
+- 先完成上表部署 Profile preflight 证据；全部通过后状态改为 Accepted，才允许执行 Phase 6 hosted runtime proof。
+- ADR 状态 Accepted 只证明选定的部署 Profile 可进入真实验证，不等于 hosted release gate 已通过；后者仍必须完成真实部署、Playwright、恢复和回滚证据。
 - 任何 P0 不通过：不得进入公开生产；新增自管/混合部署 ADR。
 - 只有架构偏好、没有实际账户/网络/恢复证据时，不能把本 ADR 标记 Accepted。

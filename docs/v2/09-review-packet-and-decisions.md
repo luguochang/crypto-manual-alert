@@ -1,8 +1,8 @@
 # V2 评审包与统一决策表
 
-> 状态：Ready for Review
+> 状态：Approved for V2 Final Implementation
 >
-> 日期：2026-07-12
+> 日期：2026-07-13
 >
 > 目的：让评审者不必先通读全部 3500 行文档，也能明确产品范围、技术裁决、风险和需要批准的事项
 
@@ -34,7 +34,7 @@ V2 是一个以 LangGraph Agent Server 为唯一运行时、以 LangChain Agent/
   -> @langchain/react 实时展示、断线恢复和历史回看
 ```
 
-正式用户体系后置，但 `tenant_id`、`user_id`、Workspace、ActorContext、资源授权和数据隔离从第一天进入契约。
+开发黄金主链可先使用服务端固定身份，但 V2 Final 交付必须包含正式 Auth.js/OIDC 用户体系；`tenant_id`、`user_id`、Workspace、ActorContext、资源授权和数据隔离从第一天进入契约。
 
 ## 3. 统一决策表
 
@@ -45,9 +45,9 @@ V2 是一个以 LangGraph Agent Server 为唯一运行时、以 LangChain Agent/
 | D03 | Agent Runtime | LangGraph Agent Server/官方协议是唯一 Runtime；Next.js BFF 代理浏览器 | 需要自研 Thread/Run/SSE/重放/HITL |
 | D04 | Agent Harness | 使用 LangChain `create_agent`、Tool、Structured Output、Middleware | 重新出现私有 Agent Loop 和 Tool 协议 |
 | D05 | Deep Agents | 只用于受限研究/委派；不得拥有最终风险、通知和业务库写权限 | pre-1.0 Harness 变成不可替换的生产控制面 |
-| D06 | 身份顺序 | 第一阶段固定开发账号；生产构建禁用；正式 Auth 通过同一 ActorContext 接入 | 鉴权阻断主链或正式接入时重写 Graph |
+| D06 | 身份顺序 | 开发黄金主链允许固定开发账号；最终交付必须完成正式 Auth、Workspace Membership 和同一 ActorContext 接入；生产构建禁用开发身份 | 鉴权阻断早期主链，或最终交付仍是单用户伪产品 |
 | D07 | Web Search | 能力探测后使用 Provider built-in；不支持时显式切 Tavily；不可用必须失败可见 | 伪搜索、静默 fallback 或无来源结论 |
-| D08 | 前端 Runtime | `@langchain/react` v1 是唯一状态源；选择 AI Elements/shadcn 作为可编辑视觉层 | assistant-ui/CopilotKit 等形成第二 Runtime |
+| D08 | 前端 Runtime | `@langchain/react` v1 是当前连接 live projection 的唯一 Runtime；历史/可查询状态从 Product API 读取；选择 AI Elements/shadcn 作为可编辑视觉层 | assistant-ui/CopilotKit 等形成第二 Runtime |
 | D09 | 数据权威 | Product PostgreSQL 是 Task/Run/Artifact/Usage/Feedback/Outcome 权威；Checkpoint 只管执行恢复 | 产品查询依赖 Runtime 内部表，升级和排障失控 |
 | D10 | 双观测 | LangSmith 负责原生 Trace/Eval；Langfuse 负责生产成本/会话/运营；集中装配、业务节点零散埋点为零 | 双写、重复 generation、观测故障阻断主链 |
 | D11 | V1 处置 | 迁移规则与 golden cases，不迁移 workflow/orchestration/agent_swarm 实现；不长期双写 | 新项目继续背负旧兼容层 |
@@ -104,7 +104,7 @@ D07 修改为 Tavily 固定主 Provider；其余批准。
 ## 7. 评审完成定义
 
 - D01-D15 全部有 Approved 或明确替代结论。
-- ADR 0001-0007 状态从 Proposed 变为 Accepted，或新增替代 ADR。
+- ADR 0001-0007 已变更为 Accepted；ADR 0008 在生产发布前继续执行证据门禁。
 - ADR 0008 在进入 Production Proof 前有完整证据并 Accepted；此前最多到 Internal Alpha/Beta 技术准备，不宣称生产部署完成。
 - 产品、Graph、数据、前端、观测、测试和 V1 删除边界之间没有矛盾。
 - `10-implementation-roadmap.md` 的阶段顺序和停止条件获批。

@@ -1,8 +1,10 @@
 # ADR 0005：LangSmith/Langfuse 与 Prompt 发布源
 
-> 状态：Proposed
+> 状态：Accepted
 >
 > 日期：2026-07-12
+>
+> 批准：用户，2026-07-13
 
 ## 背景
 

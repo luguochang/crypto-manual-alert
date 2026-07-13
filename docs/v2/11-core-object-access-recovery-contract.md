@@ -1,8 +1,10 @@
 # V2 核心对象、权限与恢复契约
 
-> 状态：Proposed，评审必读
+> 状态：Approved
 >
 > 日期：2026-07-12
+>
+> 批准：用户，2026-07-13；通过 D13 与 V2 Final 规格/计划一并纳入实施权威
 >
 > 目的：冻结容易在实现阶段产生第二套状态机的对象基数、权限、恢复和前端降级规则
 
@@ -11,7 +13,7 @@
 | 层级 | 对外性质 | 可见页面 | 不允许出现 |
 | --- | --- | --- | --- |
 | Technical Slice | 仅开发/CI | 单个受控 Work 测试页 | Home/Inbox/Monitor 空壳导航 |
-| Internal Alpha | 内部用户 | Work、Task/Run Detail、最小 Library | 未实现的 Monitor/Billing/Admin 入口 |
+| Internal Alpha | 内部用户 | Home、Work、Task/Run Detail、Monitors、Inbox、Library、真实账户/Workspace/Data Settings | 未实现的 Billing/Admin 入口 |
 | External Beta | 邀请用户 | Home、Work、Inbox、Library、Settings | 无授权诊断页、伪共享/伪配额 |
 | Commercial GA | 正式发布 | 全部批准模式和商业能力 | 未量化 SLO、未完成法律/安全评审 |
 
@@ -113,8 +115,8 @@ React v1 没有公开 replay-gap 信号，因此前端不自行检测 sequence g
 
 - `agent_runs` 保存 `last_heartbeat_at`、`recovery_deadline_at`、官方 run/checkpoint ID。
 - reconciliation worker 对比 Product DB 与官方 active run/checkpoint。
-- 可恢复：创建 resume Run，旧 Run 标记 superseded。
-- 不可恢复：旧 Run 标记 `orphaned_failed`，保留已提交 Artifact，向用户提供 Retry。
+- 可恢复：旧 Run 保持标准状态并设置 `recovery_status=pending/recovering`，创建 resume Run 后设置 `recovery_status=superseded`。
+- 不可恢复：旧 Run 标记 `status=failed` 和 `failure_code=orphaned`，保留已提交 Artifact，向用户提供 Retry。
 - 禁止把无 active runtime 的记录永久留在 `running`。
 - 自动恢复次数、deadline、RTO/RPO 和用户文案由环境 SLO 冻结。
 
@@ -173,4 +175,4 @@ React v1 没有公开 replay-gap 信号，因此前端不自行检测 sequence g
 
 ## 13. 评审结论
 
-本契约获批前，不得开始数据库、Auth、React Thread、Inbox、Fork 或长任务实现。任何实现与本契约冲突时先修文档/ADR，不通过兼容 wrapper 同时保留两套语义。
+本契约已获批并作为 V2 Final 规范性来源。任何实现与本契约冲突时先修文档/ADR，不通过兼容 wrapper 同时保留两套语义。
