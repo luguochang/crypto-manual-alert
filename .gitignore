@@ -2,8 +2,16 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+build/
+dist/
+*.pckl
 .ruff_cache/
 .mypy_cache/
+.langgraph_api/
 .tmp/
 *.egg-info/
 .venv/
@@ -14,6 +22,12 @@ venv/
 .env.*
 !.env.example
 !.env.production.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/secrets/
+**/credentials/
 
 # Local runtime data
 data/tmp/
@@ -33,7 +47,7 @@ logs/
 # Frontend
 frontend/.next/
 frontend/out/
-frontend/node_modules/
+**/node_modules/
 frontend/.turbo/
 frontend/tsconfig.tsbuildinfo
 frontend/npm-debug.log*
@@ -51,6 +65,7 @@ frontend/playwright-report/
 .vscode/
 Thumbs.db
 .DS_Store
+._*
 
 # Local Claude Code tooling (plans/settings live in docs/ instead)
 .claude/

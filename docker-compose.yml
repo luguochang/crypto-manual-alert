@@ -1,72 +1,247 @@
-name: crypto-manual-alert
+name: crypto-manual-alert-v2
 
+# Local full-stack proof topology. Production should use LangGraph Platform's
+# immutable Agent Server image and externally managed PostgreSQL/OIDC secrets.
 services:
-  manual-alert:
-    profiles:
-      - scheduler
-    build:
-      context: .
-      args:
-        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-    image: crypto-manual-alert:0.1.0
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
     environment:
-      TZ: Asia/Shanghai
-      APP_MODE: ${APP_MODE:-SHADOW}
-      AUTO_ORDER_ENABLED: "false"
+      POSTGRES_DB: ${POSTGRES_DB:-crypto_alert_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto_alert}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto_alert_local}
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config:ro
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "crypto-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "--config", "config/staging.yaml", "show-config"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
-  api:
+  migrate:
     build:
       context: .
+      dockerfile: Dockerfile
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-    image: crypto-manual-alert:0.1.0
-    restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
+    image: crypto-manual-alert-v2-backend:local
+    restart: "no"
     environment:
-      TZ: Asia/Shanghai
-      CONFIG_PATHS: ${CONFIG_PATHS:-config/default.yaml}
-      DATA_DIR: /app/data
-      APP_MODE: ${APP_MODE:-SHADOW}
-      AUTO_ORDER_ENABLED: "false"
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config:ro
-    ports:
-      - "${API_PORT:-8010}:8010"
+      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+    command:
+      - alembic
+      - -c
+      - alembic.ini
+      - upgrade
+      - head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  internal-jwt-keys:
+    image: crypto-manual-alert-v2-backend:local
+    restart: "no"
     command:
       - python
       - -m
-      - uvicorn
-      - crypto_manual_alert.api.app:app
+      - crypto_alert_v2.auth.development_keys
+      - /run/internal-jwt-private
+      - --public-directory
+      - /run/internal-jwt-public
+    volumes:
+      - type: volume
+        source: internal-jwt-private
+        target: /run/internal-jwt-private
+      - type: volume
+        source: internal-jwt-public
+        target: /run/internal-jwt-public
+
+  development-bootstrap:
+    image: crypto-manual-alert-v2-backend:local
+    restart: "no"
+    environment:
+      APP_ENVIRONMENT: development
+      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+      DEVELOPMENT_BOOTSTRAP_ENABLED: "true"
+      DEVELOPMENT_BOOTSTRAP_PROFILE: local-proof
+      DEVELOPMENT_BOOTSTRAP_SUBJECT: dev-user
+      DEVELOPMENT_BOOTSTRAP_TENANT_ID: dev-tenant
+      DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID: dev-workspace
+      DEVELOPMENT_BOOTSTRAP_ROLES: '["member"]'
+      DEVELOPMENT_BOOTSTRAP_PERMISSIONS: '["analysis:read","analysis:write"]'
+    command:
+      - python
+      - -m
+      - crypto_alert_v2.auth.development_bootstrap
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  agent-server:
+    image: crypto-manual-alert-v2-backend:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      APP_ENVIRONMENT: production
+      AGENT_SERVER_URL: http://127.0.0.1:8123
+      AGENT_ASSISTANT_ID: crypto_analysis
+      MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
+      INTERNAL_JWT_KID: compose-ephemeral
+      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_MAX_TTL_SECONDS: "60"
+      INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
+    command:
+      - langgraph
+      - dev
+      - --config
+      - langgraph.json
       - --host
       - 0.0.0.0
       - --port
-      - "8010"
+      - "8123"
+      - --no-browser
+      - --no-reload
+    ports:
+      - "127.0.0.1:${AGENT_SERVER_PORT:-8123}:8123"
+    volumes:
+      - type: volume
+        source: internal-jwt-public
+        target: /run/internal-jwt-public
+        read_only: true
     healthcheck:
       test:
         - CMD
         - python
         - -c
-        - "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8010/api/system/health', timeout=5)); raise SystemExit(0 if data.get('ok') else 1)"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+        - "import socket; connection=socket.create_connection(('127.0.0.1', 8123), timeout=5); connection.close()"
+      interval: 5s
+      timeout: 8s
+      retries: 24
+      start_period: 15s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      internal-jwt-keys:
+        condition: service_completed_successfully
+
+  agent-server-readiness:
+    image: crypto-manual-alert-v2-backend:local
+    restart: "on-failure:12"
+    environment:
+      APP_ENVIRONMENT: production
+      AGENT_SERVER_URL: http://agent-server:8123
+      AGENT_ASSISTANT_ID: crypto_analysis
+      INTERNAL_JWT_KID: compose-ephemeral
+      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      AGENT_HEALTHCHECK_SUBJECT: probe-user
+      AGENT_HEALTHCHECK_TENANT_ID: probe-tenant
+      AGENT_HEALTHCHECK_WORKSPACE_ID: probe-workspace
+      AGENT_HEALTHCHECK_ROLES: '["operator"]'
+      AGENT_HEALTHCHECK_PERMISSIONS: '["analysis:read"]'
+    command:
+      - python
+      - -m
+      - crypto_alert_v2.auth.agent_healthcheck
+    volumes:
+      - type: volume
+        source: internal-jwt-private
+        target: /run/internal-jwt-private
+        read_only: true
+    depends_on:
+      internal-jwt-keys:
+        condition: service_completed_successfully
+      agent-server:
+        condition: service_healthy
+
+  product-api:
+    image: crypto-manual-alert-v2-backend:local
+    restart: unless-stopped
+    init: true
+    environment:
+      APP_ENVIRONMENT: production
+      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+      INTERNAL_JWT_KID: compose-ephemeral
+      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
+      INTERNAL_JWT_AUDIENCE: crypto-alert-product-api
+      INTERNAL_JWT_MAX_TTL_SECONDS: "60"
+      INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
+    command:
+      - uvicorn
+      - crypto_alert_v2.api.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8011"
+    ports:
+      - "127.0.0.1:${PRODUCT_API_PORT:-8011}:8011"
+    volumes:
+      - type: volume
+        source: internal-jwt-public
+        target: /run/internal-jwt-public
+        read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8011/api/v2/health', timeout=5)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"
+      interval: 5s
+      timeout: 8s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      internal-jwt-keys:
+        condition: service_completed_successfully
+      development-bootstrap:
+        condition: service_completed_successfully
+
+  command-worker:
+    image: crypto-manual-alert-v2-backend:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      APP_ENVIRONMENT: production
+      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+      AGENT_SERVER_URL: http://agent-server:8123
+      AGENT_ASSISTANT_ID: crypto_analysis
+      INTERNAL_JWT_KID: compose-ephemeral
+      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+    command:
+      - python
+      - -m
+      - crypto_alert_v2.commands.worker
+      - --worker-id
+      - compose-worker
+    volumes:
+      - type: volume
+        source: internal-jwt-private
+        target: /run/internal-jwt-private
+        read_only: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      internal-jwt-keys:
+        condition: service_completed_successfully
+      development-bootstrap:
+        condition: service_completed_successfully
+      agent-server-readiness:
+        condition: service_completed_successfully
 
   frontend:
     build:
@@ -74,24 +249,49 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:22-alpine}
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8010}
-    image: crypto-manual-alert-frontend:0.1.0
+    image: crypto-manual-alert-v2-frontend:local
     restart: unless-stopped
+    init: true
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8010}
-      API_INTERNAL_BASE_URL: ${API_INTERNAL_BASE_URL:-http://api:8010}
+      APP_ENVIRONMENT: development
+      PRODUCT_API_BASE_URL: http://product-api:8011
+      AGENT_SERVER_URL: http://agent-server:8123
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_KID: compose-ephemeral
+      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
+      INTERNAL_JWT_AUDIENCE: crypto-alert-product-api
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      DEVELOPMENT_BOOTSTRAP_ENABLED: "true"
+      DEVELOPMENT_BOOTSTRAP_PROFILE: local-proof
+      DEVELOPMENT_BOOTSTRAP_SUBJECT: dev-user
+      DEVELOPMENT_BOOTSTRAP_TENANT_ID: dev-tenant
+      DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID: dev-workspace
+      DEVELOPMENT_BOOTSTRAP_ROLES: '["member"]'
+      DEVELOPMENT_BOOTSTRAP_PERMISSIONS: '["analysis:read","analysis:write"]'
     ports:
-      - "${FRONTEND_PORT:-3001}:3001"
-    depends_on:
-      api:
-        condition: service_healthy
+      - "127.0.0.1:${FRONTEND_PORT:-3001}:3001"
+    volumes:
+      - type: volume
+        source: internal-jwt-private
+        target: /run/internal-jwt-private
+        read_only: true
     healthcheck:
       test:
         - CMD
         - node
         - -e
-        - "const base=process.env.API_INTERNAL_BASE_URL || 'http://api:8010'; fetch(base + '/api/system/health').then(async (r) => { if (!r.ok) process.exit(1); const data = await r.json(); process.exit(data && data.ok ? 0 : 1); }).catch(() => process.exit(1))"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+        - "Promise.all([fetch('http://127.0.0.1:3001/api/product/api/v2/health'), fetch('http://127.0.0.1:3001/api/product/api/v2/runs?limit=1'), fetch('http://127.0.0.1:3001/work')]).then((responses) => process.exit(responses.every((response) => response.ok) ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 5s
+      timeout: 8s
+      retries: 18
+      start_period: 15s
+    depends_on:
+      product-api:
+        condition: service_healthy
+      command-worker:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  internal-jwt-private:
+  internal-jwt-public:

@@ -1,0 +1,120 @@
+import {
+  analysisSubmissionSchema,
+  productRunListSchema,
+  productTaskSchema,
+  type AnalysisSubmission,
+  type ProductRunList,
+  type ProductTask,
+} from "@/lib/schemas/product-api";
+
+type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export class ProductApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ProductApiError";
+    this.status = status;
+  }
+}
+
+export async function createAnalysis(
+  input: AnalysisSubmission,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<ProductTask> {
+  const submission = analysisSubmissionSchema.parse(input);
+  return requestTask(
+    "/api/product/api/v2/analysis",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(submission),
+    },
+    fetcher,
+  );
+}
+
+export async function getTask(
+  taskId: string,
+  fetcher: Fetcher = fetch,
+  runId?: string,
+): Promise<ProductTask> {
+  const runSelection = runId
+    ? `?run_id=${encodeURIComponent(runId)}`
+    : "";
+  return requestTask(
+    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}${runSelection}`,
+    {
+      method: "GET",
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    },
+    fetcher,
+  );
+}
+
+export async function listRuns(
+  limit = 25,
+  fetcher: Fetcher = fetch,
+): Promise<ProductRunList> {
+  const normalizedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  const response = await fetcher(
+    `/api/product/api/v2/runs?limit=${normalizedLimit}`,
+    {
+      method: "GET",
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw new ProductApiError(readableDetail(body, response.status), response.status);
+  }
+  const parsed = productRunListSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ProductApiError("Product API returned an invalid Run list.", 502);
+  }
+  return parsed.data;
+}
+
+async function requestTask(path: string, init: RequestInit, fetcher: Fetcher): Promise<ProductTask> {
+  const response = await fetcher(path, init);
+  const body = await readJson(response);
+
+  if (!response.ok) {
+    throw new ProductApiError(readableDetail(body, response.status), response.status);
+  }
+
+  const parsed = productTaskSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ProductApiError("Product API returned an invalid response.", 502);
+  }
+  return parsed.data;
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function readableDetail(body: unknown, status: number): string {
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    "detail" in body &&
+    typeof body.detail === "string" &&
+    body.detail.trim()
+  ) {
+    return body.detail;
+  }
+  return `Product API request failed (${status}).`;
+}

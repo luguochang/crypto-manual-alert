@@ -2,30 +2,27 @@ ARG NODE_BASE_IMAGE=node:22-alpine
 FROM ${NODE_BASE_IMAGE} AS deps
 
 WORKDIR /app/frontend
-
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 FROM ${NODE_BASE_IMAGE} AS builder
 
+ENV NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app/frontend
-
-ARG NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010
-ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
-
 COPY --from=deps /app/frontend/node_modules ./node_modules
 COPY frontend ./
 RUN npm run build
 
 FROM ${NODE_BASE_IMAGE} AS runner
 
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app/frontend
 
-ARG NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010
-ENV NODE_ENV=production
-ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
-
-COPY --from=builder /app/frontend ./
+COPY --from=builder /app/frontend/package.json ./package.json
+COPY --from=builder /app/frontend/package-lock.json ./package-lock.json
+COPY --from=builder /app/frontend/node_modules ./node_modules
+COPY --from=builder /app/frontend/.next ./.next
 
 EXPOSE 3001
 

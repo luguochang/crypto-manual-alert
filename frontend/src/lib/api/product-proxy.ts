@@ -1,0 +1,123 @@
+import "server-only";
+
+import { requiresAuthenticatedRuntime } from "@/lib/runtime/app-environment";
+
+type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type AuthorizationResolver = (request: Request) => Promise<string | null>;
+
+const defaultProductApiBaseUrl = "http://127.0.0.1:8011";
+const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
+
+export async function proxyProductRequest(
+  request: Request,
+  pathSegments: string[],
+  fetcher: Fetcher = fetch,
+  resolveAuthorization: AuthorizationResolver = defaultAuthorizationResolver,
+): Promise<Response> {
+  if (!isAllowedProductRoute(request.method, pathSegments)) {
+    return Response.json({ detail: "Product API route not found." }, { status: 404 });
+  }
+  try {
+    const upstreamUrl = buildUpstreamUrl(request, pathSegments);
+    const authorization = await resolveAuthorization(request);
+    if (requiresAuthenticatedRuntime() && authorization === null) {
+      return Response.json({ detail: "Authentication required." }, { status: 401 });
+    }
+    const headers = buildServerOwnedHeaders(request, pathSegments, authorization);
+    const body = request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : await request.arrayBuffer();
+    const response = await fetcher(upstreamUrl, {
+      method: request.method,
+      headers,
+      body: body && body.byteLength > 0 ? body : undefined,
+      cache: "no-store",
+      redirect: "manual",
+    });
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders(response.headers),
+    });
+  } catch {
+    return Response.json(
+      { detail: "Product API is temporarily unavailable." },
+      { status: 502 },
+    );
+  }
+}
+
+function isAllowedProductRoute(method: string, pathSegments: string[]): boolean {
+  const path = pathSegments.join("/");
+  if (method === "GET" && path === "api/v2/health") return true;
+  if (method === "GET" && path === "api/v2/runs") return true;
+  if (method === "POST" && path === "api/v2/analysis") return true;
+  return method === "GET" && /^api\/v2\/tasks\/[0-9a-f-]{36}$/i.test(path);
+}
+
+async function defaultAuthorizationResolver(request: Request): Promise<string | null> {
+  const {
+    isDevelopmentBootstrapRuntime,
+    resolveInternalAuthorization,
+  } = await import("@/lib/auth/bff-auth");
+  if (
+    !requiresAuthenticatedRuntime()
+    && !isDevelopmentBootstrapRuntime()
+  ) return null;
+  return resolveInternalAuthorization(request);
+}
+
+function buildUpstreamUrl(request: Request, pathSegments: string[]): string {
+  if (pathSegments.length === 0 || pathSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("Invalid Product API path");
+  }
+  const baseUrl = normalizeBaseUrl(process.env.PRODUCT_API_BASE_URL ?? defaultProductApiBaseUrl);
+  const encodedPath = pathSegments.map((segment) => encodeURIComponent(segment)).join("/");
+  const upstreamUrl = new URL(encodedPath, baseUrl);
+  upstreamUrl.search = new URL(request.url).search;
+  return upstreamUrl.toString();
+}
+
+function normalizeBaseUrl(value: string): URL {
+  const baseUrl = new URL(value.endsWith("/") ? value : `${value}/`);
+  if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+    throw new Error("Invalid Product API protocol");
+  }
+  baseUrl.username = "";
+  baseUrl.password = "";
+  baseUrl.search = "";
+  baseUrl.hash = "";
+  return baseUrl;
+}
+
+function buildServerOwnedHeaders(
+  request: Request,
+  pathSegments: string[],
+  authorization: string | null,
+): Headers {
+  const headers = new Headers();
+  for (const name of ["accept", "content-type", "if-none-match", "x-request-id"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+
+  if (request.method === "POST" && pathSegments.join("/") === "api/v2/analysis") {
+    const idempotencyKey = request.headers.get("idempotency-key");
+    if (idempotencyKey && idempotencyKeyPattern.test(idempotencyKey)) {
+      headers.set("idempotency-key", idempotencyKey);
+    }
+  }
+
+  if (authorization) headers.set("authorization", authorization);
+  return headers;
+}
+
+function responseHeaders(upstreamHeaders: Headers): Headers {
+  const headers = new Headers();
+  for (const name of ["cache-control", "content-type", "etag", "x-request-id", "x-upstream-request-id"]) {
+    const value = upstreamHeaders.get(name);
+    if (value) headers.set(name, value);
+  }
+  return headers;
+}

@@ -3,85 +3,123 @@ from __future__ import annotations
 from pathlib import Path
 
 
-EVAL_ROUTE = Path("frontend/src/app/eval/page.tsx")
-EVAL_COMPONENTS = {
-    "financial-quality-panel.tsx",
-    "eval-candidates-table.tsx",
-    "eval-replay-table.tsx",
-    "eval-judge-scores-table.tsx",
-}
-RUN_DETAIL_ROUTE = Path("frontend/src/app/runs/[traceId]/page.tsx")
-RUN_DETAIL_COMPONENTS = {
-    "agent-audit-panel.tsx",
-    "worker-matrix.tsx",
-    "tool-call-graph.tsx",
-    "source-freshness-panel.tsx",
-    "conflict-matrix.tsx",
-    "candidate-comparison.tsx",
-}
+FRONTEND_SRC = Path("frontend/src")
+WORK_ROUTE = FRONTEND_SRC / "app" / "work" / "page.tsx"
+RUNS_ROUTE = FRONTEND_SRC / "app" / "runs" / "page.tsx"
+PRIMARY_NAVIGATION = FRONTEND_SRC / "components" / "primary-navigation.tsx"
+WORK_SURFACE = FRONTEND_SRC / "features" / "work" / "work-surface.tsx"
+RUNS_SURFACE = FRONTEND_SRC / "features" / "runs" / "runs-surface.tsx"
+OFFICIAL_RUN_STREAM = (
+    FRONTEND_SRC / "features" / "agent-runtime" / "official-run-stream.tsx"
+)
+WORK_PRODUCT_E2E = Path("frontend/tests/e2e-v2/work-product.spec.ts")
+V2_IMPLEMENTATION_STATUS = Path("docs/v2/15-v2-implementation-status.md")
 
 
-def test_eval_route_keeps_tables_and_financial_quality_in_components():
-    eval_dir = EVAL_ROUTE.parent
-    component_files = {path.name for path in eval_dir.glob("*.tsx")}
+def test_work_and_runs_routes_keep_product_ownership_in_feature_surfaces():
+    work_route = WORK_ROUTE.read_text(encoding="utf-8")
+    runs_route = RUNS_ROUTE.read_text(encoding="utf-8")
+    navigation = PRIMARY_NAVIGATION.read_text(encoding="utf-8")
 
-    assert EVAL_COMPONENTS <= component_files
-    assert _line_count(EVAL_ROUTE) <= 280
-
-
-def test_eval_quality_route_does_not_load_diagnostic_run_detail():
-    source = EVAL_ROUTE.read_text(encoding="utf-8")
-
-    assert "getEvalRunDetail" in source
-    assert 'tab === "runs" && latestRunId' in source
-    assert "const latestDetail = latestRunId ? await getEvalRunDetail" not in source
-
-
-def test_run_detail_route_keeps_agent_audit_in_components():
-    run_detail_dir = RUN_DETAIL_ROUTE.parent
-    component_files = {path.name for path in run_detail_dir.glob("*.tsx")}
-
-    assert RUN_DETAIL_COMPONENTS <= component_files
-    assert _line_count(RUN_DETAIL_ROUTE) <= 380
+    assert 'import { WorkSurface } from "@/features/work/work-surface";' in work_route
+    assert "return <WorkSurface />;" in work_route
+    assert 'import { RunsSurface } from "@/features/runs/runs-surface";' in runs_route
+    assert "return <RunsSurface />;" in runs_route
+    assert _line_count(WORK_ROUTE) <= 10
+    assert _line_count(RUNS_ROUTE) <= 10
+    assert '{ label: "Work", icon: BriefcaseBusiness, href: "/work" }' in navigation
+    assert '{ label: "Runs", icon: History, href: "/runs" }' in navigation
 
 
-def test_run_detail_agent_audit_panel_exposes_first_screen_risk_summary():
-    source = (RUN_DETAIL_ROUTE.parent / "agent-audit-panel.tsx").read_text(encoding="utf-8")
+def test_work_route_uses_typed_product_api_and_official_stream_projection():
+    source = WORK_SURFACE.read_text(encoding="utf-8")
 
-    assert "buildRiskSummaryItems" in source
-    assert "<dt>Mode</dt>" in source
-    assert "<dt>Candidate Status</dt>" in source
-    assert "<dt>Blocked Reason</dt>" in source
-    assert "Tool Calls Missing" in source
-    assert "Candidate Gate Failed" in source
-    assert "Financial Quality Missing" in source
-    assert "Production Final Input" in source
-
-
-def test_run_detail_tool_call_graph_exposes_tool_error_summary():
-    source = (RUN_DETAIL_ROUTE.parent / "tool-call-graph.tsx").read_text(encoding="utf-8")
-
-    assert "<th>Error</th>" in source
-    assert "error_type" in source
-    assert "error_hash" in source
+    assert 'import { AnalysisProjection } from "@/features/analysis/analysis-projection";' in source
+    assert 'import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";' in source
+    assert 'import { createAnalysis, getTask, ProductApiError } from "@/lib/api/product-client";' in source
+    assert 'from "@/lib/schemas/product-api";' in source
+    assert "query_text: query" in source
+    assert "<OfficialRunStream" in source
+    assert "<AnalysisProjection" in source
 
 
-def test_run_detail_json_payloads_are_collapsed_auxiliary_details():
-    # tab 拆分后 JsonDetails 落在 decision-tab/eval-tab/raw-tab 等组件里，
-    # 扫描整个 run detail 目录以保留意图：JSON 用 JsonDetails 折叠，不用裸 <pre>。
-    sources = [
-        path.read_text(encoding="utf-8")
-        for path in RUN_DETAIL_ROUTE.parent.glob("*.tsx")
+def test_runs_route_reads_persisted_products_and_links_historical_run_selection():
+    source = RUNS_SURFACE.read_text(encoding="utf-8")
+
+    assert 'import { listRuns, ProductApiError } from "@/lib/api/product-client";' in source
+    assert 'import type { ProductRunSummary } from "@/lib/schemas/product-api";' in source
+    assert "const response = await listRuns(25);" in source
+    assert "<li key={run.run_id}>" in source
+    assert (
+        "href={`/work?task=${encodeURIComponent(run.task_id)}"
+        "&run=${encodeURIComponent(run.run_id)}`}"
+    ) in source
+
+
+def test_official_stream_uses_langchain_react_and_same_origin_agent_bff():
+    source = OFFICIAL_RUN_STREAM.read_text(encoding="utf-8")
+
+    assert 'import { useStream } from "@langchain/react";' in source
+    assert "const stream = useStream<OfficialExecutionValues>({" in source
+    assert 'return new URL("/api/agent", baseUrl).toString();' in source
+    assert "apiUrl: officialAgentApiUrl(window.location.origin)" in source
+    assert 'transport: "sse"' in source
+
+
+def test_historical_run_does_not_attach_the_live_thread_head():
+    work = WORK_SURFACE.read_text(encoding="utf-8")
+    stream = OFFICIAL_RUN_STREAM.read_text(encoding="utf-8")
+    browser_gate = WORK_PRODUCT_E2E.read_text(encoding="utf-8")
+
+    assert "setHistoricalRunSelection(selectedRunId !== null)" in work
+    assert "historicalRunSelection\n      || agentAssistantId === null" in work
+    assert "{activeStreamBinding && !historicalRunSelection ? (" in work
+    assert "const { assistant_id: assistantId, thread_id: threadId } = binding;" in stream
+    assert "runId:" not in stream
+    assert (
+        'test("does not attach the Thread head stream while viewing historical Run output"'
+        in browser_gate
+    )
+
+
+def test_v2_product_surfaces_do_not_render_raw_json_or_preformatted_payloads():
+    product_sources = [
+        *sorted((FRONTEND_SRC / "app").rglob("*.tsx")),
+        *sorted((FRONTEND_SRC / "components").rglob("*.tsx")),
+        *sorted((FRONTEND_SRC / "features").rglob("*.tsx")),
     ]
-    combined = "\n".join(sources)
+    combined = "\n".join(
+        path.read_text(encoding="utf-8") for path in product_sources
+    )
 
-    assert "JsonDetails" in combined
-    assert 'open={index < 3}' not in combined
-    assert 'open={index === 0 || item.status !== "ok"}' not in combined
-    assert '<pre className="code-box light-code">{formatJson(analysis.data_gaps ?? [])}</pre>' not in combined
-    assert '<pre className="code-box light-code">{formatJson(analysis.risk_rule_hits ?? verdict)}</pre>' not in combined
-    assert '<pre className="code-box">{formatJson(badcases)}</pre>' not in combined
-    assert '<pre className="code-box large-code">{formatJson(parsedPlan)}</pre>' not in combined
+    assert "<dl" in combined
+    assert "<ol" in combined
+    assert "<pre" not in combined
+    assert "JSON.stringify(" not in combined
+    assert "Raw JSON" not in combined
+
+
+def test_retired_v1_diagnostics_are_not_misrepresented_as_completed_v2_parity():
+    status = V2_IMPLEMENTATION_STATUS.read_text(encoding="utf-8")
+
+    for retired_path in (
+        FRONTEND_SRC / "app" / "eval" / "page.tsx",
+        FRONTEND_SRC / "app" / "config" / "page.tsx",
+        FRONTEND_SRC / "app" / "runs" / "[traceId]" / "agent-audit-panel.tsx",
+        FRONTEND_SRC / "app" / "runs" / "[traceId]" / "notification-history.tsx",
+        FRONTEND_SRC / "lib" / "schemas" / "manual-run.ts",
+        FRONTEND_SRC / "lib" / "schemas" / "runs.ts",
+    ):
+        assert not retired_path.exists(), retired_path
+
+    for tracked_gap in (
+        "V2 不是 production ready",
+        "Runs detail/Inbox/Workspace/feedback/commands 完整 API",
+        "Inbox、Library、Settings 未交付",
+        "官方 HITL、notification、feedback",
+        "V1 parity/removal 均不存在",
+    ):
+        assert tracked_gap in status
 
 
 def _line_count(path: Path) -> int:

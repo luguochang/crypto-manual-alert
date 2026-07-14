@@ -1,20 +1,25 @@
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
 FROM ${PYTHON_BASE_IMAGE}
 
+ARG UV_VERSION=0.11.28
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH=/app/backend/.venv/bin:$PATH
 
-WORKDIR /app
+WORKDIR /app/backend
 
-COPY pyproject.toml /app/
-COPY src /app/src
-COPY config /app/config
-COPY third_party /app/third_party
-COPY tests/fixtures /app/tests/fixtures
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-RUN pip install --upgrade pip && pip install .
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-RUN mkdir -p /app/data
+COPY backend ./
+RUN uv sync --frozen --no-dev
 
-CMD ["crypto-alert", "--config", "config/default.yaml", "--config", "config/prod.yaml", "--config", "config/staging.yaml", "scheduler"]
+EXPOSE 8011 8123
+
+CMD ["uvicorn", "crypto_alert_v2.api.app:app", "--host", "0.0.0.0", "--port", "8011"]

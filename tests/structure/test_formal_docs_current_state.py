@@ -20,12 +20,13 @@ MAIN_FLOW_MODULE_OWNERSHIP = Path(
 )
 
 
-AGENT_AUDIT_VIEW = Path("src/crypto_manual_alert/storage/agent_audit_view.py")
-FRONTEND_RUN_SCHEMA = Path("frontend/src/lib/schemas/runs.ts")
-FRONTEND_MANUAL_RUN_SCHEMA = Path("frontend/src/lib/schemas/manual-run.ts")
-FRONTEND_RUN_PAGE = Path("frontend/src/app/runs/[traceId]/page.tsx")
-FRONTEND_AGENT_AUDIT_PANEL = Path("frontend/src/app/runs/[traceId]/agent-audit-panel.tsx")
-LOCAL_STACK_SMOKE = Path("tools/local_stack/smoke_local_stack.py")
+V2_IMPLEMENTATION_STATUS = Path("docs/v2/15-v2-implementation-status.md")
+PRODUCT_API_SCHEMA = Path("frontend/src/lib/schemas/product-api.ts")
+PRODUCT_API_CLIENT = Path("frontend/src/lib/api/product-client.ts")
+PRODUCT_API_PROXY = Path("frontend/src/lib/api/product-proxy.ts")
+OFFICIAL_RUN_STREAM = Path(
+    "frontend/src/features/agent-runtime/official-run-stream.tsx"
+)
 
 
 def test_formal_contract_records_current_canonical_paths():
@@ -155,18 +156,42 @@ def test_checkpoint_9_records_artifact_full_chain_guard():
     assert "tools/local_stack/smoke_local_stack.py" in source
 
 
-def test_query_semantics_is_asserted_across_api_frontend_and_runtime_smoke():
-    sources = {
-        "agent_audit_view": AGENT_AUDIT_VIEW.read_text(encoding="utf-8"),
-        "frontend_schema": FRONTEND_RUN_SCHEMA.read_text(encoding="utf-8"),
-        "frontend_agent_audit_panel": FRONTEND_AGENT_AUDIT_PANEL.read_text(encoding="utf-8"),
-        "runtime_smoke": LOCAL_STACK_SMOKE.read_text(encoding="utf-8"),
-    }
+def test_v2_product_api_contract_is_typed_from_zod_schema_through_same_origin_bff():
+    schema = PRODUCT_API_SCHEMA.read_text(encoding="utf-8")
+    client = PRODUCT_API_CLIENT.read_text(encoding="utf-8")
+    proxy = PRODUCT_API_PROXY.read_text(encoding="utf-8")
+    status = V2_IMPLEMENTATION_STATUS.read_text(encoding="utf-8")
 
-    for name, source in sources.items():
-        assert "query_semantics" in source, name
-        if name != "frontend_agent_audit_panel":
-            assert "audit_note" in source, name
+    for required_text in (
+        "analysisSubmissionSchema = z.strictObject",
+        "query_text: z.string().trim().min(1).max(2000)",
+        "productRunListSchema = z.strictObject",
+        "productTaskSchema = z",
+        "productErrorSchema = z.strictObject",
+        "provider: z.string().regex",
+        "error_type: z.string().regex",
+        "attempt: z.number().int().min(1).max(100)",
+    ):
+        assert required_text in schema
+
+    for required_text in (
+        "analysisSubmissionSchema.parse(input)",
+        '"/api/product/api/v2/analysis"',
+        "`/api/product/api/v2/tasks/${encodeURIComponent(taskId)}${runSelection}`",
+        "`/api/product/api/v2/runs?limit=${normalizedLimit}`",
+        "productTaskSchema.safeParse(body)",
+        "productRunListSchema.safeParse(body)",
+    ):
+        assert required_text in client
+
+    assert 'method === "GET" && path === "api/v2/runs"' in proxy
+    assert 'method === "POST" && path === "api/v2/analysis"' in proxy
+    assert 'method === "GET" && /^api\\/v2\\/tasks\\/' in proxy
+    assert "create analysis、run list、get task" in status
+    assert "`GET /api/v2/tasks/{task_id}` 支持显式 `run_id`" in status
+    assert "`done=0`、`partial=12`、`blocked=1`、`not_started=3`" in status
+    assert "V2 不是 production ready" in status
+    assert "V1 parity/removal 均不存在" in status
 
 
 def test_compatibility_wrapper_lifecycle_is_linked_from_main_plan():
@@ -320,42 +345,33 @@ def test_current_execution_checklists_lead_with_latest_authoritative_verificatio
             assert required_text in source
 
 
-def test_main_path_contract_is_documented_and_preserved_by_frontend_schemas():
-    schema_sources = {
-        "manual_run_schema": FRONTEND_MANUAL_RUN_SCHEMA.read_text(encoding="utf-8"),
-        "run_detail_schema": FRONTEND_RUN_SCHEMA.read_text(encoding="utf-8"),
-    }
+def test_v2_live_and_historical_ownership_is_documented_and_preserved_by_frontend_contracts():
+    schema = PRODUCT_API_SCHEMA.read_text(encoding="utf-8")
+    client = PRODUCT_API_CLIENT.read_text(encoding="utf-8")
+    stream = OFFICIAL_RUN_STREAM.read_text(encoding="utf-8")
+    status = V2_IMPLEMENTATION_STATUS.read_text(encoding="utf-8")
 
-    manual_schema = schema_sources["manual_run_schema"]
-    run_detail_schema = schema_sources["run_detail_schema"]
     for required_text in (
-        "mainPathContractSchema",
-        "main_path_contract",
-        "proof_level",
-        "production_success",
-        "hosted_proof_required",
-        "does_not_prove",
+        'protocol: z.literal("langgraph-v2")',
+        "assistant_id: z.string().trim().min(1).max(255)",
+        "thread_id: z.string().trim().min(1).max(255)",
+        "run_id: z.string().trim().min(1).max(255)",
+        "agent_stream: agentStreamBindingSchema.nullable().default(null)",
     ):
-        assert required_text in manual_schema
+        assert required_text in schema
 
-    assert "mainPathContractSchema" in run_detail_schema
-    assert "main_path_contract" in run_detail_schema
+    assert "`?run_id=${encodeURIComponent(runId)}`" in client
+    assert 'import { useStream } from "@langchain/react";' in stream
+    assert "const { assistant_id: assistantId, thread_id: threadId } = binding;" in stream
+    assert "apiUrl: officialAgentApiUrl(window.location.origin)" in stream
+    assert "runId:" not in stream
 
-    for checklist_path in (CURRENT_DELIVERY_CHECKLIST, MAIN_FLOW_PRODUCTION_RECOVERY_CHECKLIST):
-        source = checklist_path.read_text(encoding="utf-8")
-        for required_text in (
-            "`main_path_contract`",
-            "`proof_level=mock`",
-            "`proof_level=production-intent-contract`",
-            "`production_success=false`",
-            "`hosted_proof_required=true`",
-            "`does_not_prove=hosted_prod_actionable`",
-            "`runtime_role=production_main`",
-            "`final_input_contract.mode=legacy_prompt`",
-            "`manual_only.manual_execution_required=true`",
-            "`manual_only.auto_order_enabled=false`",
-        ):
-            assert required_text in source
+    assert "same-origin agent/product BFF" in status
+    assert "`@langchain/react` thread attachment" in status
+    assert "Product task GET 现在可以用 `run_id` 选择历史 Product Run" in status
+    assert "官方 HITL 尚未交付" in status
+    assert "完整 command/event protocol" in status
+    assert "strict real Playwright 在 research 阶段" in status
 
 
 def test_main_flow_checkpoint_records_latest_proof_gate_hardening_summary():

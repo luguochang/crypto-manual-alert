@@ -1,0 +1,546 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import importlib.util
+from pathlib import Path
+from typing import Any, cast
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import CheckConstraint, DateTime, Index, String, UniqueConstraint
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from crypto_alert_v2.persistence.base import Base, PRODUCT_SCHEMA
+from crypto_alert_v2.persistence.models import (
+    Artifact,
+    ArtifactVersion,
+    Decision,
+    MarketSnapshot,
+    Membership,
+    Run,
+    Task,
+    TaskCommand,
+    Tenant,
+    Thread,
+    User,
+    WebEvidence,
+    Workspace,
+)
+from crypto_alert_v2.persistence.repositories import (
+    ArtifactRepository,
+    RunRepository,
+    TaskCommandRepository,
+    TaskRepository,
+)
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+EXPECTED_TABLES = {
+    "tenants",
+    "users",
+    "workspaces",
+    "memberships",
+    "threads",
+    "tasks",
+    "runs",
+    "market_snapshots",
+    "web_evidence",
+    "artifacts",
+    "artifact_versions",
+    "decisions",
+    "task_commands",
+}
+
+TABLE_MODELS = (
+    Tenant,
+    User,
+    Workspace,
+    Membership,
+    Thread,
+    Task,
+    Run,
+    MarketSnapshot,
+    WebEvidence,
+    Artifact,
+    ArtifactVersion,
+    Decision,
+    TaskCommand,
+)
+
+WORKSPACE_SCOPED_TABLES = EXPECTED_TABLES - {"tenants", "users", "workspaces"}
+
+EXPECTED_JSONB_COLUMNS = {
+    ("memberships", "permissions"),
+    ("threads", "context"),
+    ("tasks", "request_payload"),
+    ("runs", "input_payload"),
+    ("runs", "output_payload"),
+    ("market_snapshots", "snapshot"),
+    ("web_evidence", "payload"),
+    ("artifact_versions", "content"),
+    ("decisions", "decision"),
+    ("decisions", "evidence_verdict"),
+    ("decisions", "risk_verdict"),
+    ("task_commands", "payload"),
+}
+
+RUN_STATUSES = {
+    "queued",
+    "running",
+    "waiting_human",
+    "succeeded",
+    "blocked",
+    "failed",
+    "cancelled",
+}
+
+
+def _unique_column_sets(table_name: str) -> set[frozenset[str]]:
+    table = Base.metadata.tables[f"{PRODUCT_SCHEMA}.{table_name}"]
+    return {
+        frozenset(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+
+def _index_column_sets(table_name: str) -> set[tuple[str, ...]]:
+    table = Base.metadata.tables[f"{PRODUCT_SCHEMA}.{table_name}"]
+    return {
+        tuple(column.name for column in cast(Index, index).columns)
+        for index in table.indexes
+    }
+
+
+def test_metadata_contains_only_the_product_core_tables() -> None:
+    assert {table.name for table in Base.metadata.sorted_tables} == EXPECTED_TABLES
+    assert {table.schema for table in Base.metadata.sorted_tables} == {PRODUCT_SCHEMA}
+    assert not any("checkpoint" in table.name for table in Base.metadata.sorted_tables)
+
+
+@pytest.mark.parametrize("model", TABLE_MODELS)
+def test_every_product_entity_has_a_postgresql_uuid_primary_key(model: Any) -> None:
+    primary_key_columns = list(model.__table__.primary_key.columns)
+
+    assert [column.name for column in primary_key_columns] == ["id"]
+    assert isinstance(primary_key_columns[0].type, UUID)
+    assert primary_key_columns[0].type.as_uuid is True
+
+
+def test_tenant_and_workspace_ownership_is_backed_by_foreign_keys() -> None:
+    for table in Base.metadata.sorted_tables:
+        if table.name == "tenants":
+            continue
+
+        assert "tenant_id" in table.c
+        tenant_targets = {foreign_key.target_fullname for foreign_key in table.c.tenant_id.foreign_keys}
+        assert f"{PRODUCT_SCHEMA}.tenants.id" in tenant_targets
+
+        if table.name not in WORKSPACE_SCOPED_TABLES:
+            continue
+
+        assert "workspace_id" in table.c
+        workspace_targets = {
+            foreign_key.target_fullname for foreign_key in table.c.workspace_id.foreign_keys
+        }
+        assert f"{PRODUCT_SCHEMA}.workspaces.id" in workspace_targets
+
+
+def test_actor_external_identifiers_and_lineage_keys_are_unique() -> None:
+    assert frozenset({"external_id"}) in _unique_column_sets("tenants")
+    assert frozenset({"tenant_id", "external_id"}) in _unique_column_sets(
+        "workspaces"
+    )
+    assert frozenset({"external_id"}) not in _unique_column_sets("workspaces")
+    assert frozenset({"tenant_id", "external_subject"}) in _unique_column_sets(
+        "users"
+    )
+    assert frozenset({"external_subject"}) not in _unique_column_sets("users")
+    assert frozenset({"workspace_id", "user_id"}) in _unique_column_sets("memberships")
+    assert frozenset({"task_id", "attempt"}) in _unique_column_sets("runs")
+    assert frozenset({"artifact_id", "version_number"}) in _unique_column_sets(
+        "artifact_versions"
+    )
+    assert frozenset({"artifact_version_id"}) in _unique_column_sets("decisions")
+    assert frozenset({"thread_id", "sequence"}) in _unique_column_sets("task_commands")
+    assert frozenset({"workspace_id", "idempotency_key"}) in _unique_column_sets(
+        "task_commands"
+    )
+
+
+def test_analysis_admission_is_persisted_and_actor_workspace_unique() -> None:
+    assert isinstance(Task.__table__.c.idempotency_key.type, String)
+    assert Task.__table__.c.idempotency_key.type.length == 255
+    assert Task.__table__.c.idempotency_key.nullable is False
+    assert isinstance(Task.__table__.c.request_payload_hash.type, String)
+    assert Task.__table__.c.request_payload_hash.type.length == 64
+    assert Task.__table__.c.request_payload_hash.nullable is False
+    assert frozenset(
+        {"tenant_id", "workspace_id", "owner_user_id", "idempotency_key"}
+    ) in _unique_column_sets("tasks")
+
+
+def test_run_persists_nullable_official_assistant_id() -> None:
+    column = Run.__table__.c.official_assistant_id
+
+    assert isinstance(column.type, String)
+    assert column.type.length == 255
+    assert column.nullable is True
+
+
+def test_workspace_access_paths_have_composite_indexes() -> None:
+    for table_name in WORKSPACE_SCOPED_TABLES:
+        assert any(
+            columns[:2] == ("tenant_id", "workspace_id")
+            for columns in _index_column_sets(table_name)
+        ), table_name
+
+
+def test_structured_payloads_use_jsonb_and_timestamps_are_timezone_aware() -> None:
+    actual_jsonb_columns: set[tuple[str, str]] = set()
+
+    for table in Base.metadata.sorted_tables:
+        for column in table.columns:
+            if isinstance(column.type, JSONB):
+                actual_jsonb_columns.add((table.name, column.name))
+            if isinstance(column.type, DateTime):
+                assert column.type.timezone is True, f"{table.name}.{column.name}"
+
+    assert actual_jsonb_columns == EXPECTED_JSONB_COLUMNS
+
+
+def test_run_status_check_constraint_contains_exactly_the_supported_states() -> None:
+    constraints = [
+        constraint
+        for constraint in Run.__table__.constraints
+        if isinstance(constraint, CheckConstraint) and constraint.name == "ck_runs_status"
+    ]
+
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert {status for status in RUN_STATUSES if f"'{status}'" in sql} == RUN_STATUSES
+    assert "degraded" not in sql
+
+
+@dataclass(frozen=True, slots=True)
+class _Actor:
+    tenant_id: str = "tenant-external"
+    workspace_id: str = "workspace-external"
+    user_id: str = "oidc|subject"
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.statement: Any | None = None
+
+    async def scalar(self, statement: Any) -> None:
+        self.statement = statement
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "repository_type",
+    (TaskRepository, RunRepository, ArtifactRepository, TaskCommandRepository),
+)
+async def test_repository_reads_resolve_actor_scope_inside_the_resource_query(
+    repository_type: type[Any],
+) -> None:
+    recording_session = _RecordingSession()
+    repository = repository_type(cast(AsyncSession, recording_session), _Actor())
+
+    assert await repository.get(uuid4()) is None
+    assert recording_session.statement is not None
+    sql = str(
+        recording_session.statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "tenants.external_id = 'tenant-external'" in sql
+    assert "workspaces.external_id = 'workspace-external'" in sql
+    assert "users.external_subject = 'oidc|subject'" in sql
+    assert "memberships.is_active IS true" in sql
+    assert "app.memberships.tenant_id = app.tenants.id" in sql
+    assert "app.memberships.workspace_id = app.workspaces.id" in sql
+    assert "app.memberships.user_id = app.users.id" in sql
+
+
+class _MigrationOperations:
+    def __init__(self) -> None:
+        self.created_tables: list[tuple[str, str | None]] = []
+        self.dropped_tables: list[tuple[str, str | None]] = []
+        self.added_columns: list[tuple[str, str, str | None]] = []
+        self.altered_columns: list[tuple[str, str, bool | None, str | None]] = []
+        self.created_constraints: list[tuple[str, str, tuple[str, ...], str | None]] = []
+        self.dropped_constraints: list[tuple[str, str, str | None]] = []
+        self.dropped_columns: list[tuple[str, str, str | None]] = []
+        self.executed: list[str] = []
+
+    def execute(self, statement: Any) -> None:
+        self.executed.append(str(statement))
+
+    def create_table(self, name: str, *elements: Any, schema: str | None = None) -> None:
+        self.created_tables.append((name, schema))
+
+    def create_index(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def drop_index(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def drop_table(self, name: str, *, schema: str | None = None) -> None:
+        self.dropped_tables.append((name, schema))
+
+    def add_column(
+        self,
+        table_name: str,
+        column: Any,
+        *,
+        schema: str | None = None,
+    ) -> None:
+        self.added_columns.append((table_name, column.name, schema))
+
+    def alter_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        nullable: bool | None = None,
+        schema: str | None = None,
+        **_: Any,
+    ) -> None:
+        self.altered_columns.append((table_name, column_name, nullable, schema))
+
+    def create_unique_constraint(
+        self,
+        name: str,
+        table_name: str,
+        columns: list[str],
+        *,
+        schema: str | None = None,
+    ) -> None:
+        self.created_constraints.append((name, table_name, tuple(columns), schema))
+
+    def drop_constraint(
+        self,
+        name: str,
+        table_name: str,
+        *,
+        schema: str | None = None,
+        **_: Any,
+    ) -> None:
+        self.dropped_constraints.append((name, table_name, schema))
+
+    def drop_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        schema: str | None = None,
+    ) -> None:
+        self.dropped_columns.append((table_name, column_name, schema))
+
+
+def _load_initial_revision() -> Any:
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0001_initial.py"
+    spec = importlib.util.spec_from_file_location("product_initial_revision", revision_path)
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_admission_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT
+        / "alembic"
+        / "versions"
+        / "0002_analysis_admission_idempotency.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_analysis_admission_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_tenant_actor_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT
+        / "alembic"
+        / "versions"
+        / "0003_tenant_scoped_actor_ids.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_tenant_actor_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_official_assistant_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT
+        / "alembic"
+        / "versions"
+        / "0004_official_assistant_id.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_official_assistant_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def test_initial_revision_explicitly_creates_and_drops_the_product_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _load_initial_revision()
+    operations = _MigrationOperations()
+    monkeypatch.setattr(revision, "op", operations)
+
+    assert revision.revision == "0001_initial"
+    assert revision.down_revision is None
+    revision.upgrade()
+    revision.downgrade()
+
+    assert set(operations.created_tables) == {
+        (table_name, PRODUCT_SCHEMA) for table_name in EXPECTED_TABLES
+    }
+    assert set(operations.dropped_tables) == {
+        (table_name, PRODUCT_SCHEMA) for table_name in EXPECTED_TABLES
+    }
+
+
+def test_analysis_admission_revision_backfills_and_constrains_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _load_admission_revision()
+    operations = _MigrationOperations()
+    monkeypatch.setattr(revision, "op", operations)
+
+    assert revision.revision == "0002_analysis_idempotency"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0001_initial"
+    revision.upgrade()
+    revision.downgrade()
+
+    assert set(operations.added_columns) == {
+        ("tasks", "idempotency_key", PRODUCT_SCHEMA),
+        ("tasks", "request_payload_hash", PRODUCT_SCHEMA),
+    }
+    assert set(operations.altered_columns) == {
+        ("tasks", "idempotency_key", False, PRODUCT_SCHEMA),
+        ("tasks", "request_payload_hash", False, PRODUCT_SCHEMA),
+    }
+    assert operations.created_constraints == [
+        (
+            "uq_tasks_actor_workspace_idempotency",
+            "tasks",
+            ("tenant_id", "workspace_id", "owner_user_id", "idempotency_key"),
+            PRODUCT_SCHEMA,
+        )
+    ]
+    assert any("UPDATE app.tasks" in statement for statement in operations.executed)
+    assert operations.dropped_constraints == [
+        ("uq_tasks_actor_workspace_idempotency", "tasks", PRODUCT_SCHEMA)
+    ]
+    assert operations.dropped_columns == [
+        ("tasks", "request_payload_hash", PRODUCT_SCHEMA),
+        ("tasks", "idempotency_key", PRODUCT_SCHEMA),
+    ]
+
+
+def test_tenant_actor_revision_replaces_global_external_id_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _load_tenant_actor_revision()
+    operations = _MigrationOperations()
+    monkeypatch.setattr(revision, "op", operations)
+
+    assert revision.revision == "0003_tenant_actor_ids"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0002_analysis_idempotency"
+    revision.upgrade()
+    revision.downgrade()
+
+    assert operations.dropped_constraints == [
+        ("uq_users_external_subject", "users", PRODUCT_SCHEMA),
+        ("uq_workspaces_external_id", "workspaces", PRODUCT_SCHEMA),
+        ("uq_workspaces_tenant_external_id", "workspaces", PRODUCT_SCHEMA),
+        ("uq_users_tenant_external_subject", "users", PRODUCT_SCHEMA),
+    ]
+    assert operations.created_constraints == [
+        (
+            "uq_users_tenant_external_subject",
+            "users",
+            ("tenant_id", "external_subject"),
+            PRODUCT_SCHEMA,
+        ),
+        (
+            "uq_workspaces_tenant_external_id",
+            "workspaces",
+            ("tenant_id", "external_id"),
+            PRODUCT_SCHEMA,
+        ),
+        (
+            "uq_workspaces_external_id",
+            "workspaces",
+            ("external_id",),
+            PRODUCT_SCHEMA,
+        ),
+        (
+            "uq_users_external_subject",
+            "users",
+            ("external_subject",),
+            PRODUCT_SCHEMA,
+        ),
+    ]
+
+
+def test_official_assistant_revision_adds_and_drops_nullable_run_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _load_official_assistant_revision()
+    operations = _MigrationOperations()
+    monkeypatch.setattr(revision, "op", operations)
+
+    assert revision.revision == "0004_official_assistant_id"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0003_tenant_actor_ids"
+    revision.upgrade()
+    revision.downgrade()
+
+    assert operations.added_columns == [
+        ("runs", "official_assistant_id", PRODUCT_SCHEMA)
+    ]
+    assert operations.dropped_columns == [
+        ("runs", "official_assistant_id", PRODUCT_SCHEMA)
+    ]
+
+
+def test_alembic_uses_asyncpg_and_keeps_its_version_table_in_product_schema() -> None:
+    ini = (BACKEND_ROOT / "alembic.ini").read_text(encoding="utf-8")
+    env = (BACKEND_ROOT / "alembic" / "env.py").read_text(encoding="utf-8")
+
+    assert "script_location = %(here)s/alembic" in ini
+    assert "sqlalchemy.url = postgresql+asyncpg://" in ini
+    assert "async_engine_from_config" in env
+    assert "PRODUCT_DATABASE_URL" in env
+    assert "version_table_schema=PRODUCT_SCHEMA" in env
+    assert "include_schemas=True" in env
