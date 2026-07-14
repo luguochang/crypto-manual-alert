@@ -73,6 +73,9 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   if (method === "GET" && path === "api/v2/health") return true;
   if (method === "GET" && path === "api/v2/runs") return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
+  if (method === "POST" && /^api\/v2\/tasks\/[0-9a-f-]{36}\/cancel$/i.test(path)) {
+    return true;
+  }
   return method === "GET" && /^api\/v2\/tasks\/[0-9a-f-]{36}$/i.test(path);
 }
 
@@ -129,7 +132,14 @@ function buildServerOwnedHeaders(
     if (value) headers.set(name, value);
   }
 
-  if (request.method === "POST" && pathSegments.join("/") === "api/v2/analysis") {
+  const path = pathSegments.join("/");
+  if (
+    request.method === "POST"
+    && (
+      path === "api/v2/analysis"
+      || /^api\/v2\/tasks\/[0-9a-f-]{36}\/cancel$/i.test(path)
+    )
+  ) {
     const idempotencyKey = request.headers.get("idempotency-key");
     if (idempotencyKey && idempotencyKeyPattern.test(idempotencyKey)) {
       headers.set("idempotency-key", idempotencyKey);

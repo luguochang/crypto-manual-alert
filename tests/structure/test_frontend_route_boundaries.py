@@ -36,7 +36,11 @@ def test_work_route_uses_typed_product_api_and_official_stream_projection():
 
     assert 'import { AnalysisProjection } from "@/features/analysis/analysis-projection";' in source
     assert 'import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";' in source
-    assert 'import { createAnalysis, getTask, ProductApiError } from "@/lib/api/product-client";' in source
+    assert 'cancelTask,' in source
+    assert 'createAnalysis,' in source
+    assert 'getTask,' in source
+    assert 'ProductApiError,' in source
+    assert 'from "@/lib/api/product-client";' in source
     assert 'from "@/lib/schemas/product-api";' in source
     assert "query_text: query" in source
     assert "<OfficialRunStream" in source
@@ -72,7 +76,9 @@ def test_historical_run_does_not_attach_the_live_thread_head():
     browser_gate = WORK_PRODUCT_E2E.read_text(encoding="utf-8")
 
     assert "setHistoricalRunSelection(selectedRunId !== null)" in work
-    assert "historicalRunSelection\n      || agentAssistantId === null" in work
+    assert "const streamEligible = task !== null" in work
+    assert "&& !historicalRunSelection" in work
+    assert "&& streamEligible" in work
     assert "{activeStreamBinding && !historicalRunSelection ? (" in work
     assert "const { assistant_id: assistantId, thread_id: threadId } = binding;" in stream
     assert "runId:" not in stream

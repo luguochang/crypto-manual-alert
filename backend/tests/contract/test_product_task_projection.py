@@ -111,6 +111,9 @@ class _TaskViewSession(_RunSourceSession):
             return self.task
         if "app.artifact_versions" in sql:
             return None
+        if "FROM app.task_commands" in sql:
+            self.scalar_statements.append(statement)
+            return None
         return await super().scalar(statement)
 
     async def execute(self, statement: Any) -> SimpleNamespace:
@@ -303,8 +306,23 @@ async def test_service_projects_sources_from_current_product_run(
     assert view is not None
     assert isinstance(view["market_snapshot"], MarketSnapshot)
     assert isinstance(view["web_evidence"][0], WebEvidence)
-    for statement in (*session.scalar_statements, *session.scalars_statements):
+    source_statements = [
+        statement
+        for statement in (*session.scalar_statements, *session.scalars_statements)
+        if "app.task_commands" not in str(statement)
+    ]
+    for statement in source_statements:
         assert latest_run.id in statement.compile().params.values()
+    cancel_statement = next(
+        statement
+        for statement in session.scalar_statements
+        if "app.task_commands" in str(statement)
+    )
+    cancel_params = cancel_statement.compile().params.values()
+    assert task.id in cancel_params
+    assert resolved.tenant_id in cancel_params
+    assert resolved.workspace_id in cancel_params
+    assert resolved.user_id in cancel_params
 
 
 @pytest.mark.asyncio
@@ -331,5 +349,6 @@ async def test_service_returns_explicit_empty_sources_when_task_has_no_run(
     assert view is not None
     assert view["market_snapshot"] is None
     assert view["web_evidence"] == []
-    assert session.scalar_statements == []
+    assert len(session.scalar_statements) == 1
+    assert "app.task_commands" in str(session.scalar_statements[0])
     assert session.scalars_statements == []

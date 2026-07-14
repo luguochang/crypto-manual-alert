@@ -986,6 +986,7 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
 
     assert 'testDir: "./tests/e2e-v2"' in config
     assert {path.name for path in suite_directory.glob("*.spec.ts")} == {
+        "durable-cancel-flow.spec.ts",
         "official-stream-main-flow.spec.ts",
         "real-product-flow.spec.ts",
         "runs-product.spec.ts",

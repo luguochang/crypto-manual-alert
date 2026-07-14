@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import crypto_alert_v2.api.service as service_module
-from crypto_alert_v2.api.agent_server import RemoteRunHandle
+from crypto_alert_v2.api.agent_server import RemoteRunHandle, RemoteRunState
 from crypto_alert_v2.api.schemas import AnalysisSubmission
 from crypto_alert_v2.api.service import ProductAnalysisService
 from crypto_alert_v2.auth.context import ActorContext
@@ -103,6 +103,9 @@ class FailingRemoteRunner:
             ],
         }
 
+    async def get(self, _: RemoteRunHandle) -> RemoteRunState:
+        return RemoteRunState(status="success")
+
     async def cancel(self, _: RemoteRunHandle) -> None:
         return None
 
@@ -146,8 +149,67 @@ class SuccessfulRemoteRunner:
             "errors": [],
         }
 
+    async def get(self, _: RemoteRunHandle) -> RemoteRunState:
+        return RemoteRunState(status="success")
+
     async def cancel(self, _: RemoteRunHandle) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_does_not_cross_tenant_workspace_or_owner_scope(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="cancel-owner-tenant",
+        workspace_id="cancel-owner-workspace",
+        user_id="oidc|cancel-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    other = ActorContext(
+        tenant_id="cancel-other-tenant",
+        workspace_id="cancel-other-workspace",
+        user_id="oidc|cancel-other",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    await service.bootstrap_actor(other)
+    queued = await service.create_analysis(
+        owner,
+        submission(),
+        idempotency_key="cross-tenant-cancel-owner",
+    )
+
+    assert await service.cancel_task(
+        other,
+        str(queued["task_id"]),
+        "cross-tenant-cancel-attempt",
+    ) is None
+    owner_view = await service.get_task(owner, str(queued["task_id"]))
+    assert owner_view is not None
+    assert owner_view["status"] == "queued"
+    assert owner_view["cancel_requested_at"] is None
+    async with session_factory() as session:
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand)
+                    .where(TaskCommand.task_id == UUID(str(queued["task_id"])))
+                    .order_by(TaskCommand.sequence)
+                )
+            ).all()
+        )
+    assert [(command.command_type, command.status) for command in commands] == [
+        ("submit", "pending")
+    ]
 
 
 @pytest.mark.asyncio

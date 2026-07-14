@@ -216,6 +216,38 @@ describe("Product BFF proxy", () => {
     expect(rejected.status).toBe(404);
   });
 
+  it("allows durable task cancellation but rejects arbitrary task commands", async () => {
+    const taskId = "00000000-0000-0000-0000-000000000001";
+    const fetcher = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        void input;
+        void init;
+        return Response.json(taskProjection("running"), { status: 202 });
+      },
+    );
+
+    const response = await proxyProductRequest(
+      new Request(`http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/cancel`, {
+        method: "POST",
+        headers: { "idempotency-key": "cancel-task-1" },
+      }),
+      ["api", "v2", "tasks", taskId, "cancel"],
+      fetcher,
+    );
+    expect(response.status).toBe(202);
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("idempotency-key")).toBe("cancel-task-1");
+
+    const rejected = await proxyProductRequest(
+      new Request(`http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/retry`, {
+        method: "POST",
+      }),
+      ["api", "v2", "tasks", taskId, "retry"],
+      fetcher,
+    );
+    expect(rejected.status).toBe(404);
+  });
+
   it.each(["staging", "production"])(
     "rejects %s requests without a server-owned identity",
     async (environment) => {

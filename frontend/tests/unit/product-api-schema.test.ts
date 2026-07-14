@@ -74,6 +74,16 @@ describe("Product API schemas", () => {
     expect(runStatusSchema.parse(status)).toBe(status);
   });
 
+  it("persists a pending cancellation timestamp in the task projection", () => {
+    const pending = productTaskSchema.parse({
+      ...taskProjection("running"),
+      cancel_requested_at: "2026-07-14T15:30:00Z",
+    });
+
+    expect(pending.cancel_requested_at).toBe("2026-07-14T15:30:00Z");
+    expect(productTaskSchema.parse(taskProjection("running")).cancel_requested_at).toBeNull();
+  });
+
   it("strictly parses a nullable official Agent stream binding", () => {
     const task = {
       ...taskProjection("running"),

@@ -525,9 +525,9 @@ async function assertOfficialStreamDom(page: Page, terminalStatus: string) {
   );
   await expect(stream.locator(".official-progress-list")).toBeVisible();
   await expect(stream.getByText("执行阶段", { exact: true })).toBeVisible();
-  await expect(stream.getByText("市场快照", { exact: true })).toBeVisible();
-  await expect(stream.getByText("Web 证据", { exact: true })).toBeVisible();
   if (terminalStatus === "分析完成") {
+    await expect(stream.getByText("市场快照", { exact: true })).toBeVisible();
+    await expect(stream.getByText("Web 证据", { exact: true })).toBeVisible();
     await expect(stream.getByText("分析判断", { exact: true })).toBeVisible();
     await expect(stream.getByText("官方执行已完成", { exact: true })).toBeVisible();
   }

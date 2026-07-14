@@ -240,6 +240,7 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("official_run_id", name="uq_runs_official_run_id"),
         Index("ix_runs_tenant_workspace_status", "tenant_id", "workspace_id", "status"),
         Index("ix_runs_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"),
+        Index("ix_runs_status_reconcile_deadline", "status", "reconciliation_deadline_at"),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -279,6 +280,17 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciliation_deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    projection_fence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    terminal_output_hash: Mapped[str | None] = mapped_column(String(64))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MarketSnapshot(UUIDPrimaryKeyMixin, Base):

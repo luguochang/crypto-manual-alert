@@ -63,6 +63,7 @@ class TaskView(BaseModel):
     query_text: StrictStr | None = Field(default=None, min_length=1, max_length=2000)
     created_at: datetime
     completed_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
     market_snapshot: MarketSnapshot | None = None
     web_evidence: list[WebEvidence] = Field(default_factory=list)
     artifact: Artifact | None = None

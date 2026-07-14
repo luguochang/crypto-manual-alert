@@ -1,8 +1,10 @@
 from typing import Any
 
+import httpx
+from langgraph_sdk.errors import ConflictError, NotFoundError
 import pytest
 
-from crypto_alert_v2.api.agent_server import AgentServerRunner
+from crypto_alert_v2.api.agent_server import AgentServerRunner, RemoteRunHandle
 from crypto_alert_v2.api.schemas import AnalysisSubmission
 from crypto_alert_v2.auth.context import ActorContext
 
@@ -24,6 +26,8 @@ class RecordingRuns:
         self.list_kwargs: dict[str, Any] | None = None
         self.create_args: tuple[Any, ...] | None = None
         self.create_kwargs: dict[str, Any] | None = None
+        self.get_args: tuple[Any, ...] | None = None
+        self.get_kwargs: dict[str, Any] | None = None
         self.join_args: tuple[Any, ...] | None = None
         self.join_kwargs: dict[str, Any] | None = None
         self.cancel_args: tuple[Any, ...] | None = None
@@ -42,6 +46,17 @@ class RecordingRuns:
         return {
             "run_id": "run-1",
             "assistant_id": "11111111-1111-4111-8111-111111111111",
+        }
+
+    async def get(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.events.append("get")
+        self.get_args = args
+        self.get_kwargs = kwargs
+        return {
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "assistant_id": "11111111-1111-4111-8111-111111111111",
+            "status": "success",
         }
 
     async def join(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -162,9 +177,16 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
         "authorization": "Bearer token-for-user-1"
     }
 
+    state = await runner.get(handle)
+    assert state.status == "success"
+    assert client.runs.get_args == ("thread-1", "run-1")
+    assert client.runs.get_kwargs == {
+        "headers": {"authorization": "Bearer token-for-user-1"}
+    }
+
     output = await runner.join(handle)
     assert output["terminal_status"] == "failed"
-    assert client.runs.events == ["list", "create", "join"]
+    assert client.runs.events == ["list", "create", "get", "join"]
     assert client.runs.join_kwargs == {
         "headers": {"authorization": "Bearer token-for-user-1"}
     }
@@ -172,9 +194,50 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
     await runner.cancel(handle)
     assert client.runs.cancel_args == ("thread-1", "run-1")
     assert client.runs.cancel_kwargs == {
+        "wait": True,
+        "action": "interrupt",
         "headers": {"authorization": "Bearer token-for-user-1"}
     }
-    assert client.runs.events == ["list", "create", "join", "cancel"]
+    assert client.runs.events == ["list", "create", "get", "join", "cancel"]
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_an_unknown_official_run_status() -> None:
+    client = RecordingClient()
+    client.runs.get = lambda *_, **__: _async_value(  # type: ignore[method-assign]
+        {"status": "mystery"}
+    )
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    with pytest.raises(RuntimeError, match="unknown status"):
+        await runner.get(
+            runner.authorize(
+                handle=_remote_handle(),
+                actor=ActorContext(
+                    tenant_id="tenant-1",
+                    workspace_id="workspace-1",
+                    user_id="user-1",
+                    roles=("member",),
+                    permissions=("analysis:read",),
+                ),
+            )
+        )
+
+
+async def _async_value(value: Any) -> Any:
+    return value
+
+
+async def _async_raise(error: Exception) -> Any:
+    raise error
+
+
+def _remote_handle():
+    return RemoteRunHandle(
+        assistant_id="11111111-1111-4111-8111-111111111111",
+        thread_id="thread-1",
+        run_id="run-1",
+    )
 
 
 @pytest.mark.asyncio
@@ -225,3 +288,91 @@ async def test_runner_recovers_an_existing_product_run_without_creating_another(
     assert handle.assistant_id == "22222222-2222-4222-8222-222222222222"
     assert client.runs.events == ["list"]
     assert client.runs.create_args is None
+
+
+@pytest.mark.asyncio
+async def test_runner_finds_an_unregistered_run_by_product_metadata() -> None:
+    client = RecordingClient()
+    client.runs.list_results = [
+        {
+            "run_id": "recovered-run",
+            "assistant_id": "22222222-2222-4222-8222-222222222222",
+            "metadata": {
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "user_id": "user-1",
+                "task_id": "task-1",
+                "product_run_id": "product-run-1",
+            },
+        }
+    ]
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        authorization_provider=lambda _: "Bearer recovery-token",
+    )
+
+    handle = await runner.find(
+        actor=ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:write",),
+        ),
+        task_id="task-1",
+        product_thread_id="product-thread-1",
+        product_run_id="product-run-1",
+    )
+
+    assert handle == RemoteRunHandle(
+        assistant_id="22222222-2222-4222-8222-222222222222",
+        thread_id="product-thread-1",
+        run_id="recovered-run",
+    )
+    assert handle is not None
+    assert handle.authorization == "Bearer recovery-token"
+    assert client.runs.list_args == ("product-thread-1",)
+    assert client.runs.list_kwargs == {
+        "limit": 100,
+        "headers": {"authorization": "Bearer recovery-token"},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [NotFoundError, ConflictError])
+async def test_runner_treats_missing_or_terminal_cancel_target_as_stopped(
+    error_type: type[Exception],
+) -> None:
+    client = RecordingClient()
+    response = httpx.Response(
+        404 if error_type is NotFoundError else 409,
+        request=httpx.Request("POST", "http://agent.invalid/runs/cancel"),
+    )
+    error = error_type("cancel target unavailable", response=response, body=None)
+    client.runs.cancel = lambda *_, **__: _async_raise(error)  # type: ignore[method-assign]
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    await runner.cancel(_remote_handle())
+
+
+@pytest.mark.asyncio
+async def test_runner_does_not_hide_a_cancel_conflict_for_an_active_run() -> None:
+    client = RecordingClient()
+    response = httpx.Response(
+        409,
+        request=httpx.Request("POST", "http://agent.invalid/runs/cancel"),
+    )
+    error = ConflictError(
+        "active run cancellation conflicted",
+        response=response,
+        body=None,
+    )
+    client.runs.cancel = lambda *_, **__: _async_raise(error)  # type: ignore[method-assign]
+    client.runs.get = lambda *_, **__: _async_value(  # type: ignore[method-assign]
+        {"status": "running"}
+    )
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    with pytest.raises(ConflictError):
+        await runner.cancel(_remote_handle())

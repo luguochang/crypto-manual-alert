@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
+
+from langgraph_sdk.errors import ConflictError, NotFoundError
 
 from crypto_alert_v2.api.schemas import AnalysisSubmission
 from crypto_alert_v2.auth.context import ActorContext
@@ -19,6 +21,21 @@ class RemoteRunHandle:
     thread_id: str
     run_id: str
     authorization: str | None = field(default=None, repr=False, compare=False)
+
+
+RemoteRunStatus = Literal[
+    "pending",
+    "running",
+    "error",
+    "success",
+    "timeout",
+    "interrupted",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteRunState:
+    status: RemoteRunStatus
 
 
 class AgentServerRunner:
@@ -90,29 +107,15 @@ class AgentServerRunner:
         thread = await self._client.threads.create(**thread_options)
         thread_id = str(thread["thread_id"])
         if product_thread_id is not None:
-            list_options = {"headers": headers} if headers is not None else {}
-            existing_runs = await self._client.runs.list(
-                thread_id,
-                limit=100,
-                **list_options,
+            existing = await self._find_existing_run(
+                actor=actor,
+                task_id=task_id,
+                product_run_id=product_run_id,
+                thread_id=thread_id,
+                authorization=authorization,
             )
-            for existing in existing_runs:
-                existing_metadata = existing.get("metadata") or {}
-                if (
-                    existing_metadata.get("tenant_id") == actor.tenant_id
-                    and existing_metadata.get("workspace_id") == actor.workspace_id
-                    and existing_metadata.get("user_id") == actor.user_id
-                    and existing_metadata.get("task_id") == task_id
-                    and existing_metadata.get("product_run_id") == product_run_id
-                ):
-                    return RemoteRunHandle(
-                        assistant_id=_required_remote_id(
-                            existing, "assistant_id"
-                        ),
-                        thread_id=thread_id,
-                        run_id=str(existing["run_id"]),
-                        authorization=authorization,
-                    )
+            if existing is not None:
+                return existing
         run_options: dict[str, Any] = {
             "input": {"request": submission.model_dump(mode="json")},
             "durability": "sync",
@@ -133,21 +136,108 @@ class AgentServerRunner:
             authorization=authorization,
         )
 
-    async def join(self, handle: RemoteRunHandle) -> dict[str, Any]:
+    async def find(
+        self,
+        *,
+        actor: ActorContext,
+        task_id: str,
+        product_thread_id: str,
+        product_run_id: str,
+    ) -> RemoteRunHandle | None:
+        authorization = (
+            self._authorization_provider(actor)
+            if self._authorization_provider is not None
+            else None
+        )
+        try:
+            return await self._find_existing_run(
+                actor=actor,
+                task_id=task_id,
+                product_run_id=product_run_id,
+                thread_id=product_thread_id,
+                authorization=authorization,
+            )
+        except NotFoundError:
+            return None
+
+    async def _find_existing_run(
+        self,
+        *,
+        actor: ActorContext,
+        task_id: str,
+        product_run_id: str,
+        thread_id: str,
+        authorization: str | None,
+    ) -> RemoteRunHandle | None:
         options = (
-            {"headers": {"authorization": handle.authorization}}
-            if handle.authorization
+            {"headers": {"authorization": authorization}}
+            if authorization
             else {}
         )
-        return await self._client.runs.join(handle.thread_id, handle.run_id, **options)
+        existing_runs = await self._client.runs.list(
+            thread_id,
+            limit=100,
+            **options,
+        )
+        for existing in existing_runs:
+            existing_metadata = existing.get("metadata") or {}
+            if (
+                existing_metadata.get("tenant_id") == actor.tenant_id
+                and existing_metadata.get("workspace_id") == actor.workspace_id
+                and existing_metadata.get("user_id") == actor.user_id
+                and existing_metadata.get("task_id") == task_id
+                and existing_metadata.get("product_run_id") == product_run_id
+            ):
+                return RemoteRunHandle(
+                    assistant_id=_required_remote_id(existing, "assistant_id"),
+                    thread_id=thread_id,
+                    run_id=_required_remote_id(existing, "run_id"),
+                    authorization=authorization,
+                )
+        return None
+
+    async def join(self, handle: RemoteRunHandle) -> dict[str, Any]:
+        return await self._client.runs.join(
+            handle.thread_id,
+            handle.run_id,
+            **_authorization_options(handle),
+        )
+
+    async def get(self, handle: RemoteRunHandle) -> RemoteRunState:
+        run = await self._client.runs.get(
+            handle.thread_id,
+            handle.run_id,
+            **_authorization_options(handle),
+        )
+        status = run.get("status") if isinstance(run, dict) else None
+        if status not in {
+            "pending",
+            "running",
+            "error",
+            "success",
+            "timeout",
+            "interrupted",
+        }:
+            raise RuntimeError("Agent Server returned an unknown status")
+        return RemoteRunState(status=status)
 
     async def cancel(self, handle: RemoteRunHandle) -> None:
-        options = (
-            {"headers": {"authorization": handle.authorization}}
-            if handle.authorization
-            else {}
-        )
-        await self._client.runs.cancel(handle.thread_id, handle.run_id, **options)
+        try:
+            await self._client.runs.cancel(
+                handle.thread_id,
+                handle.run_id,
+                wait=True,
+                action="interrupt",
+                **_authorization_options(handle),
+            )
+        except NotFoundError:
+            # A missing Run has no remaining execution to stop.
+            return
+        except ConflictError:
+            state = await self.get(handle)
+            if state.status in {"error", "success", "timeout", "interrupted"}:
+                return
+            raise
 
     def authorize(
         self,
@@ -166,4 +256,18 @@ def _required_remote_id(payload: dict[str, Any], field_name: str) -> str:
     return value.strip()
 
 
-__all__ = ["AgentServerRunner", "RemoteRunHandle", "RemoteRunResult"]
+def _authorization_options(handle: RemoteRunHandle) -> dict[str, Any]:
+    return (
+        {"headers": {"authorization": handle.authorization}}
+        if handle.authorization
+        else {}
+    )
+
+
+__all__ = [
+    "AgentServerRunner",
+    "RemoteRunHandle",
+    "RemoteRunResult",
+    "RemoteRunState",
+    "RemoteRunStatus",
+]

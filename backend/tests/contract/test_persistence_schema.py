@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib.util
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 import pytest
-from sqlalchemy import CheckConstraint, DateTime, Index, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -192,6 +195,37 @@ def test_run_persists_nullable_official_assistant_id() -> None:
     assert column.nullable is True
 
 
+def test_run_persists_reconciliation_deadline_and_projection_fence() -> None:
+    table = Run.__table__
+
+    assert isinstance(table.c.reconciliation_deadline_at.type, DateTime)
+    assert table.c.reconciliation_deadline_at.type.timezone is True
+    assert table.c.reconciliation_deadline_at.nullable is True
+    assert isinstance(table.c.projection_fence.type, Integer)
+    assert table.c.projection_fence.nullable is False
+    assert table.c.projection_fence.default is not None
+    assert table.c.projection_fence.default.arg == 0
+    assert table.c.projection_fence.server_default is not None
+    assert str(table.c.projection_fence.server_default.arg) == "0"
+    assert isinstance(table.c.terminal_output_hash.type, String)
+    assert table.c.terminal_output_hash.type.length == 64
+    assert table.c.terminal_output_hash.nullable is True
+    assert isinstance(table.c.cancel_requested_at.type, DateTime)
+    assert table.c.cancel_requested_at.type.timezone is True
+    assert table.c.cancel_requested_at.nullable is True
+
+    indexes = {
+        cast(Index, index).name: tuple(
+            column.name for column in cast(Index, index).columns
+        )
+        for index in table.indexes
+    }
+    assert indexes["ix_runs_status_reconcile_deadline"] == (
+        "status",
+        "reconciliation_deadline_at",
+    )
+
+
 def test_workspace_access_paths_have_composite_indexes() -> None:
     for table_name in WORKSPACE_SCOPED_TABLES:
         assert any(
@@ -279,6 +313,10 @@ class _MigrationOperations:
         self.altered_columns: list[tuple[str, str, bool | None, str | None]] = []
         self.created_constraints: list[tuple[str, str, tuple[str, ...], str | None]] = []
         self.dropped_constraints: list[tuple[str, str, str | None]] = []
+        self.created_indexes: list[
+            tuple[str, str, tuple[str, ...], str | None]
+        ] = []
+        self.dropped_indexes: list[tuple[str, str | None, str | None]] = []
         self.dropped_columns: list[tuple[str, str, str | None]] = []
         self.executed: list[str] = []
 
@@ -288,11 +326,26 @@ class _MigrationOperations:
     def create_table(self, name: str, *elements: Any, schema: str | None = None) -> None:
         self.created_tables.append((name, schema))
 
-    def create_index(self, *args: Any, **kwargs: Any) -> None:
-        return None
+    def create_index(
+        self,
+        name: str,
+        table_name: str,
+        columns: list[str],
+        *,
+        schema: str | None = None,
+        **_: Any,
+    ) -> None:
+        self.created_indexes.append((name, table_name, tuple(columns), schema))
 
-    def drop_index(self, *args: Any, **kwargs: Any) -> None:
-        return None
+    def drop_index(
+        self,
+        name: str,
+        *,
+        table_name: str | None = None,
+        schema: str | None = None,
+        **_: Any,
+    ) -> None:
+        self.dropped_indexes.append((name, table_name, schema))
 
     def drop_table(self, name: str, *, schema: str | None = None) -> None:
         self.dropped_tables.append((name, schema))
@@ -400,6 +453,20 @@ def _load_official_assistant_revision() -> Any:
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
         "product_official_assistant_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_run_recovery_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT / "alembic" / "versions" / "0005_run_recovery_state.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_run_recovery_revision", revision_path
     )
     assert spec is not None and spec.loader is not None
     revision = importlib.util.module_from_spec(spec)
@@ -532,6 +599,96 @@ def test_official_assistant_revision_adds_and_drops_nullable_run_column(
     assert operations.dropped_columns == [
         ("runs", "official_assistant_id", PRODUCT_SCHEMA)
     ]
+
+
+def test_run_recovery_revision_adds_durable_reconciliation_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = _load_run_recovery_revision()
+    operations = _MigrationOperations()
+    monkeypatch.setattr(revision, "op", operations)
+
+    assert revision.revision == "0005_run_recovery_state"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0004_official_assistant_id"
+    revision.upgrade()
+    revision.downgrade()
+
+    assert set(operations.added_columns) == {
+        ("runs", "reconciliation_deadline_at", PRODUCT_SCHEMA),
+        ("runs", "projection_fence", PRODUCT_SCHEMA),
+        ("runs", "terminal_output_hash", PRODUCT_SCHEMA),
+        ("runs", "cancel_requested_at", PRODUCT_SCHEMA),
+    }
+    assert set(operations.dropped_columns) == {
+        ("runs", "cancel_requested_at", PRODUCT_SCHEMA),
+        ("runs", "terminal_output_hash", PRODUCT_SCHEMA),
+        ("runs", "projection_fence", PRODUCT_SCHEMA),
+        ("runs", "reconciliation_deadline_at", PRODUCT_SCHEMA),
+    }
+    assert operations.created_indexes == [
+        (
+            "ix_runs_status_reconcile_deadline",
+            "runs",
+            ("status", "reconciliation_deadline_at"),
+            PRODUCT_SCHEMA,
+        )
+    ]
+    assert operations.dropped_indexes == [
+        ("ix_runs_status_reconcile_deadline", "runs", PRODUCT_SCHEMA)
+    ]
+    assert any(
+        "SET reconciliation_deadline_at = started_at + interval '15 minutes'"
+        in statement
+        for statement in operations.executed
+    )
+
+
+def _render_run_recovery_sql(method_name: str) -> str:
+    revision = _load_run_recovery_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_run_recovery_revision_upgrade_and_downgrade_compile_for_postgresql() -> None:
+    upgrade_sql = _render_run_recovery_sql("upgrade")
+    downgrade_sql = _render_run_recovery_sql("downgrade")
+
+    assert (
+        "ALTER TABLE app.runs ADD COLUMN reconciliation_deadline_at "
+        "TIMESTAMP WITH TIME ZONE;"
+    ) in upgrade_sql
+    assert (
+        "ALTER TABLE app.runs ADD COLUMN projection_fence "
+        "INTEGER DEFAULT 0 NOT NULL;"
+    ) in upgrade_sql
+    assert (
+        "ALTER TABLE app.runs ADD COLUMN terminal_output_hash VARCHAR(64);"
+    ) in upgrade_sql
+    assert (
+        "ALTER TABLE app.runs ADD COLUMN cancel_requested_at "
+        "TIMESTAMP WITH TIME ZONE;"
+    ) in upgrade_sql
+    assert (
+        "CREATE INDEX ix_runs_status_reconcile_deadline "
+        "ON app.runs (status, reconciliation_deadline_at);"
+    ) in upgrade_sql
+
+    downgrade_statements = [
+        "DROP INDEX app.ix_runs_status_reconcile_deadline;",
+        "ALTER TABLE app.runs DROP COLUMN cancel_requested_at;",
+        "ALTER TABLE app.runs DROP COLUMN terminal_output_hash;",
+        "ALTER TABLE app.runs DROP COLUMN projection_fence;",
+        "ALTER TABLE app.runs DROP COLUMN reconciliation_deadline_at;",
+    ]
+    positions = [downgrade_sql.index(statement) for statement in downgrade_statements]
+    assert positions == sorted(positions)
 
 
 def test_alembic_uses_asyncpg_and_keeps_its_version_table_in_product_schema() -> None:

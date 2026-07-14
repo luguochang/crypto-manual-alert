@@ -447,6 +447,45 @@ input:focus-visible + span {
   cursor: not-allowed;
 }
 
+.task-command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.task-command-status {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cancel-task-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid #b64242;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #a53636;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.cancel-task-button:hover {
+  background: #fff2f0;
+}
+
+.cancel-task-button:disabled {
+  border-color: #c9ccca;
+  color: #858b87;
+  cursor: not-allowed;
+}
+
 .projection-stack {
   display: grid;
   gap: 16px;
@@ -1603,6 +1642,16 @@ input:focus-visible + span {
 
   .work-header {
     gap: 14px;
+  }
+
+  .task-command-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .cancel-task-button {
+    width: 100%;
+    min-height: 44px;
   }
 
   .work-header h1 {

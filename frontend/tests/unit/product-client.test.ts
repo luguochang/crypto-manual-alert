@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createAnalysis, getTask, listRuns } from "../../src/lib/api/product-client";
+import {
+  cancelTask,
+  createAnalysis,
+  getTask,
+  listRuns,
+} from "../../src/lib/api/product-client";
 
 describe("Product API client", () => {
   it("submits each analysis with a one-time UUID idempotency key", async () => {
@@ -84,6 +89,28 @@ describe("Product API client", () => {
       `/api/product/api/v2/tasks/22222222-2222-4222-8222-222222222222?run_id=${runId}`,
       expect.objectContaining({ method: "GET", cache: "no-store" }),
     );
+  });
+
+  it("submits cancellation through the Product command endpoint", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json(taskProjection("running"), { status: 202 });
+    });
+
+    const task = await cancelTask(
+      "22222222-2222-4222-8222-222222222222",
+      fetcher,
+      "cancel-network-retry-1",
+    );
+
+    expect(task.status).toBe("running");
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/product/api/v2/tasks/22222222-2222-4222-8222-222222222222/cancel",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("idempotency-key")).toBe("cancel-network-retry-1");
   });
 
   it("loads a bounded persisted Run list through the Product BFF", async () => {

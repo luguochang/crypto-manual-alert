@@ -122,6 +122,8 @@ class ScalarSession:
             return self.artifact_content
         if "FROM app.market_snapshots" in sql:
             return None
+        if "FROM app.task_commands" in sql:
+            return None
         if "FROM app.threads" in sql:
             return self.official_thread_id
         raise AssertionError(f"unexpected scalar query: {sql}")

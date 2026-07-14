@@ -32,6 +32,7 @@ source = Path("langgraph.json")
 target = Path(os.environ["PROBE_CONFIG_FILE"])
 config = json.loads(source.read_text())
 config.pop("http", None)
+config.pop("env", None)
 target.write_text(json.dumps(config))
 '
 uv run python -m crypto_alert_v2.auth.development_keys \

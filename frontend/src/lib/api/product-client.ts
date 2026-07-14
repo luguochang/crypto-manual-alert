@@ -59,6 +59,24 @@ export async function getTask(
   );
 }
 
+export async function cancelTask(
+  taskId: string,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<ProductTask> {
+  return requestTask(
+    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}/cancel`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+    },
+    fetcher,
+  );
+}
+
 export async function listRuns(
   limit = 25,
   fetcher: Fetcher = fetch,

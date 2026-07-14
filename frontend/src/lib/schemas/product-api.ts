@@ -248,6 +248,7 @@ export const productTaskSchema = z
     query_text: z.string().trim().min(1).max(2000).nullable().default(null),
     created_at: timestampSchema,
     completed_at: timestampSchema.nullable().default(null),
+    cancel_requested_at: timestampSchema.nullable().default(null),
     artifact: analysisArtifactSchema.nullable().default(null),
     errors: z.array(productErrorSchema).default([]),
     agent_stream: agentStreamBindingSchema.nullable().default(null),

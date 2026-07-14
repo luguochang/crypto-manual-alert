@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleAlert, RefreshCw, Send } from "lucide-react";
+import { CircleAlert, CircleX, RefreshCw, Send } from "lucide-react";
 import {
   FormEvent,
   useCallback,
@@ -12,7 +12,12 @@ import {
 
 import { AnalysisProjection } from "@/features/analysis/analysis-projection";
 import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";
-import { createAnalysis, getTask, ProductApiError } from "@/lib/api/product-client";
+import {
+  cancelTask,
+  createAnalysis,
+  getTask,
+  ProductApiError,
+} from "@/lib/api/product-client";
 import type {
   AgentStreamBinding,
   ProductSymbol,
@@ -28,6 +33,7 @@ const symbols: Array<{ short: string; value: ProductSymbol }> = [
 const terminalStatuses = new Set(["succeeded", "blocked", "failed", "cancelled"]);
 const productTaskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const officialStreamAttachDelayMs = 1_000;
+const taskPollIntervalMs = 1_000;
 const subscribeHydration = () => () => undefined;
 
 export function WorkSurface() {
@@ -43,17 +49,24 @@ export function WorkSurface() {
   const [requestError, setRequestError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [polling, setPolling] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [recoverableTaskId, setRecoverableTaskId] = useState<string | null>(null);
   const [streamBinding, setStreamBinding] = useState<AgentStreamBinding | null>(null);
   const [historicalRunSelection, setHistoricalRunSelection] = useState(false);
   const pollVersion = useRef(0);
   const submitLock = useRef(false);
+  const cancelLock = useRef(false);
+  const cancelRequest = useRef<{ taskId: string; idempotencyKey: string } | null>(null);
   const pollingLock = useRef(false);
   const taskRef = useRef<ProductTask | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     taskRef.current = task;
+    if (task === null || terminalStatuses.has(task.status)) {
+      cancelRequest.current = null;
+      cancelLock.current = false;
+    }
   }, [task]);
 
   const pollTask = useCallback(async (
@@ -64,8 +77,11 @@ export function WorkSurface() {
     let currentTask = initialTask;
 
     try {
-      while (shouldContinuouslyPoll(currentTask) && pollVersion.current === version) {
-        await delay(350);
+      while (
+        shouldPollTask(currentTask)
+        && pollVersion.current === version
+      ) {
+        await delay(taskPollIntervalMs);
         if (pollVersion.current !== version) return;
 
         currentTask = await getTask(
@@ -75,6 +91,8 @@ export function WorkSurface() {
         );
         if (pollVersion.current !== version) return;
         setTask(currentTask);
+        setRequestError(null);
+        setRecoverableTaskId(null);
       }
     } catch (error) {
       if (pollVersion.current !== version) return;
@@ -95,7 +113,10 @@ export function WorkSurface() {
     version: number,
     selectedRunId: string | null,
   ) => {
-    if (pollVersion.current !== version || !shouldContinuouslyPoll(initialTask)) return;
+    if (
+      pollVersion.current !== version
+      || !shouldPollTask(initialTask)
+    ) return;
 
     pollingLock.current = true;
     setPolling(true);
@@ -151,7 +172,7 @@ export function WorkSurface() {
       setRequestError(null);
       setRecoverableTaskId(null);
 
-      if (!shouldContinuouslyPoll(refreshedTask)) {
+      if (!shouldPollTask(refreshedTask)) {
         pollVersion.current += 1;
         pollingLock.current = false;
         setPolling(false);
@@ -190,10 +211,14 @@ export function WorkSurface() {
   const agentAssistantId = task?.agent_stream?.assistant_id ?? null;
   const agentThreadId = task?.agent_stream?.thread_id ?? null;
   const agentRunId = task?.agent_stream?.run_id ?? null;
+  const streamEligible = task !== null
+    && !historicalRunSelection
+    && !terminalStatuses.has(task.status)
+    && task.cancel_requested_at === null;
 
   useEffect(() => {
     if (
-      historicalRunSelection
+      !streamEligible
       || agentAssistantId === null
       || agentThreadId === null
       || agentRunId === null
@@ -208,16 +233,21 @@ export function WorkSurface() {
       });
     }, officialStreamAttachDelayMs);
     return () => window.clearTimeout(timer);
-  }, [agentAssistantId, agentRunId, agentThreadId, historicalRunSelection]);
+  }, [agentAssistantId, agentRunId, agentThreadId, streamEligible]);
 
   const activeStreamBinding = streamBinding?.assistant_id === agentAssistantId
     && streamBinding.thread_id === agentThreadId
     && streamBinding.run_id === agentRunId
+    && streamEligible
     ? streamBinding
     : null;
 
-  const active = submitting || polling;
+  const active = submitting || polling || cancelling;
   const controlsDisabled = !hydrated || active;
+  const liveTask = task !== null
+    && !historicalRunSelection
+    && !terminalStatuses.has(task.status);
+  const cancellationPending = liveTask && task.cancel_requested_at !== null;
 
   const createProductTask = useCallback(async () => {
     if (submitLock.current) return;
@@ -231,6 +261,8 @@ export function WorkSurface() {
     setRequestError(null);
     setRecoverableTaskId(null);
     setStreamBinding(null);
+    cancelRequest.current = null;
+    cancelLock.current = false;
     setTask(null);
     selectedRunIdRef.current = null;
     setHistoricalRunSelection(false);
@@ -259,6 +291,54 @@ export function WorkSurface() {
       setRequestError(readableRequestError(error));
     }
   }, [horizon, query, startPolling, symbol]);
+
+  const cancelCurrentTask = useCallback(async () => {
+    const currentTask = taskRef.current;
+    if (
+      currentTask === null
+      || historicalRunSelection
+      || terminalStatuses.has(currentTask.status)
+      || currentTask.cancel_requested_at !== null
+      || cancelLock.current
+    ) return;
+
+    cancelLock.current = true;
+    const request = cancelRequest.current?.taskId === currentTask.task_id
+      ? cancelRequest.current
+      : {
+          taskId: currentTask.task_id,
+          idempotencyKey: crypto.randomUUID(),
+        };
+    cancelRequest.current = request;
+    const version = pollVersion.current + 1;
+    pollVersion.current = version;
+    pollingLock.current = false;
+    setPolling(false);
+    setCancelling(true);
+    setRequestError(null);
+    setRecoverableTaskId(null);
+    try {
+      const requested = await cancelTask(
+        currentTask.task_id,
+        undefined,
+        request.idempotencyKey,
+      );
+      if (pollVersion.current !== version) return;
+      setTask(requested);
+      startPolling(requested, version, null);
+    } catch (error) {
+      if (pollVersion.current !== version) return;
+      setRequestError(readableRequestError(error));
+      startPolling(
+        { ...currentTask, cancel_requested_at: new Date().toISOString() },
+        version,
+        null,
+      );
+    } finally {
+      cancelLock.current = false;
+      setCancelling(false);
+    }
+  }, [historicalRunSelection, startPolling]);
 
   function submitAnalysis(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -305,6 +385,26 @@ export function WorkSurface() {
           binding={activeStreamBinding}
           onCompleted={handleOfficialCompleted}
         />
+      ) : null}
+
+      {liveTask ? (
+        <div className="task-command-bar" role="group" aria-label="任务操作">
+          <button
+            className="cancel-task-button"
+            type="button"
+            onClick={() => void cancelCurrentTask()}
+            disabled={cancelling || cancellationPending}
+            aria-describedby={cancellationPending ? "cancel-task-status" : undefined}
+          >
+            <CircleX size={17} aria-hidden="true" />
+            {cancelling || cancellationPending ? "正在停止" : "取消分析"}
+          </button>
+          {cancellationPending ? (
+            <span id="cancel-task-status" className="task-command-status" role="status">
+              取消请求已保存，正在安全停止本次执行。
+            </span>
+          ) : null}
+        </div>
       ) : null}
 
       {task ? (
@@ -394,7 +494,13 @@ export function WorkSurface() {
               disabled={controlsDisabled || query.trim().length < 4}
             >
               <Send size={18} aria-hidden="true" />
-              {submitting ? "正在提交" : active ? "分析处理中" : "开始分析"}
+              {submitting
+                ? "正在提交"
+                : cancelling || cancellationPending
+                  ? "正在停止"
+                  : active
+                    ? "分析处理中"
+                    : "开始分析"}
             </button>
           </div>
         </form>
@@ -431,6 +537,11 @@ function isRecoverableTaskRead(error: unknown): boolean {
 
 function shouldContinuouslyPoll(task: ProductTask) {
   return task.status !== "waiting_human" && !terminalStatuses.has(task.status);
+}
+
+function shouldPollTask(task: ProductTask) {
+  return shouldContinuouslyPoll(task)
+    || (task.status === "waiting_human" && task.cancel_requested_at !== null);
 }
 
 function delay(milliseconds: number) {

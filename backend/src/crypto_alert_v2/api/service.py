@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from typing import Any, Callable
@@ -31,6 +32,10 @@ from crypto_alert_v2.projections.task import project_task_run_sources
 
 
 class IdempotencyConflictError(RuntimeError):
+    pass
+
+
+class TaskNotCancellableError(RuntimeError):
     pass
 
 
@@ -153,6 +158,9 @@ def _public_error(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         "provider_unavailable": "无法连接市场数据提供方，当前未生成分析结果。",
         "research_unavailable": "检索服务没有返回可验证来源，当前未生成分析结果。",
         "model_unavailable": "分析模型暂时不可用，当前未生成分析结果。",
+        "agent_cancel_failed": "无法确认官方执行已停止，请联系运维检查该运行。",
+        "agent_run_timeout": "官方执行超过允许时限，当前未生成分析结果。",
+        "terminal_projection_conflict": "终态投影发生一致性冲突，当前结果未被采用。",
     }
     diagnostics: dict[str, Any] = {}
     provider = first.get("provider")
@@ -225,6 +233,25 @@ async def _task_view(
     ).one_or_none()
     latest_run = run_thread[0] if run_thread is not None else None
     official_thread_id = run_thread[1] if run_thread is not None else None
+    cancel_requested_at = await session.scalar(
+        select(TaskCommand.created_at)
+        .where(
+            TaskCommand.task_id == task.id,
+            TaskCommand.tenant_id == resolved.tenant_id,
+            TaskCommand.workspace_id == resolved.workspace_id,
+            TaskCommand.actor_user_id == resolved.user_id,
+            TaskCommand.command_type == "cancel_task",
+            TaskCommand.status.in_(("pending", "dispatching")),
+        )
+        .order_by(TaskCommand.sequence.desc())
+        .limit(1)
+    )
+    if (
+        cancel_requested_at is None
+        and latest_run is not None
+        and latest_run.status not in {"succeeded", "blocked", "failed", "cancelled"}
+    ):
+        cancel_requested_at = getattr(latest_run, "cancel_requested_at", None)
     market_snapshot = None
     web_evidence = []
     if latest_run is not None:
@@ -283,6 +310,7 @@ async def _task_view(
         "completed_at": (
             latest_run.finished_at if latest_run is not None else task.completed_at
         ),
+        "cancel_requested_at": cancel_requested_at,
         "market_snapshot": market_snapshot,
         "web_evidence": web_evidence,
         "artifact": artifact_content,
@@ -492,6 +520,120 @@ class ProductAnalysisService:
                 task,
                 selected_run_id=run_id,
             )
+
+    async def cancel_task(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        try:
+            task_uuid = UUID(task_id)
+        except ValueError:
+            return None
+        command_idempotency_key = (
+            f"cancel:{task_uuid}:{sha256(idempotency_key.encode()).hexdigest()}"
+        )
+        payload = {"task_id": str(task_uuid)}
+        payload_hash = _payload_hash(payload)
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(actor, resolved)
+            task = await session.scalar(
+                select(Task)
+                .where(
+                    Task.id == task_uuid,
+                    Task.tenant_id == resolved.tenant_id,
+                    Task.workspace_id == resolved.workspace_id,
+                    Task.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if task is None:
+                return None
+            if task.status == "cancelled":
+                return await _task_view(session, resolved, task)
+            if task.status in {"succeeded", "blocked", "failed"}:
+                raise TaskNotCancellableError(
+                    "Only queued, running, or waiting tasks can be cancelled."
+                )
+
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(
+                            TaskCommand.task_id == task.id,
+                            TaskCommand.tenant_id == resolved.tenant_id,
+                            TaskCommand.workspace_id == resolved.workspace_id,
+                        )
+                        .order_by(TaskCommand.sequence)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if any(
+                command.idempotency_key == command_idempotency_key
+                for command in commands
+            ):
+                return await _task_view(session, resolved, task)
+            if any(
+                command.command_type == "cancel_task"
+                and command.status in {"pending", "dispatching"}
+                for command in commands
+            ):
+                return await _task_view(session, resolved, task)
+
+            for command in commands:
+                if command.status == "pending" or (
+                    command.status == "dispatching"
+                    and not (
+                        command.command_type == "submit"
+                        and command.official_run_id is None
+                    )
+                ):
+                    command.status = "cancelled"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+
+            latest_run = await session.scalar(
+                select(Run)
+                .where(
+                    Run.task_id == task.id,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                )
+                .order_by(Run.attempt.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if latest_run is not None:
+                latest_run.cancel_requested_at = datetime.now(UTC)
+
+            session.add(
+                TaskCommand(
+                    id=uuid4(),
+                    tenant_id=resolved.tenant_id,
+                    workspace_id=resolved.workspace_id,
+                    actor_user_id=resolved.user_id,
+                    task_id=task.id,
+                    thread_id=task.thread_id,
+                    command_type="cancel_task",
+                    payload=payload,
+                    payload_hash=payload_hash,
+                    sequence=max(
+                        (command.sequence for command in commands),
+                        default=0,
+                    )
+                    + 1,
+                    status="pending",
+                    attempt=0,
+                    idempotency_key=command_idempotency_key,
+                )
+            )
+            await session.flush()
+            return await _task_view(session, resolved, task)
 
     async def list_runs(
         self,

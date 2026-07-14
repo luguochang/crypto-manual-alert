@@ -21,6 +21,8 @@ class FakeProductService:
         self.submission: Any = None
         self.idempotency_key: str | None = None
         self.selected_run_id: UUID | None = None
+        self.cancelled_task_id: str | None = None
+        self.cancel_idempotency_key: str | None = None
         self.dispatch_calls = 0
 
     async def create_analysis(
@@ -86,6 +88,29 @@ class FakeProductService:
                 }
             ],
             "limit": limit,
+        }
+
+    async def cancel_task(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.cancelled_task_id = task_id
+        self.cancel_idempotency_key = idempotency_key
+        if task_id != "task-1":
+            return None
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "symbol": "BTC-USDT-SWAP",
+            "horizon": "4h",
+            "created_at": datetime(2026, 7, 13, tzinfo=UTC),
+            "completed_at": None,
+            "cancel_requested_at": datetime(2026, 7, 13, 0, 1, tzinfo=UTC),
+            "artifact": None,
+            "errors": [],
         }
 
     async def dispatch_task(self, actor: ActorContext, task_id: str) -> None:
@@ -281,6 +306,44 @@ async def test_get_task_forwards_an_explicit_historical_run_selection() -> None:
 
     assert response.status_code == 200
     assert service.selected_run_id == UUID(run_id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_persists_a_server_owned_product_command() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8011",
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/cancel",
+            headers={"idempotency-key": "cancel-task-1"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "running"
+    assert response.json()["cancel_requested_at"] == "2026-07-13T00:01:00Z"
+    assert service.cancelled_task_id == "task-1"
+    assert service.cancel_idempotency_key == "cancel-task-1"
+    assert service.actor is not None
+    assert service.actor.tenant_id == "compose-tenant"
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_returns_404_without_leaking_cross_tenant_existence() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8011",
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/not-visible/cancel",
+            headers={"idempotency-key": "cancel-not-visible"},
+        )
+
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
