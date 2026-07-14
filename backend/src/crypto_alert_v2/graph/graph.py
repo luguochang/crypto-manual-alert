@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import interrupt
 from langchain_core.runnables import RunnableConfig
 from openai import (
     APIConnectionError,
@@ -24,7 +25,11 @@ from crypto_alert_v2.domain.models import (
 )
 from crypto_alert_v2.domain.risk_policy import apply_risk_policy
 from crypto_alert_v2.config import get_settings
-from crypto_alert_v2.graph.request import AnalysisRequest
+from crypto_alert_v2.graph.request import (
+    AnalysisRequest,
+    ArtifactEdit,
+    ReviewResponse,
+)
 from crypto_alert_v2.graph.runtime import AnalysisRuntime, get_default_runtime
 from crypto_alert_v2.graph.state import AnalysisState
 from crypto_alert_v2.observability.callbacks import build_observability_config
@@ -60,10 +65,32 @@ def _root_observability_config() -> RunnableConfig:
     )
 
 
-def validate_request(state: AnalysisState) -> AnalysisState:
+def validate_request(
+    state: AnalysisState,
+    config: RunnableConfig,
+) -> AnalysisState:
     request = AnalysisRequest.model_validate(state.get("request"))
+    requested_review_policy = state.get("review_policy", "bypass")
+    server_review_policy = config.get("configurable", {}).get(
+        "review_policy",
+        "bypass",
+    )
+    if requested_review_policy not in {"bypass", "required"} or (
+        server_review_policy not in {"bypass", "required"}
+    ):
+        raise ValueError("invalid server review policy")
+    review_policy = (
+        "required"
+        if "required" in {requested_review_policy, server_review_policy}
+        else "bypass"
+    )
     return {
         "request": request.model_dump(mode="json"),
+        "review_policy": review_policy,
+        "review_action": None,
+        "review_edits": None,
+        "review_comment": None,
+        "review_iteration": 0,
         "lifecycle": "request_validated",
         "terminal_status": "running",
         "errors": [],
@@ -270,10 +297,9 @@ def apply_risk(state: AnalysisState) -> AnalysisState:
 
 
 def build_artifact(state: AnalysisState) -> AnalysisState:
-    allowed = bool(state["risk_verdict"]["allowed"])
     artifact = Artifact(
         content_version=1,
-        status="committed" if allowed else "draft",
+        status="draft",
         analysis=MarketAnalysis.model_validate(state["analysis"]),
         evidence_verdict=state["evidence_verdict"],
         risk_verdict=state["risk_verdict"],
@@ -285,12 +311,73 @@ def build_artifact(state: AnalysisState) -> AnalysisState:
     }
 
 
+def review_policy(state: AnalysisState) -> AnalysisState:
+    return {"lifecycle": f"review_{state.get('review_policy', 'bypass')}"}
+
+
+def interrupt_review(state: AnalysisState) -> AnalysisState:
+    review_iteration = state.get("review_iteration", 0) + 1
+    response = interrupt(
+        {
+            "kind": "artifact_review",
+            "schema_version": "1.0",
+            "allowed_actions": ["approve", "reject", "edit"],
+            "review_iteration": review_iteration,
+            "artifact": state["artifact"],
+        }
+    )
+    decision = ReviewResponse.model_validate(response)
+    edits = (
+        decision.edits.model_dump(mode="json", exclude_unset=True)
+        if decision.edits is not None
+        else None
+    )
+    return {
+        "review_action": decision.action,
+        "review_edits": edits,
+        "review_comment": decision.comment,
+        "review_iteration": review_iteration,
+        "lifecycle": f"review_{decision.action}",
+    }
+
+
+def apply_edits(state: AnalysisState) -> AnalysisState:
+    edits = ArtifactEdit.model_validate(state.get("review_edits"))
+    edited_analysis = {
+        **state["analysis"],
+        **edits.model_dump(mode="json", exclude_unset=True),
+    }
+    validated = MarketAnalysis.model_validate(edited_analysis)
+    return {
+        "analysis": validated.model_dump(mode="json"),
+        "lifecycle": "review_edits_applied",
+    }
+
+
+def commit_artifact(state: AnalysisState) -> AnalysisState:
+    artifact = Artifact.model_validate(
+        {
+            **state["artifact"],
+            "status": "committed",
+        }
+    )
+    return {
+        "artifact": artifact.model_dump(mode="json"),
+        "lifecycle": "artifact_committed",
+    }
+
+
 def complete(state: AnalysisState) -> AnalysisState:
     return {"terminal_status": "succeeded", "lifecycle": "completed"}
 
 
 def complete_blocked(state: AnalysisState) -> AnalysisState:
-    return {"terminal_status": "blocked", "lifecycle": "completed_blocked"}
+    lifecycle = (
+        "completed_rejected"
+        if state.get("review_action") == "reject"
+        else "completed_blocked"
+    )
+    return {"terminal_status": "blocked", "lifecycle": lifecycle}
 
 
 def complete_failed(state: AnalysisState) -> AnalysisState:
@@ -301,8 +388,23 @@ def _after_external_call(state: AnalysisState) -> str:
     return "failed" if state.get("terminal_status") == "failed" else "continue"
 
 
-def _after_artifact(state: AnalysisState) -> str:
-    return "blocked" if state.get("terminal_status") == "blocked" else "succeeded"
+def _after_review_policy(state: AnalysisState) -> str:
+    if state.get("review_policy") == "required":
+        return "required"
+    if state.get("terminal_status") == "blocked":
+        return "blocked"
+    return "bypass"
+
+
+def _after_review(state: AnalysisState) -> str:
+    action = state.get("review_action")
+    if action == "edit":
+        return "edit"
+    if action == "reject":
+        return "reject"
+    if action == "approve" and state.get("terminal_status") != "blocked":
+        return "approve"
+    return "blocked"
 
 
 builder = StateGraph(AnalysisState, context_schema=AnalysisRuntime)
@@ -313,6 +415,10 @@ builder.add_node("analyze_market", analyze_market)
 builder.add_node("validate_evidence", validate_evidence)
 builder.add_node("apply_risk_policy", apply_risk)
 builder.add_node("build_artifact", build_artifact)
+builder.add_node("review_policy", review_policy)
+builder.add_node("interrupt_review", interrupt_review)
+builder.add_node("apply_edits", apply_edits)
+builder.add_node("commit_artifact", commit_artifact)
 builder.add_node("complete", complete)
 builder.add_node("complete_blocked", complete_blocked)
 builder.add_node("complete_failed", complete_failed)
@@ -335,13 +441,36 @@ builder.add_conditional_edges(
 )
 builder.add_edge("validate_evidence", "apply_risk_policy")
 builder.add_edge("apply_risk_policy", "build_artifact")
+builder.add_edge("build_artifact", "review_policy")
 builder.add_conditional_edges(
-    "build_artifact",
-    _after_artifact,
-    {"blocked": "complete_blocked", "succeeded": "complete"},
+    "review_policy",
+    _after_review_policy,
+    {
+        "bypass": "commit_artifact",
+        "required": "interrupt_review",
+        "blocked": "complete_blocked",
+    },
 )
+builder.add_conditional_edges(
+    "interrupt_review",
+    _after_review,
+    {
+        "approve": "commit_artifact",
+        "reject": "complete_blocked",
+        "edit": "apply_edits",
+        "blocked": "complete_blocked",
+    },
+)
+builder.add_edge("apply_edits", "validate_evidence")
+builder.add_edge("commit_artifact", "complete")
 builder.add_edge("complete", END)
 builder.add_edge("complete_blocked", END)
 builder.add_edge("complete_failed", END)
 
-graph = builder.compile().with_config(_root_observability_config())
+def create_graph(*, checkpointer: Any = None) -> Any:
+    return builder.compile(checkpointer=checkpointer).with_config(
+        _root_observability_config()
+    )
+
+
+graph = create_graph()
