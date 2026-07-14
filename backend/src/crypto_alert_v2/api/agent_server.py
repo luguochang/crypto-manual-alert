@@ -38,6 +38,15 @@ class RemoteRunState:
     status: RemoteRunStatus
 
 
+RemoteCancelOutcome = Literal["confirmed", "terminal", "unconfirmed"]
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteCancelResult:
+    outcome: RemoteCancelOutcome
+    state: RemoteRunState | None = None
+
+
 class AgentServerRunner:
     def __init__(
         self,
@@ -174,27 +183,41 @@ class AgentServerRunner:
             if authorization
             else {}
         )
-        existing_runs = await self._client.runs.list(
-            thread_id,
-            limit=100,
-            **options,
-        )
-        for existing in existing_runs:
-            existing_metadata = existing.get("metadata") or {}
-            if (
-                existing_metadata.get("tenant_id") == actor.tenant_id
-                and existing_metadata.get("workspace_id") == actor.workspace_id
-                and existing_metadata.get("user_id") == actor.user_id
-                and existing_metadata.get("task_id") == task_id
-                and existing_metadata.get("product_run_id") == product_run_id
-            ):
-                return RemoteRunHandle(
-                    assistant_id=_required_remote_id(existing, "assistant_id"),
-                    thread_id=thread_id,
-                    run_id=_required_remote_id(existing, "run_id"),
-                    authorization=authorization,
-                )
-        return None
+        matches: list[RemoteRunHandle] = []
+        page_size = 100
+        max_pages = 100
+        for page in range(max_pages):
+            existing_runs = await self._client.runs.list(
+                thread_id,
+                limit=page_size,
+                offset=page * page_size,
+                **options,
+            )
+            for existing in existing_runs:
+                existing_metadata = existing.get("metadata") or {}
+                if (
+                    existing_metadata.get("tenant_id") == actor.tenant_id
+                    and existing_metadata.get("workspace_id") == actor.workspace_id
+                    and existing_metadata.get("user_id") == actor.user_id
+                    and existing_metadata.get("task_id") == task_id
+                    and existing_metadata.get("product_run_id") == product_run_id
+                ):
+                    matches.append(
+                        RemoteRunHandle(
+                            assistant_id=_required_remote_id(existing, "assistant_id"),
+                            thread_id=thread_id,
+                            run_id=_required_remote_id(existing, "run_id"),
+                            authorization=authorization,
+                        )
+                    )
+            if len(existing_runs) < page_size:
+                break
+        else:
+            raise RuntimeError("Agent Server Run discovery exceeded its scan limit")
+
+        if len(matches) > 1:
+            raise RuntimeError("Multiple Agent Server Runs share one product_run_id")
+        return matches[0] if matches else None
 
     async def join(self, handle: RemoteRunHandle) -> dict[str, Any]:
         return await self._client.runs.join(
@@ -221,7 +244,7 @@ class AgentServerRunner:
             raise RuntimeError("Agent Server returned an unknown status")
         return RemoteRunState(status=status)
 
-    async def cancel(self, handle: RemoteRunHandle) -> None:
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
         try:
             await self._client.runs.cancel(
                 handle.thread_id,
@@ -231,13 +254,19 @@ class AgentServerRunner:
                 **_authorization_options(handle),
             )
         except NotFoundError:
-            # A missing Run has no remaining execution to stop.
-            return
+            return RemoteCancelResult(outcome="unconfirmed")
         except ConflictError:
+            pass
+
+        try:
             state = await self.get(handle)
-            if state.status in {"error", "success", "timeout", "interrupted"}:
-                return
-            raise
+        except NotFoundError:
+            return RemoteCancelResult(outcome="unconfirmed")
+        if state.status in {"pending", "running"}:
+            return RemoteCancelResult(outcome="unconfirmed", state=state)
+        if state.status == "interrupted":
+            return RemoteCancelResult(outcome="confirmed", state=state)
+        return RemoteCancelResult(outcome="terminal", state=state)
 
     def authorize(
         self,
@@ -266,6 +295,8 @@ def _authorization_options(handle: RemoteRunHandle) -> dict[str, Any]:
 
 __all__ = [
     "AgentServerRunner",
+    "RemoteCancelOutcome",
+    "RemoteCancelResult",
     "RemoteRunHandle",
     "RemoteRunResult",
     "RemoteRunState",

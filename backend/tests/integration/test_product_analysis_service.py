@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import crypto_alert_v2.api.service as service_module
-from crypto_alert_v2.api.agent_server import RemoteRunHandle, RemoteRunState
+from crypto_alert_v2.api.agent_server import (
+    RemoteCancelResult,
+    RemoteRunHandle,
+    RemoteRunState,
+)
 from crypto_alert_v2.api.schemas import AnalysisSubmission
 from crypto_alert_v2.api.service import ProductAnalysisService
 from crypto_alert_v2.auth.context import ActorContext
@@ -106,8 +110,11 @@ class FailingRemoteRunner:
     async def get(self, _: RemoteRunHandle) -> RemoteRunState:
         return RemoteRunState(status="success")
 
-    async def cancel(self, _: RemoteRunHandle) -> None:
-        return None
+    async def cancel(self, _: RemoteRunHandle) -> RemoteCancelResult:
+        return RemoteCancelResult(
+            outcome="confirmed",
+            state=RemoteRunState(status="interrupted"),
+        )
 
 
 class SuccessfulRemoteRunner:
@@ -152,8 +159,11 @@ class SuccessfulRemoteRunner:
     async def get(self, _: RemoteRunHandle) -> RemoteRunState:
         return RemoteRunState(status="success")
 
-    async def cancel(self, _: RemoteRunHandle) -> None:
-        return None
+    async def cancel(self, _: RemoteRunHandle) -> RemoteCancelResult:
+        return RemoteCancelResult(
+            outcome="confirmed",
+            state=RemoteRunState(status="interrupted"),
+        )
 
 
 @pytest.mark.asyncio
@@ -210,6 +220,78 @@ async def test_cancel_task_does_not_cross_tenant_workspace_or_owner_scope(
     assert [(command.command_type, command.status) for command in commands] == [
         ("submit", "pending")
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reuse_idempotency_key", [True, False])
+async def test_concurrent_cancel_requests_create_one_durable_command(
+    reuse_idempotency_key: bool,
+) -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    suffix = uuid4().hex
+    concurrent_actor = ActorContext(
+        tenant_id=f"concurrent-cancel-tenant-{suffix}",
+        workspace_id=f"concurrent-cancel-workspace-{suffix}",
+        user_id=f"oidc|concurrent-cancel-user-{suffix}",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    try:
+        await service.bootstrap_actor(concurrent_actor)
+        queued = await service.create_analysis(
+            concurrent_actor,
+            submission(),
+            idempotency_key=f"concurrent-cancel-task-{suffix}",
+        )
+        first_key = f"concurrent-cancel-request-{suffix}"
+        second_key = (
+            first_key
+            if reuse_idempotency_key
+            else f"concurrent-cancel-retry-{suffix}"
+        )
+
+        first, second = await asyncio.gather(
+            service.cancel_task(
+                concurrent_actor,
+                str(queued["task_id"]),
+                first_key,
+            ),
+            service.cancel_task(
+                concurrent_actor,
+                str(queued["task_id"]),
+                second_key,
+            ),
+        )
+
+        assert first is not None
+        assert second is not None
+        assert first["cancel_requested_at"] is not None
+        assert second["cancel_requested_at"] == first["cancel_requested_at"]
+        task_id = UUID(str(queued["task_id"]))
+        async with session_factory() as session:
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(TaskCommand.task_id == task_id)
+                        .order_by(TaskCommand.sequence)
+                    )
+                ).all()
+            )
+        assert [command.sequence for command in commands] == [1, 2]
+        assert [(command.command_type, command.status) for command in commands] == [
+            ("submit", "cancelled"),
+            ("cancel_task", "pending"),
+        ]
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                delete(Tenant).where(Tenant.external_id == concurrent_actor.tenant_id)
+            )
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

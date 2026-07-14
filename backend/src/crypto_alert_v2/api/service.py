@@ -246,12 +246,6 @@ async def _task_view(
         .order_by(TaskCommand.sequence.desc())
         .limit(1)
     )
-    if (
-        cancel_requested_at is None
-        and latest_run is not None
-        and latest_run.status not in {"succeeded", "blocked", "failed", "cancelled"}
-    ):
-        cancel_requested_at = getattr(latest_run, "cancel_requested_at", None)
     market_snapshot = None
     web_evidence = []
     if latest_run is not None:

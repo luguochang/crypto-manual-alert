@@ -22,6 +22,8 @@ class RecordingRuns:
     def __init__(self) -> None:
         self.events: list[str] = []
         self.list_results: list[dict[str, Any]] = []
+        self.list_pages: dict[int, list[dict[str, Any]]] | None = None
+        self.list_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.list_args: tuple[Any, ...] | None = None
         self.list_kwargs: dict[str, Any] | None = None
         self.create_args: tuple[Any, ...] | None = None
@@ -32,11 +34,15 @@ class RecordingRuns:
         self.join_kwargs: dict[str, Any] | None = None
         self.cancel_args: tuple[Any, ...] | None = None
         self.cancel_kwargs: dict[str, Any] | None = None
+        self.get_status = "success"
 
     async def list(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.events.append("list")
         self.list_args = args
         self.list_kwargs = kwargs
+        self.list_calls.append((args, kwargs))
+        if self.list_pages is not None:
+            return self.list_pages.get(int(kwargs.get("offset", 0)), [])
         return self.list_results
 
     async def create(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -56,7 +62,7 @@ class RecordingRuns:
             "run_id": "run-1",
             "thread_id": "thread-1",
             "assistant_id": "11111111-1111-4111-8111-111111111111",
-            "status": "success",
+            "status": self.get_status,
         }
 
     async def join(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -191,14 +197,18 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
         "headers": {"authorization": "Bearer token-for-user-1"}
     }
 
-    await runner.cancel(handle)
+    client.runs.get_status = "interrupted"
+    cancel_result = await runner.cancel(handle)
+    assert cancel_result.outcome == "confirmed"
+    assert cancel_result.state is not None
+    assert cancel_result.state.status == "interrupted"
     assert client.runs.cancel_args == ("thread-1", "run-1")
     assert client.runs.cancel_kwargs == {
         "wait": True,
         "action": "interrupt",
         "headers": {"authorization": "Bearer token-for-user-1"}
     }
-    assert client.runs.events == ["list", "create", "get", "join", "cancel"]
+    assert client.runs.events == ["list", "create", "get", "join", "cancel", "get"]
 
 
 @pytest.mark.asyncio
@@ -335,25 +345,118 @@ async def test_runner_finds_an_unregistered_run_by_product_metadata() -> None:
     assert client.runs.list_args == ("product-thread-1",)
     assert client.runs.list_kwargs == {
         "limit": 100,
+        "offset": 0,
         "headers": {"authorization": "Bearer recovery-token"},
     }
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type", [NotFoundError, ConflictError])
-async def test_runner_treats_missing_or_terminal_cancel_target_as_stopped(
-    error_type: type[Exception],
-) -> None:
+async def test_runner_searches_all_run_pages_before_reporting_missing() -> None:
+    client = RecordingClient()
+    matching_run = {
+        "run_id": "second-page-run",
+        "assistant_id": "22222222-2222-4222-8222-222222222222",
+        "metadata": {
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "task_id": "task-1",
+            "product_run_id": "product-run-1",
+        },
+    }
+    client.runs.list_pages = {
+        0: [{"metadata": {}} for _ in range(100)],
+        100: [matching_run],
+    }
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    handle = await runner.find(
+        actor=ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:write",),
+        ),
+        task_id="task-1",
+        product_thread_id="product-thread-1",
+        product_run_id="product-run-1",
+    )
+
+    assert handle is not None
+    assert handle.run_id == "second-page-run"
+    assert [call[1]["offset"] for call in client.runs.list_calls] == [0, 100]
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_duplicate_runs_for_one_product_run() -> None:
+    client = RecordingClient()
+    metadata = {
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "user_id": "user-1",
+        "task_id": "task-1",
+        "product_run_id": "product-run-1",
+    }
+    client.runs.list_results = [
+        {
+            "run_id": f"duplicate-run-{index}",
+            "assistant_id": "22222222-2222-4222-8222-222222222222",
+            "metadata": metadata,
+        }
+        for index in range(2)
+    ]
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    with pytest.raises(RuntimeError, match="Multiple Agent Server Runs"):
+        await runner.find(
+            actor=ActorContext(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                user_id="user-1",
+                roles=("member",),
+                permissions=("analysis:write",),
+            ),
+            task_id="task-1",
+            product_thread_id="product-thread-1",
+            product_run_id="product-run-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_runner_reports_a_missing_cancel_target_as_unconfirmed() -> None:
     client = RecordingClient()
     response = httpx.Response(
-        404 if error_type is NotFoundError else 409,
+        404,
         request=httpx.Request("POST", "http://agent.invalid/runs/cancel"),
     )
-    error = error_type("cancel target unavailable", response=response, body=None)
+    error = NotFoundError("cancel target unavailable", response=response, body=None)
     client.runs.cancel = lambda *_, **__: _async_raise(error)  # type: ignore[method-assign]
     runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
 
-    await runner.cancel(_remote_handle())
+    result = await runner.cancel(_remote_handle())
+
+    assert result.outcome == "unconfirmed"
+    assert result.state is None
+
+
+@pytest.mark.asyncio
+async def test_runner_preserves_a_terminal_run_that_won_the_cancel_race() -> None:
+    client = RecordingClient()
+    response = httpx.Response(
+        409,
+        request=httpx.Request("POST", "http://agent.invalid/runs/cancel"),
+    )
+    error = ConflictError("cancel target is terminal", response=response, body=None)
+    client.runs.cancel = lambda *_, **__: _async_raise(error)  # type: ignore[method-assign]
+    client.runs.get_status = "success"
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    result = await runner.cancel(_remote_handle())
+
+    assert result.outcome == "terminal"
+    assert result.state is not None
+    assert result.state.status == "success"
 
 
 @pytest.mark.asyncio
@@ -369,10 +472,11 @@ async def test_runner_does_not_hide_a_cancel_conflict_for_an_active_run() -> Non
         body=None,
     )
     client.runs.cancel = lambda *_, **__: _async_raise(error)  # type: ignore[method-assign]
-    client.runs.get = lambda *_, **__: _async_value(  # type: ignore[method-assign]
-        {"status": "running"}
-    )
+    client.runs.get_status = "running"
     runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
 
-    with pytest.raises(ConflictError):
-        await runner.cancel(_remote_handle())
+    result = await runner.cancel(_remote_handle())
+
+    assert result.outcome == "unconfirmed"
+    assert result.state is not None
+    assert result.state.status == "running"

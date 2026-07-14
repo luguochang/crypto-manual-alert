@@ -4,11 +4,11 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import os
 from typing import AsyncIterator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncSession,
@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from crypto_alert_v2.api.agent_server import RemoteRunHandle, RemoteRunState
+from crypto_alert_v2.api.agent_server import (
+    RemoteCancelResult,
+    RemoteRunHandle,
+    RemoteRunState,
+)
 from crypto_alert_v2.api.schemas import AnalysisSubmission, TerminalGraphOutput
 from crypto_alert_v2.api.service import ProductAnalysisService, TaskNotCancellableError
 from crypto_alert_v2.auth.context import ActorContext
@@ -30,6 +34,7 @@ from crypto_alert_v2.persistence.models import (
     Run,
     Task,
     TaskCommand,
+    Tenant,
     Thread,
     WebEvidence,
 )
@@ -118,8 +123,12 @@ class InspectingRunner:
         self.events.append("get")
         return RemoteRunState(status=self.remote_status)  # type: ignore[arg-type]
 
-    async def cancel(self, handle: RemoteRunHandle) -> None:
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
         self.cancelled.append(handle)
+        return RemoteCancelResult(
+            outcome="confirmed",
+            state=RemoteRunState(status="interrupted"),
+        )
 
 
 class LeaseExpiringRunner(InspectingRunner):
@@ -161,6 +170,24 @@ class SuccessfulJoinRunner(InspectingRunner):
         return successful_terminal_output()
 
 
+class TerminalCancelRaceRunner(SuccessfulJoinRunner):
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancelled.append(handle)
+        return RemoteCancelResult(
+            outcome="terminal",
+            state=RemoteRunState(status="success"),
+        )
+
+
+class UnconfirmedCancelRunner(InspectingRunner):
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancelled.append(handle)
+        return RemoteCancelResult(
+            outcome="unconfirmed",
+            state=RemoteRunState(status="running"),
+        )
+
+
 class ConflictingSuccessfulJoinRunner(SuccessfulJoinRunner):
     async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
         output = await super().join(handle)
@@ -183,15 +210,39 @@ class RecoveringCancelRunner(InspectingRunner):
         )
 
 
+class DelayedVisibilityCancelRunner(InspectingRunner):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        visible_after: int,
+    ) -> None:
+        super().__init__(session_factory)
+        self.visible_after = visible_after
+        self.find_calls = 0
+
+    async def find(self, **kwargs: object) -> RemoteRunHandle | None:
+        self.events.append("find")
+        self.find_calls += 1
+        self.task_id = UUID(str(kwargs["task_id"]))
+        if self.find_calls < self.visible_after:
+            return None
+        return RemoteRunHandle(
+            assistant_id="delayed-assistant",
+            thread_id=str(kwargs["product_thread_id"]),
+            run_id="delayed-run",
+        )
+
+
 class CancelFailureRunner(InspectingRunner):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         super().__init__(session_factory)
         self.fail_cancel = True
 
-    async def cancel(self, handle: RemoteRunHandle) -> None:
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
         if self.fail_cancel:
             raise ConnectionError("cancel temporarily unavailable")
-        await super().cancel(handle)
+        return await super().cancel(handle)
 
 
 def actor() -> ActorContext:
@@ -913,6 +964,54 @@ async def test_orphan_deadline_cancel_failure_keeps_cleanup_reconcilable(
 
 
 @pytest.mark.asyncio
+async def test_orphan_cleanup_failure_has_a_persisted_terminal_deadline(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = CancelFailureRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="bounded-orphan-cleanup-worker",
+        clock=clock,
+        reconciliation_interval_seconds=2,
+        max_run_seconds=2,
+        max_cancel_seconds=4,
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    clock.now += timedelta(seconds=3)
+    cleanup_started_at = clock.now
+    assert await dispatcher.dispatch_once() is True
+
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        product_run = await session.scalar(select(Run).where(Run.task_id == task_id))
+    assert product_run is not None
+    assert product_run.cancel_requested_at == cleanup_started_at
+    pending = await service.get_task(actor(), str(task_id))
+    assert pending is not None
+    assert pending["status"] == "running"
+    assert pending["cancel_requested_at"] is None
+
+    clock.now += timedelta(seconds=5)
+    assert await dispatcher.dispatch_once() is True
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert failed["errors"][0]["error_type"] == "ConnectionError"
+    assert failed["errors"][0]["retryable"] is False
+
+
+@pytest.mark.asyncio
 async def test_queued_task_cancel_is_durable_without_creating_remote_run(
     connection: AsyncConnection,
 ) -> None:
@@ -1013,6 +1112,82 @@ async def test_running_task_cancel_stops_registered_official_run(
 
 
 @pytest.mark.asyncio
+async def test_terminal_success_wins_a_concurrent_cancel_request(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    runner = TerminalCancelRaceRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="terminal-cancel-race-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-after-official-terminal",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+
+    view = await service.get_task(actor(), str(queued["task_id"]))
+    assert view is not None
+    assert view["status"] == "succeeded"
+    assert view["artifact"] is not None
+    assert view["artifact"]["analysis"]["main_action"] == "open_long"
+    assert len(runner.cancelled) == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_registered_cancel_never_projects_cancelled(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = UnconfirmedCancelRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="unconfirmed-cancel-worker",
+        clock=clock,
+        reconciliation_interval_seconds=2,
+        max_cancel_attempts=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-that-remains-unconfirmed",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    pending = await service.get_task(actor(), str(queued["task_id"]))
+    assert pending is not None
+    assert pending["status"] == "running"
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    failed = await service.get_task(actor(), str(queued["task_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert "cancelled" not in {pending["status"], failed["status"]}
+
+
+@pytest.mark.asyncio
 async def test_cancel_requested_during_start_registers_then_cancels_remote_run(
     connection: AsyncConnection,
 ) -> None:
@@ -1062,6 +1237,174 @@ async def test_cancel_requested_during_start_registers_then_cancels_remote_run(
 
 
 @pytest.mark.asyncio
+async def test_remote_registration_and_product_cancel_share_one_lock_order() -> None:
+    assert DATABASE_URL is not None
+    suffix = uuid4().hex[:12]
+    registration_app = f"registration-{suffix}"
+    cancellation_app = f"cancellation-{suffix}"
+    observer_app = f"observer-{suffix}"
+    registration_engine = create_async_engine(
+        DATABASE_URL,
+        connect_args={"server_settings": {"application_name": registration_app}},
+    )
+    cancellation_engine = create_async_engine(
+        DATABASE_URL,
+        connect_args={"server_settings": {"application_name": cancellation_app}},
+    )
+    observer_engine = create_async_engine(
+        DATABASE_URL,
+        connect_args={"server_settings": {"application_name": observer_app}},
+    )
+    registration_sessions = async_sessionmaker(
+        registration_engine,
+        expire_on_commit=False,
+    )
+    cancellation_sessions = async_sessionmaker(
+        cancellation_engine,
+        expire_on_commit=False,
+    )
+    concurrent_actor = ActorContext(
+        tenant_id=f"lock-order-tenant-{suffix}",
+        workspace_id=f"lock-order-workspace-{suffix}",
+        user_id=f"oidc|lock-order-user-{suffix}",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=cancellation_sessions)
+    runner = InspectingRunner(registration_sessions)
+    dispatcher = CommandDispatcher(
+        session_factory=registration_sessions,
+        runner=runner,
+        worker_id="lock-order-worker",
+    )
+    release_registration = asyncio.Event()
+    registration_holds_locks = asyncio.Event()
+    original_locked_command = dispatcher._locked_command
+    pause_once = True
+
+    async def pause_after_locking_command(*args: object, **kwargs: object) -> TaskCommand | None:
+        nonlocal pause_once
+        command = await original_locked_command(*args, **kwargs)  # type: ignore[arg-type]
+        if pause_once:
+            pause_once = False
+            registration_holds_locks.set()
+            await release_registration.wait()
+        return command
+
+    dispatcher._locked_command = pause_after_locking_command  # type: ignore[method-assign]
+    try:
+        await service.bootstrap_actor(concurrent_actor)
+        queued = await service.create_analysis(
+            concurrent_actor,
+            AnalysisSubmission(
+                symbol="BTC-USDT-SWAP",
+                horizon="4h",
+                query_text="Exercise registration and cancellation lock order.",
+                notify=False,
+            ),
+            idempotency_key=f"lock-order-{suffix}",
+        )
+        lease = await dispatcher.claim_next()
+        assert lease is not None
+        handle = RemoteRunHandle(
+            assistant_id="lock-order-assistant",
+            thread_id="lock-order-thread",
+            run_id="lock-order-run",
+        )
+
+        registration = asyncio.create_task(dispatcher._register_remote(lease, handle))
+        await asyncio.wait_for(registration_holds_locks.wait(), timeout=2)
+        cancellation = asyncio.create_task(
+            service.cancel_task(
+                concurrent_actor,
+                str(queued["task_id"]),
+                "concurrent-lock-order-cancel",
+            )
+        )
+        blocking_pair: tuple[int, int] | None = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 3
+        while loop.time() < deadline:
+            async with observer_engine.connect() as observer:
+                blocking_pair = (
+                    await observer.execute(
+                        text(
+                            """
+                            SELECT blocked.pid, blocker.pid
+                            FROM pg_stat_activity AS blocked
+                            JOIN pg_stat_activity AS blocker
+                              ON blocker.pid = ANY(pg_blocking_pids(blocked.pid))
+                            WHERE blocked.application_name = :cancellation_app
+                              AND blocker.application_name = :registration_app
+                            """
+                        ),
+                        {
+                            "cancellation_app": cancellation_app,
+                            "registration_app": registration_app,
+                        },
+                    )
+                ).one_or_none()
+            if blocking_pair is not None:
+                break
+            if cancellation.done():
+                await cancellation
+                pytest.fail("Product cancellation completed before observing its lock wait")
+            await asyncio.sleep(0.02)
+        assert blocking_pair is not None
+        assert blocking_pair[0] != blocking_pair[1]
+        release_registration.set()
+
+        registration_result, cancellation_result = await asyncio.wait_for(
+            asyncio.gather(registration, cancellation),
+            timeout=5,
+        )
+        assert registration_result == "registered"
+        assert cancellation_result is not None
+        assert cancellation_result["cancel_requested_at"] is not None
+        assert await dispatcher.dispatch_once() is True
+        cancelled = await service.get_task(
+            concurrent_actor,
+            str(queued["task_id"]),
+        )
+        assert cancelled is not None
+        assert cancelled["status"] == "cancelled"
+        async with cancellation_sessions() as session:
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(TaskCommand.task_id == UUID(str(queued["task_id"])))
+                        .order_by(TaskCommand.sequence)
+                    )
+                ).all()
+            )
+            product_run = await session.scalar(
+                select(Run).where(Run.task_id == UUID(str(queued["task_id"])))
+            )
+            thread = await session.scalar(
+                select(Thread).where(Thread.id == commands[0].thread_id)
+            )
+        assert [(command.command_type, command.status) for command in commands] == [
+            ("submit", "cancelled"),
+            ("cancel_task", "dispatched"),
+        ]
+        assert product_run is not None
+        assert product_run.official_run_id == handle.run_id
+        assert product_run.cancel_requested_at is not None
+        assert thread is not None
+        assert thread.official_thread_id == handle.thread_id
+    finally:
+        release_registration.set()
+        async with cancellation_sessions() as session, session.begin():
+            await session.execute(
+                delete(Tenant).where(Tenant.external_id == concurrent_actor.tenant_id)
+            )
+        await registration_engine.dispose()
+        await cancellation_engine.dispose()
+        await observer_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_cancel_recovers_unregistered_remote_run_after_worker_restart(
     connection: AsyncConnection,
 ) -> None:
@@ -1078,7 +1421,6 @@ async def test_cancel_recovers_unregistered_remote_run_after_worker_restart(
         runner=runner,
         worker_id="recovery-worker",
         clock=clock,
-        cancel_discovery_seconds=0,
     )
     submit_lease = await dispatcher.claim_next()
     assert submit_lease is not None
@@ -1110,6 +1452,103 @@ async def test_cancel_recovers_unregistered_remote_run_after_worker_restart(
     assert product_run is not None
     assert product_run.official_run_id == "recovered-run"
     assert product_run.official_assistant_id == "recovered-assistant"
+
+
+@pytest.mark.asyncio
+async def test_cancel_retries_until_unregistered_remote_run_becomes_visible(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = DelayedVisibilityCancelRunner(session_factory, visible_after=2)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="delayed-visibility-worker",
+        clock=clock,
+        reconciliation_interval_seconds=2,
+        max_cancel_attempts=3,
+    )
+    submit_lease = await dispatcher.claim_next()
+    assert submit_lease is not None
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-before-delayed-discovery",
+    )
+
+    clock.now += timedelta(seconds=31)
+    assert await dispatcher.claim_next() is None
+    assert await dispatcher.dispatch_once() is True
+    pending = await service.get_task(actor(), str(queued["task_id"]))
+    assert pending is not None
+    assert pending["status"] == "running"
+    assert runner.find_calls == 1
+    assert runner.cancelled == []
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    cancelled = await service.get_task(actor(), str(queued["task_id"]))
+    assert cancelled is not None
+    assert cancelled["status"] == "cancelled"
+    assert runner.find_calls == 2
+    assert runner.cancelled == [
+        RemoteRunHandle(
+            assistant_id="delayed-assistant",
+            thread_id=str(submit_lease.product_thread_id),
+            run_id="delayed-run",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_fails_explicitly_when_unregistered_run_never_becomes_visible(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = DelayedVisibilityCancelRunner(session_factory, visible_after=100)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="missing-run-worker",
+        clock=clock,
+        reconciliation_interval_seconds=2,
+        max_cancel_attempts=2,
+    )
+    assert await dispatcher.claim_next() is not None
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-run-that-never-appears",
+    )
+
+    clock.now += timedelta(seconds=31)
+    assert await dispatcher.claim_next() is None
+    assert await dispatcher.dispatch_once() is True
+    pending = await service.get_task(actor(), str(queued["task_id"]))
+    assert pending is not None
+    assert pending["status"] == "running"
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    failed = await service.get_task(actor(), str(queued["task_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert failed["errors"][0]["error_type"] == "RunDiscoveryTimeout"
+    assert runner.find_calls == 2
+    assert runner.cancelled == []
 
 
 @pytest.mark.asyncio

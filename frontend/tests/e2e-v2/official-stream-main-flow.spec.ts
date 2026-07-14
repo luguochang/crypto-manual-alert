@@ -56,13 +56,14 @@ test("observes the official stream main flow without browser-side commands", asy
     "使用真实交易所行情和实时 Web Search 分析 BTC；宏观证据不足时必须返回 no_trade，所有事实必须引用来源。",
   );
   await page.getByRole("button", { name: "开始分析" }).click();
+  await assertOfficialLiveStreamDom(page);
 
   const statusHeading = page.getByTestId("task-status").getByRole("heading");
   await expect(statusHeading).toHaveText(terminalStatusPattern, { timeout: 300_000 });
   const terminalStatus = (await statusHeading.innerText()).trim();
   let visibleFailure: string | null = null;
 
-  await assertOfficialStreamDom(page, terminalStatus);
+  await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
   if (terminalStatus === "分析完成") {
     await assertNaturalLanguageSuccess(page);
   } else {
@@ -101,7 +102,7 @@ test("observes the official stream main flow without browser-side commands", asy
     terminalStatus,
     { timeout: 30_000 },
   );
-  await assertOfficialStreamDom(page, terminalStatus);
+  await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
   const refreshedFailure = terminalStatus === "分析失败"
     ? await reportVisibleFailure(page, testInfo, "after-reload")
     : null;
@@ -511,26 +512,16 @@ function assertOfficialStreamObservation(observer: FlowObserver) {
   ).toBe(true);
 }
 
-async function assertOfficialStreamDom(page: Page, terminalStatus: string) {
+async function assertOfficialLiveStreamDom(page: Page) {
   const stream = page.getByTestId("official-run-stream");
   await expect(stream).toBeVisible({ timeout: 30_000 });
   await expect(stream.getByRole("heading", { name: "官方执行进度" })).toBeVisible();
-
-  const expectedConnectionStatus = terminalStatus === "分析完成"
-    ? "执行已完成"
-    : "执行失败";
   await expect(stream.locator(".official-stream-status")).toHaveText(
-    expectedConnectionStatus,
+    /^(?:正在连接|实时同步中)$/,
     { timeout: 30_000 },
   );
   await expect(stream.locator(".official-progress-list")).toBeVisible();
   await expect(stream.getByText("执行阶段", { exact: true })).toBeVisible();
-  if (terminalStatus === "分析完成") {
-    await expect(stream.getByText("市场快照", { exact: true })).toBeVisible();
-    await expect(stream.getByText("Web 证据", { exact: true })).toBeVisible();
-    await expect(stream.getByText("分析判断", { exact: true })).toBeVisible();
-    await expect(stream.getByText("官方执行已完成", { exact: true })).toBeVisible();
-  }
 }
 
 async function assertNaturalLanguageSuccess(page: Page) {
