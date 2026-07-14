@@ -16,9 +16,7 @@ dependencies = [
     "langchain-tavily==0.2.18",
     "langfuse==4.14.0",
     "langgraph==1.2.9",
-    "langgraph-api==0.11.0",
     "langgraph-checkpoint-postgres==3.1.0",
-    "langgraph-cli[inmem]==0.4.31",
     "langgraph-sdk==0.4.2",
     "langsmith==0.10.2",
     "pydantic-settings==2.14.2",
@@ -33,6 +31,8 @@ crypto-alert-provision = "crypto_alert_v2.commands.provision:main"
 
 [dependency-groups]
 dev = [
+    "langgraph-api==0.11.0",
+    "langgraph-cli[inmem]==0.4.31",
     "pytest>=8.4,<10",
     "pytest-asyncio>=1.2,<2",
     "pytest-cov>=7,<8",

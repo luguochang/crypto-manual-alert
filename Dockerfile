@@ -1,5 +1,4 @@
-ARG PYTHON_BASE_IMAGE=python:3.12-slim
-FROM ${PYTHON_BASE_IMAGE}
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 
 ARG UV_VERSION=0.11.28
 
@@ -20,6 +19,4 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY backend ./
 RUN uv sync --frozen --no-dev
 
-EXPOSE 8011 8123
-
-CMD ["uvicorn", "crypto_alert_v2.api.app:app", "--host", "0.0.0.0", "--port", "8011"]
+CMD ["python", "-m", "crypto_alert_v2.commands.worker", "--worker-id", "container-worker"]

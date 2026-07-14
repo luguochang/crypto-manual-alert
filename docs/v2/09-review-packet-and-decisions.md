@@ -64,7 +64,7 @@ V2 是一个以 LangGraph Agent Server 为唯一运行时、以 LangChain Agent/
 
 | ADR | 推荐 | 评审重点 |
 | --- | --- | --- |
-| `0001-agent-runtime-deployment.md` | 开发 `langgraph dev`，集成 `langgraph up`，生产优先官方 LangSmith Deployment；产品数据库独立权限边界 | 许可、区域、退出方案 |
+| `0001-agent-runtime-deployment.md` | 开发 `langgraph dev`；集成采用官方 `langgraph build` + 受控 Compose（替代无法限制 host bind 的 CLI 0.4.31 `langgraph up`）；生产优先官方 LangSmith Deployment；产品数据库独立权限边界 | 许可、区域、退出方案 |
 | `0002-web-search-provider.md` | capability probe + built-in/Tavily 显式选择，不允许静默降级 | 自定义模型端点是否支持 Responses web search |
 | `0003-identity-and-auth-bootstrap.md` | 非生产固定身份；生产推荐 Auth.js + BFF 短期内部令牌 + Agent Server resource auth | 是否接受 Auth.js 作为默认正式方案 |
 | `0004-frontend-presentation-stack.md` | `@langchain/react` 唯一 Runtime，AI Elements/shadcn 作为视觉层 | 是否需要 assistant-ui 的额外能力 |

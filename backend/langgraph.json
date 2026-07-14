@@ -1,6 +1,12 @@
 {
   "$schema": "https://langgra.ph/schema.json",
-  "dependencies": ["."],
+  "source": {
+    "kind": "uv",
+    "root": "."
+  },
+  "dockerfile_lines": [
+    "ENV UV_NO_DEFAULT_GROUPS=1"
+  ],
   "graphs": {
     "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph"
   },

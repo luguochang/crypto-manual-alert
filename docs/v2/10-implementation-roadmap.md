@@ -25,7 +25,7 @@
 
 - 独立 V2 应用目录和锁定依赖。
 - 一个 canonical `StateGraph`，一个 `create_agent` 节点，一个 typed custom projection。
-- `langgraph dev` 和容器化 `langgraph up` 基线。
+- `langgraph dev` 开发基线和官方 `langgraph build` + 受控 Compose 容器基线。
 - Next.js BFF 和单根 `useStream` 页面。
 - 固定 `dev-tenant/dev-user` ActorContext。
 - Thread 创建、流式 token/tool/value、停止、刷新重连、历史恢复。

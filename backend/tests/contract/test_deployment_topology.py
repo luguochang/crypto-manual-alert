@@ -97,7 +97,11 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
             "json",
         ],
         cwd=ROOT,
-        env=os.environ | {"MARKET_DATA_HTTP_PROXY": "http://proxy.example:7890"},
+        env=os.environ
+        | {
+            "COMPOSE_DISABLE_ENV_FILE": "1",
+            "MARKET_DATA_HTTP_PROXY": "http://proxy.example:7890",
+        },
         capture_output=True,
         text=True,
         check=True,
@@ -106,22 +110,33 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     services = config["services"]
 
     assert set(services) == {
-        "postgres",
+        "product-postgres",
+        "agent-postgres",
+        "langgraph-redis",
         "migrate",
         "internal-jwt-keys",
         "development-bootstrap",
-        "agent-server",
-        "agent-server-readiness",
+        "langgraph-api",
+        "langgraph-api-readiness",
         "command-worker",
         "frontend",
     }
-    assert "product-api" not in services
+    assert {"postgres", "agent-server", "langgraph-postgres"}.isdisjoint(services)
+    assert "ports" not in services["product-postgres"]
+    assert "ports" not in services["agent-postgres"]
+    assert _volume_sources(services["product-postgres"]) == {
+        "/var/lib/postgresql/data": "product-postgres-data"
+    }
+    assert _volume_sources(services["agent-postgres"]) == {
+        "/var/lib/postgresql/data": "agent-postgres-data"
+    }
+
     assert "crypto_alert_v2.commands.worker" in services["command-worker"]["command"]
     assert services["frontend"]["environment"]["PRODUCT_API_BASE_URL"] == (
-        "http://agent-server:8123/app"
+        "http://langgraph-api:8000/app"
     )
     assert services["frontend"]["environment"]["AGENT_SERVER_URL"] == (
-        "http://agent-server:8123"
+        "http://langgraph-api:8000"
     )
     assert services["frontend"]["environment"][
         "AGENT_SERVER_INTERNAL_JWT_AUDIENCE"
@@ -130,12 +145,14 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         name.startswith("NEXT_PUBLIC_") and "AGENT_SERVER" in name
         for name in services["frontend"]["environment"]
     )
-    assert services["agent-server"]["environment"]["PRODUCT_DATABASE_URL"].startswith(
+    assert services["langgraph-api"]["environment"][
+        "PRODUCT_DATABASE_URL"
+    ].startswith(
         "postgresql+asyncpg://"
     )
     for service_name in (
-        "agent-server",
-        "agent-server-readiness",
+        "langgraph-api",
+        "langgraph-api-readiness",
         "command-worker",
     ):
         assert services[service_name]["environment"]["APP_ENVIRONMENT"] == (
@@ -174,7 +191,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "DEVELOPMENT_BOOTSTRAP_SUBJECT": "dev-user",
         "DEVELOPMENT_BOOTSTRAP_TENANT_ID": "dev-tenant",
         "DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID": "dev-workspace",
-        "PRODUCT_DATABASE_URL": services["agent-server"]["environment"][
+        "PRODUCT_DATABASE_URL": services["langgraph-api"]["environment"][
             "PRODUCT_DATABASE_URL"
         ],
     }
@@ -186,13 +203,14 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         assert environment["DEVELOPMENT_BOOTSTRAP_ENABLED"] == "true"
         assert environment["DEVELOPMENT_BOOTSTRAP_PROFILE"] == "local-proof"
 
-    assert services["agent-server-readiness"]["command"] == [
+    assert services["langgraph-api-readiness"]["command"] == [
         "python",
         "-m",
         "crypto_alert_v2.auth.agent_healthcheck",
     ]
-    assert services["agent-server-readiness"]["restart"] == "on-failure:12"
-    readiness_environment = services["agent-server-readiness"]["environment"]
+    assert services["langgraph-api-readiness"]["restart"] == "on-failure:12"
+    readiness_environment = services["langgraph-api-readiness"]["environment"]
+    assert readiness_environment["AGENT_SERVER_URL"] == "http://langgraph-api:8000"
     assert readiness_environment["AGENT_HEALTHCHECK_SUBJECT"] == "probe-user"
     assert readiness_environment["AGENT_HEALTHCHECK_TENANT_ID"] == "probe-tenant"
     assert readiness_environment["AGENT_HEALTHCHECK_WORKSPACE_ID"] == "probe-workspace"
@@ -216,40 +234,40 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "AGENT_HEALTHCHECK_PERMISSIONS",
     }
     for service_name, service in services.items():
-        if service_name != "agent-server-readiness":
+        if service_name != "langgraph-api-readiness":
             assert not any(
                 name.startswith("AGENT_HEALTHCHECK_")
                 for name in service.get("environment", {})
             )
-    agent_liveness = services["agent-server"]["healthcheck"]["test"]
-    assert "socket.create_connection" in agent_liveness[-1]
-    assert "agent_healthcheck" not in agent_liveness[-1]
-    assert "authorization" not in agent_liveness[-1].lower()
-    assert "bearer" not in agent_liveness[-1].lower()
+    agent_liveness = services["langgraph-api"]["healthcheck"]["test"]
+    assert agent_liveness == ["CMD", "python", "/api/healthcheck.py"]
     assert (
-        "INTERNAL_JWT_PRIVATE_KEY_FILE" not in services["agent-server"]["environment"]
+        "INTERNAL_JWT_PRIVATE_KEY_FILE"
+        not in services["langgraph-api"]["environment"]
     )
     frontend_healthcheck = services["frontend"]["healthcheck"]["test"]
     assert "/api/product/api/v2/health" in frontend_healthcheck[-1]
     assert "/api/product/api/v2/runs?limit=1" in frontend_healthcheck[-1]
     assert "/work" in frontend_healthcheck[-1]
     assert (
-        services["agent-server"]["environment"]["AGENT_SERVER_INTERNAL_JWT_AUDIENCE"]
+        services["langgraph-api"]["environment"][
+            "AGENT_SERVER_INTERNAL_JWT_AUDIENCE"
+        ]
         == "crypto-alert-agent-server"
     )
-    assert services["agent-server"]["environment"]["MARKET_DATA_HTTP_PROXY"] == (
+    assert services["langgraph-api"]["environment"]["MARKET_DATA_HTTP_PROXY"] == (
         "http://proxy.example:7890"
     )
     for service_name in (
         "development-bootstrap",
-        "agent-server-readiness",
+        "langgraph-api-readiness",
         "command-worker",
         "frontend",
     ):
         assert "MARKET_DATA_HTTP_PROXY" not in services[service_name]["environment"]
-    assert "INTERNAL_JWT_AUDIENCE" not in services["agent-server"]["environment"]
+    assert "INTERNAL_JWT_AUDIENCE" not in services["langgraph-api"]["environment"]
     assert (
-        services["agent-server"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"]
+        services["langgraph-api"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"]
         == "60"
     )
 
@@ -259,10 +277,10 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert _volume_sources(services["frontend"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"
     }
-    assert _volume_sources(services["agent-server"]) == {
+    assert _volume_sources(services["langgraph-api"]) == {
         "/run/internal-jwt-public": "internal-jwt-public"
     }
-    assert _volume_sources(services["agent-server-readiness"]) == {
+    assert _volume_sources(services["langgraph-api-readiness"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"
     }
     private_key_consumers = {
@@ -272,33 +290,40 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         and "internal-jwt-private" in _volume_sources(service).values()
     }
     assert private_key_consumers == {
-        "agent-server-readiness",
+        "langgraph-api-readiness",
         "command-worker",
         "frontend",
     }
     assert (
-        services["agent-server-readiness"]["depends_on"]["agent-server"]["condition"]
+        services["langgraph-api-readiness"]["depends_on"]["langgraph-api"][
+            "condition"
+        ]
         == "service_healthy"
     )
     assert (
-        services["command-worker"]["depends_on"]["agent-server-readiness"]["condition"]
+        services["command-worker"]["depends_on"]["langgraph-api-readiness"][
+            "condition"
+        ]
         == "service_completed_successfully"
     )
     assert {
         dependency: settings["condition"]
-        for dependency, settings in services["agent-server"]["depends_on"].items()
+        for dependency, settings in services["langgraph-api"]["depends_on"].items()
     } == {
+        "agent-postgres": "service_healthy",
+        "langgraph-redis": "service_healthy",
         "migrate": "service_completed_successfully",
         "internal-jwt-keys": "service_completed_successfully",
         "development-bootstrap": "service_completed_successfully",
     }
     assert (
-        services["frontend"]["depends_on"]["agent-server"]["condition"]
+        services["frontend"]["depends_on"]["langgraph-api"]["condition"]
         == "service_healthy"
     )
 
     compose_source = (ROOT / "docker-compose.yml").read_text()
-    assert "product-api" not in compose_source
+    assert "agent-server:" not in compose_source
+    assert "langgraph dev" not in compose_source
     assert "8011" not in compose_source
     assert "AGENT_SERVER_LOCAL_TOKEN" not in compose_source
     assert "local-agent-dev-only" not in compose_source

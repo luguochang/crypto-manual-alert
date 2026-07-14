@@ -1,17 +1,19 @@
 name: crypto-manual-alert-v2
 
-# Local full-stack proof topology. Production should use LangGraph Platform's
-# immutable Agent Server image and externally managed PostgreSQL/OIDC secrets.
+# The Agent image is built by the official `langgraph build` command before
+# Compose starts this durable local integration topology.
 services:
-  postgres:
-    image: postgres:16-alpine
+  product-postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-crypto_alert_v2}
-      POSTGRES_USER: ${POSTGRES_USER:-crypto_alert}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto_alert_local}
+      POSTGRES_DB: ${PRODUCT_POSTGRES_DB:-crypto_alert_v2}
+      POSTGRES_USER: ${PRODUCT_POSTGRES_USER:-crypto_alert}
+      POSTGRES_PASSWORD: ${PRODUCT_POSTGRES_PASSWORD:-crypto_alert_local}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - type: volume
+        source: product-postgres-data
+        target: /var/lib/postgresql/data
     healthcheck:
       test:
         - CMD-SHELL
@@ -21,16 +23,51 @@ services:
       retries: 12
       start_period: 5s
 
+  agent-postgres:
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AGENT_POSTGRES_DB:-langgraph}
+      POSTGRES_USER: ${AGENT_POSTGRES_USER:-langgraph}
+      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-langgraph_local}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=vector
+    volumes:
+      - type: volume
+        source: agent-postgres-data
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  langgraph-redis:
+    image: public.ecr.aws/docker/library/redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 1s
+      retries: 12
+
   migrate:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
     restart: "no"
     environment:
-      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+      PRODUCT_DATABASE_URL: ${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:crypto_alert_local@product-postgres:5432/crypto_alert_v2}
     command:
       - alembic
       - -c
@@ -38,11 +75,12 @@ services:
       - upgrade
       - head
     depends_on:
-      postgres:
+      product-postgres:
         condition: service_healthy
 
   internal-jwt-keys:
     image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
     restart: "no"
     command:
       - python
@@ -61,10 +99,11 @@ services:
 
   development-bootstrap:
     image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
     restart: "no"
     environment:
       APP_ENVIRONMENT: development
-      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
+      PRODUCT_DATABASE_URL: ${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:crypto_alert_local@product-postgres:5432/crypto_alert_v2}
       DEVELOPMENT_BOOTSTRAP_ENABLED: "true"
       DEVELOPMENT_BOOTSTRAP_PROFILE: local-proof
       DEVELOPMENT_BOOTSTRAP_SUBJECT: dev-user
@@ -80,8 +119,9 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  agent-server:
-    image: crypto-manual-alert-v2-backend:local
+  langgraph-api:
+    image: ${LANGGRAPH_API_LOCAL_IMAGE:-crypto-manual-alert-v2-langgraph-api:local}
+    pull_policy: never
     restart: unless-stopped
     init: true
     env_file:
@@ -89,8 +129,10 @@ services:
         required: false
     environment:
       APP_ENVIRONMENT: production
-      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
-      AGENT_SERVER_URL: http://127.0.0.1:8123
+      PRODUCT_DATABASE_URL: ${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:crypto_alert_local@product-postgres:5432/crypto_alert_v2}
+      POSTGRES_URI: ${COMPOSE_AGENT_POSTGRES_URI:-postgres://langgraph:langgraph_local@agent-postgres:5432/langgraph?sslmode=disable}
+      REDIS_URI: redis://langgraph-redis:6379
+      AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
       MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
       INTERNAL_JWT_KID: compose-ephemeral
@@ -98,19 +140,8 @@ services:
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_MAX_TTL_SECONDS: "60"
       INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
-    command:
-      - langgraph
-      - dev
-      - --config
-      - langgraph.json
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8123"
-      - --no-browser
-      - --no-reload
     ports:
-      - "127.0.0.1:${AGENT_SERVER_PORT:-8123}:8123"
+      - 127.0.0.1:${AGENT_SERVER_PORT:-8123}:8000
     volumes:
       - type: volume
         source: internal-jwt-public
@@ -120,13 +151,15 @@ services:
       test:
         - CMD
         - python
-        - -c
-        - "import socket; connection=socket.create_connection(('127.0.0.1', 8123), timeout=5); connection.close()"
-      interval: 5s
-      timeout: 8s
-      retries: 24
-      start_period: 15s
+        - /api/healthcheck.py
+      interval: 60s
+      start_interval: 1s
+      start_period: 10s
     depends_on:
+      agent-postgres:
+        condition: service_healthy
+      langgraph-redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
       internal-jwt-keys:
@@ -134,12 +167,13 @@ services:
       development-bootstrap:
         condition: service_completed_successfully
 
-  agent-server-readiness:
+  langgraph-api-readiness:
     image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
     restart: "on-failure:12"
     environment:
       APP_ENVIRONMENT: production
-      AGENT_SERVER_URL: http://agent-server:8123
+      AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
       INTERNAL_JWT_KID: compose-ephemeral
       INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
@@ -162,11 +196,12 @@ services:
     depends_on:
       internal-jwt-keys:
         condition: service_completed_successfully
-      agent-server:
+      langgraph-api:
         condition: service_healthy
 
   command-worker:
     image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
     restart: unless-stopped
     init: true
     env_file:
@@ -174,8 +209,8 @@ services:
         required: false
     environment:
       APP_ENVIRONMENT: production
-      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
-      AGENT_SERVER_URL: http://agent-server:8123
+      PRODUCT_DATABASE_URL: ${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:crypto_alert_local@product-postgres:5432/crypto_alert_v2}
+      AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
       INTERNAL_JWT_KID: compose-ephemeral
       INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
@@ -199,22 +234,21 @@ services:
         condition: service_completed_successfully
       development-bootstrap:
         condition: service_completed_successfully
-      agent-server-readiness:
+      langgraph-api-readiness:
         condition: service_completed_successfully
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-      args:
-        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:22-alpine}
     image: crypto-manual-alert-v2-frontend:local
+    pull_policy: never
     restart: unless-stopped
     init: true
     environment:
       APP_ENVIRONMENT: development
-      PRODUCT_API_BASE_URL: http://agent-server:8123/app
-      AGENT_SERVER_URL: http://agent-server:8123
+      PRODUCT_API_BASE_URL: http://langgraph-api:8000/app
+      AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_KID: compose-ephemeral
       INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
@@ -227,7 +261,7 @@ services:
       DEVELOPMENT_BOOTSTRAP_ROLES: '["member"]'
       DEVELOPMENT_BOOTSTRAP_PERMISSIONS: '["analysis:read","analysis:write"]'
     ports:
-      - "127.0.0.1:${FRONTEND_PORT:-3001}:3001"
+      - 127.0.0.1:${FRONTEND_PORT:-3001}:3001
     volumes:
       - type: volume
         source: internal-jwt-private
@@ -244,12 +278,15 @@ services:
       retries: 18
       start_period: 15s
     depends_on:
-      agent-server:
+      langgraph-api:
         condition: service_healthy
+      langgraph-api-readiness:
+        condition: service_completed_successfully
       command-worker:
         condition: service_started
 
 volumes:
-  postgres-data:
+  product-postgres-data:
+  agent-postgres-data:
   internal-jwt-private:
   internal-jwt-public:
