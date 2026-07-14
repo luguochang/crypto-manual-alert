@@ -159,7 +159,9 @@ def _public_error(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         "research_unavailable": "检索服务没有返回可验证来源，当前未生成分析结果。",
         "model_unavailable": "分析模型暂时不可用，当前未生成分析结果。",
         "agent_cancel_failed": "无法确认官方执行已停止，请联系运维检查该运行。",
+        "orphan_cancel_unconfirmed": "任务超时后无法确认官方执行已停止，请联系运维处理。",
         "agent_run_timeout": "官方执行超过允许时限，当前未生成分析结果。",
+        "terminal_projection_unavailable": "官方执行已结束，但暂时无法读取最终结果。",
         "terminal_projection_conflict": "终态投影发生一致性冲突，当前结果未被采用。",
     }
     diagnostics: dict[str, Any] = {}

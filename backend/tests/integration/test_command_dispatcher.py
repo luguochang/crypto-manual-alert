@@ -164,6 +164,27 @@ class TerminalJoinFailureRunner(InspectingRunner):
         return await super().join(handle)
 
 
+class DeadlineTerminalJoinFailureRunner(TerminalJoinFailureRunner):
+    async def get(self, handle: RemoteRunHandle) -> RemoteRunState:
+        del handle
+        self.events.append("get")
+        raise ConnectionError("state reconciliation temporarily unavailable")
+
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancelled.append(handle)
+        return RemoteCancelResult(
+            outcome="terminal",
+            state=RemoteRunState(status="success"),
+        )
+
+
+class HangingCancelRunner(InspectingRunner):
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancelled.append(handle)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class SuccessfulJoinRunner(InspectingRunner):
     async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
         await super().join(handle)
@@ -177,6 +198,13 @@ class TerminalCancelRaceRunner(SuccessfulJoinRunner):
             outcome="terminal",
             state=RemoteRunState(status="success"),
         )
+
+
+class TerminalCancelJoinFailureRunner(TerminalCancelRaceRunner):
+    async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
+        del handle
+        self.events.append("join")
+        raise ConnectionError("terminal output temporarily unavailable")
 
 
 class UnconfirmedCancelRunner(InspectingRunner):
@@ -1006,7 +1034,7 @@ async def test_orphan_cleanup_failure_has_a_persisted_terminal_deadline(
     failed = await service.get_task(actor(), str(task_id))
     assert failed is not None
     assert failed["status"] == "failed"
-    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert failed["errors"][0]["code"] == "orphan_cancel_unconfirmed"
     assert failed["errors"][0]["error_type"] == "ConnectionError"
     assert failed["errors"][0]["retryable"] is False
 
@@ -1142,6 +1170,42 @@ async def test_terminal_success_wins_a_concurrent_cancel_request(
     assert view["status"] == "succeeded"
     assert view["artifact"] is not None
     assert view["artifact"]["analysis"]["main_action"] == "open_long"
+    assert len(runner.cancelled) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_output_failure_does_not_consume_cancel_failure_semantics(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    runner = TerminalCancelJoinFailureRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="terminal-output-cancel-race-worker",
+        max_cancel_attempts=1,
+    )
+    assert await dispatcher.dispatch_once() is True
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-after-terminal-with-unavailable-output",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+
+    failed = await service.get_task(actor(), str(queued["task_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "terminal_projection_unavailable"
+    assert failed["errors"][0]["error_type"] == "ConnectionError"
+    assert failed["errors"][0]["code"] != "agent_cancel_failed"
     assert len(runner.cancelled) == 1
 
 
@@ -1622,6 +1686,78 @@ async def test_permanent_cancel_failure_becomes_an_explicit_product_failure(
     assert view["status"] == "failed"
     assert view["errors"][0]["code"] == "agent_cancel_failed"
     assert view["errors"][0]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_join_failure_after_deadline_retries_without_recursion(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = DeadlineTerminalJoinFailureRunner(session_factory)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="terminal-projection-failure-worker",
+        clock=clock,
+        max_attempts=1,
+        max_run_seconds=1,
+        remote_operation_timeout_seconds=0.2,
+    )
+    lease = await dispatcher.claim_next()
+    assert lease is not None
+    clock.now += timedelta(seconds=2)
+
+    assert await asyncio.wait_for(dispatcher.execute(lease), timeout=2) is True
+
+    failed = await service.get_task(actor(), str(queued["task_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "terminal_projection_unavailable"
+    assert failed["errors"][0]["error_type"] == "ConnectionError"
+    assert len(runner.cancelled) == 1
+    assert runner.events.count("join") == 1
+
+
+@pytest.mark.asyncio
+async def test_hanging_remote_cancel_is_bounded_by_local_timeout(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    runner = HangingCancelRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="hanging-cancel-worker",
+        max_cancel_attempts=1,
+        remote_operation_timeout_seconds=0.05,
+    )
+    assert await dispatcher.dispatch_once() is True
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-with-hanging-transport",
+    )
+
+    assert await asyncio.wait_for(dispatcher.dispatch_once(), timeout=2) is True
+
+    failed = await service.get_task(actor(), str(queued["task_id"]))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert failed["errors"][0]["error_type"] == "TimeoutError"
+    assert len(runner.cancelled) == 1
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,7 @@ class CommandDispatcher:
         max_attempts: int = 3,
         max_cancel_attempts: int = 30,
         max_cancel_seconds: int = 120,
+        remote_operation_timeout_seconds: float = 20.0,
         reconciliation_interval_seconds: float = 2.0,
         max_run_seconds: int = 900,
     ) -> None:
@@ -104,6 +105,8 @@ class CommandDispatcher:
             raise ValueError("max_cancel_attempts must be positive")
         if max_cancel_seconds < 1:
             raise ValueError("max_cancel_seconds must be positive")
+        if remote_operation_timeout_seconds <= 0:
+            raise ValueError("remote_operation_timeout_seconds must be positive")
         if reconciliation_interval_seconds <= 0:
             raise ValueError("reconciliation_interval_seconds must be positive")
         if max_run_seconds < 1:
@@ -116,6 +119,7 @@ class CommandDispatcher:
         self._max_attempts = max_attempts
         self._max_cancel_attempts = max_cancel_attempts
         self._max_cancel_seconds = max_cancel_seconds
+        self._remote_operation_timeout_seconds = remote_operation_timeout_seconds
         self._reconciliation_interval_seconds = reconciliation_interval_seconds
         self._max_run_seconds = max_run_seconds
 
@@ -339,7 +343,7 @@ class CommandDispatcher:
                 return True
             if registration == "lost":
                 try:
-                    await self._runner.cancel(handle)
+                    await self._cancel_remote(handle)
                 except Exception:
                     pass
                 return False
@@ -357,19 +361,19 @@ class CommandDispatcher:
             lease,
             handle,
             remote_state,
-            retry_mode="reconcile",
         )
 
     async def _execute_cancel(self, lease: CommandLease) -> bool:
         handle = lease.remote_handle
         if handle is None and lease.product_run_id is not None:
             try:
-                handle = await self._runner.find(
-                    actor=lease.actor,
-                    task_id=str(lease.task_id),
-                    product_thread_id=str(lease.product_thread_id),
-                    product_run_id=str(lease.product_run_id),
-                )
+                async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                    handle = await self._runner.find(
+                        actor=lease.actor,
+                        task_id=str(lease.task_id),
+                        product_thread_id=str(lease.product_thread_id),
+                        product_run_id=str(lease.product_run_id),
+                    )
             except Exception as exc:
                 return await self._schedule_cancel_retry(lease, exc)
             if handle is None:
@@ -381,7 +385,7 @@ class CommandDispatcher:
             if authorize is not None:
                 handle = authorize(handle, lease.actor)
             try:
-                cancel_result = await self._runner.cancel(handle)
+                cancel_result = await self._cancel_remote(handle)
             except Exception as exc:
                 return await self._schedule_cancel_retry(lease, exc)
             if cancel_result.outcome == "unconfirmed":
@@ -393,7 +397,6 @@ class CommandDispatcher:
                     lease,
                     handle,
                     cancel_result.state,
-                    retry_mode="cancel",
                 )
         return await self._finalize_cancel(lease)
 
@@ -402,8 +405,6 @@ class CommandDispatcher:
         lease: CommandLease,
         handle: RemoteRunHandle,
         remote_state: RemoteRunState,
-        *,
-        retry_mode: str,
     ) -> bool:
         if remote_state.status in {"error", "timeout"}:
             return await self._finalize(
@@ -427,11 +428,10 @@ class CommandDispatcher:
             raise RuntimeError("Remote Run is not terminal")
 
         try:
-            output = await self._runner.join(handle)
+            async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                output = await self._runner.join(handle)
         except Exception as exc:
-            if retry_mode == "cancel":
-                return await self._schedule_cancel_retry(lease, exc)
-            return await self._reconcile_or_timeout(lease, handle)
+            return await self._schedule_terminal_retry(lease, exc)
 
         try:
             terminal = TerminalGraphOutput.model_validate(output)
@@ -447,6 +447,40 @@ class CommandDispatcher:
                 ],
             )
         return await self._finalize(lease, terminal)
+
+    async def _schedule_terminal_retry(
+        self,
+        lease: CommandLease,
+        exc: Exception,
+    ) -> bool:
+        attempt_limit = (
+            self._max_cancel_attempts
+            if lease.command_type == "cancel_task"
+            else self._max_attempts
+        )
+        if lease.fence_token >= attempt_limit:
+            return await self._finalize(
+                lease,
+                TerminalGraphOutput(
+                    terminal_status="failed",
+                    errors=[
+                        {
+                            "code": "terminal_projection_unavailable",
+                            "error_type": type(exc).__name__,
+                            "retryable": False,
+                            "attempt": max(1, min(lease.fence_token, 100)),
+                        }
+                    ],
+                ),
+            )
+        return await self._schedule_reconciliation(lease)
+
+    async def _cancel_remote(
+        self,
+        handle: RemoteRunHandle,
+    ) -> RemoteCancelResult:
+        async with asyncio.timeout(self._remote_operation_timeout_seconds):
+            return await self._runner.cancel(handle)
 
     async def _owns_lease(self, lease: CommandLease) -> bool:
         now = self._clock()
@@ -562,13 +596,16 @@ class CommandDispatcher:
         self,
         lease: CommandLease,
         exc: Exception | None,
+        *,
+        failure_code: str = "agent_cancel_failed",
+        failure_message: str = "Official Run cancellation could not be confirmed.",
     ) -> bool:
         now = self._clock()
         output = {
             "terminal_status": "failed",
             "errors": [
                 {
-                    "code": "agent_cancel_failed",
+                    "code": failure_code,
                     "error_type": type(exc).__name__ if exc is not None else "RunDiscoveryTimeout",
                     "retryable": False,
                     "attempt": max(1, min(lease.fence_token, 100)),
@@ -615,8 +652,8 @@ class CommandDispatcher:
             if product_run is not None:
                 product_run.status = "failed"
                 product_run.output_payload = output
-                product_run.failure_code = "agent_cancel_failed"
-                product_run.failure_message = "Official Run cancellation could not be confirmed."
+                product_run.failure_code = failure_code
+                product_run.failure_message = failure_message
                 product_run.finished_at = now
                 product_run.projection_fence = lease.command_sequence
                 product_run.terminal_output_hash = output_hash
@@ -715,7 +752,7 @@ class CommandDispatcher:
     ) -> bool:
         if await self._run_deadline_exceeded(lease):
             try:
-                cancel_result = await self._runner.cancel(handle)
+                cancel_result = await self._cancel_remote(handle)
             except Exception as exc:
                 return await self._schedule_or_finalize_orphan_cancel(lease, exc)
             if cancel_result.outcome == "unconfirmed":
@@ -733,7 +770,6 @@ class CommandDispatcher:
                     lease,
                     handle,
                     cancel_result.state,
-                    retry_mode="reconcile",
                 )
             return await self._finalize(
                 lease,
@@ -789,7 +825,14 @@ class CommandDispatcher:
                 )
 
         if cleanup_exhausted:
-            return await self._finalize_cancel_failure(lease, exc)
+            return await self._finalize_cancel_failure(
+                lease,
+                exc,
+                failure_code="orphan_cancel_unconfirmed",
+                failure_message=(
+                    "Official Run cleanup after the orphan deadline could not be confirmed."
+                ),
+            )
         return True
 
     async def _run_deadline_exceeded(self, lease: CommandLease) -> bool:
