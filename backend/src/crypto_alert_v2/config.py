@@ -34,8 +34,11 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
     tavily_api_key: SecretStr | None = None
-    search_provider: Literal["builtin_web_search", "tavily"] = "builtin_web_search"
+    search_provider: Literal[
+        "builtin_web_search", "tavily", "duckduckgo"
+    ] = "builtin_web_search"
     market_data_http_proxy: str | None = None
+    search_http_proxy: str | None = None
     product_database_url: str = "postgresql+asyncpg:///crypto_alert_v2"
     agent_server_url: str = "http://127.0.0.1:8123"
     agent_assistant_id: str = "crypto_analysis"

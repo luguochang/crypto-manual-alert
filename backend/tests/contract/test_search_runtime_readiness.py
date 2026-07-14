@@ -45,6 +45,27 @@ def _readiness() -> SearchReadiness:
     )
 
 
+def _duckduckgo_readiness() -> SearchReadiness:
+    return SearchReadiness(
+        status="ready",
+        selected_provider=SearchProvider.DUCKDUCKGO,
+        probed_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        model="capability-test",
+        endpoint="https://model.example",
+        capabilities=ModelCapabilities(
+            tool_calling=True,
+            structured_output=True,
+            streaming=True,
+            usage_reporting=True,
+            builtin_web_search_invoked=False,
+            builtin_web_search_citation_count=0,
+        ),
+        tavily_configured=False,
+        tavily_connected=False,
+        duckduckgo_connected=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_readiness_does_not_block_the_event_loop() -> None:
     capabilities = ModelCapabilities(
@@ -328,6 +349,52 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
     assert first.search_readiness is readiness
     assert probe_calls == 1
     assert collector_options["provider"] is SearchProvider.TAVILY
+
+
+@pytest.mark.asyncio
+async def test_production_runtime_requests_explicit_duckduckgo_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_environment="production",
+        openai_api_key=SecretStr("test-only-model-key"),
+        search_provider="duckduckgo",
+        search_http_proxy="http://127.0.0.1:7890",
+    )
+    readiness = _duckduckgo_readiness()
+    probe_options: dict[str, object] = {}
+    collector_options: dict[str, object] = {}
+
+    async def probe(**kwargs: object) -> SearchReadiness:
+        probe_options.update(kwargs)
+        return readiness
+
+    def collector(model: object, **kwargs: object) -> object:
+        del model
+        collector_options.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **_: object())
+    monkeypatch.setattr(runtime_module, "OkxProvider", lambda **_: object())
+    monkeypatch.setattr(
+        runtime_module,
+        "create_market_analysis_agent",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(runtime_module, "establish_search_readiness_async", probe)
+    monkeypatch.setattr(runtime_module, "CapabilityAwareResearchCollector", collector)
+    runtime_module.get_default_runtime.cache_clear()
+    try:
+        runtime = await runtime_module.get_default_runtime_async()
+    finally:
+        runtime_module.get_default_runtime.cache_clear()
+
+    assert runtime.search_readiness is readiness
+    assert probe_options["requested_provider"] is SearchProvider.DUCKDUCKGO
+    assert probe_options["search_http_proxy"] == "http://127.0.0.1:7890"
+    assert collector_options["provider"] is SearchProvider.DUCKDUCKGO
 
 
 def test_production_runtime_cannot_start_when_search_readiness_fails(

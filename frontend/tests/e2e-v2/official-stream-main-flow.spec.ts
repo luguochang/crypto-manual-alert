@@ -30,7 +30,11 @@ const productStatuses = new Set([
   "cancelled",
 ]);
 const terminalProductStatuses = new Set(["succeeded", "blocked", "failed", "cancelled"]);
-const officialEvidenceProviders = new Set(["openai_builtin_web_search", "tavily"]);
+const officialEvidenceProviders = new Set([
+  "openai_builtin_web_search",
+  "tavily",
+  "duckduckgo",
+]);
 const expectedDeviceProjects: Record<string, { width: number; height: number }> = {
   "fixture-desktop": { width: 1440, height: 1000 },
   "fixture-pixel-7": { width: 412, height: 915 },
@@ -58,6 +62,7 @@ test("observes the official stream main flow without browser-side commands", asy
   const terminalStatus = (await statusHeading.innerText()).trim();
   let visibleFailure: string | null = null;
 
+  await assertOfficialStreamDom(page, terminalStatus);
   if (terminalStatus === "分析完成") {
     await assertNaturalLanguageSuccess(page);
   } else {
@@ -96,6 +101,7 @@ test("observes the official stream main flow without browser-side commands", asy
     terminalStatus,
     { timeout: 30_000 },
   );
+  await assertOfficialStreamDom(page, terminalStatus);
   const refreshedFailure = terminalStatus === "分析失败"
     ? await reportVisibleFailure(page, testInfo, "after-reload")
     : null;
@@ -302,7 +308,7 @@ function assertOfficialWebEvidence(value: unknown) {
     const provider = requiredString(item.source, `${path}.source`);
     if (!officialEvidenceProviders.has(provider)) {
       throw new Error(
-        `${path}.source must be openai_builtin_web_search or tavily; fixture/test providers are forbidden`,
+        `${path}.source must be an approved real search provider; fixture/test providers are forbidden`,
       );
     }
     requiredString(item.title, `${path}.title`);
@@ -503,6 +509,28 @@ function assertOfficialStreamObservation(observer: FlowObserver) {
     officialReads.every((request) =>
       bindings.some((binding) => binding.threadId === request.threadId)),
   ).toBe(true);
+}
+
+async function assertOfficialStreamDom(page: Page, terminalStatus: string) {
+  const stream = page.getByTestId("official-run-stream");
+  await expect(stream).toBeVisible({ timeout: 30_000 });
+  await expect(stream.getByRole("heading", { name: "官方执行进度" })).toBeVisible();
+
+  const expectedConnectionStatus = terminalStatus === "分析完成"
+    ? "执行已完成"
+    : "执行失败";
+  await expect(stream.locator(".official-stream-status")).toHaveText(
+    expectedConnectionStatus,
+    { timeout: 30_000 },
+  );
+  await expect(stream.locator(".official-progress-list")).toBeVisible();
+  await expect(stream.getByText("执行阶段", { exact: true })).toBeVisible();
+  await expect(stream.getByText("市场快照", { exact: true })).toBeVisible();
+  await expect(stream.getByText("Web 证据", { exact: true })).toBeVisible();
+  if (terminalStatus === "分析完成") {
+    await expect(stream.getByText("分析判断", { exact: true })).toBeVisible();
+    await expect(stream.getByText("官方执行已完成", { exact: true })).toBeVisible();
+  }
 }
 
 async function assertNaturalLanguageSuccess(page: Page) {

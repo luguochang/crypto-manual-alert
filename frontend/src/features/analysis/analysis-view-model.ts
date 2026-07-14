@@ -488,6 +488,7 @@ function providerLabel(value: string): string {
   if (!normalized) return "未知 Provider";
   const knownProviders: Record<string, string> = {
     openai_builtin_web_search: "OpenAI Web Search",
+    duckduckgo: "DuckDuckGo News",
     openai_web_search: "OpenAI Web Search",
     tavily: "Tavily",
     tavily_search: "Tavily",

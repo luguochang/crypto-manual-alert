@@ -272,8 +272,12 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     )
 
     assert _volume_sources(services["command-worker"]) == {
-        "/run/internal-jwt-private": "internal-jwt-private"
+        "/run/internal-jwt-private": "internal-jwt-private",
+        "/run/internal-jwt-public": "internal-jwt-public",
     }
+    assert services["command-worker"]["environment"][
+        "INTERNAL_JWT_PUBLIC_KEY_FILE"
+    ] == "/run/internal-jwt-public/public.pem"
     assert _volume_sources(services["frontend"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"
     }

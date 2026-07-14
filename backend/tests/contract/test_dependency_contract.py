@@ -25,6 +25,7 @@ def test_framework_compatibility_group() -> None:
         "pydantic-settings": "2.14.2",
         "PyJWT": "2.13.0",
         "uvicorn": "0.51.0",
+        "ddgs": "9.14.4",
     }
 
     installed_versions = {

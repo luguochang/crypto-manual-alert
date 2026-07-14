@@ -852,7 +852,10 @@ def test_compose_secret_consumers_and_jwt_mounts_follow_least_privilege():
         "langgraph-api-readiness": {
             "/run/internal-jwt-private": "internal-jwt-private"
         },
-        "command-worker": {"/run/internal-jwt-private": "internal-jwt-private"},
+        "command-worker": {
+            "/run/internal-jwt-private": "internal-jwt-private",
+            "/run/internal-jwt-public": "internal-jwt-public",
+        },
         "frontend": {"/run/internal-jwt-private": "internal-jwt-private"},
     }
     for service_name, expected in expected_mounts.items():

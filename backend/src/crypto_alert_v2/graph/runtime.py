@@ -81,6 +81,7 @@ def _assemble_runtime(
             model,
             provider=selected_provider,
             tavily_api_key=tavily_api_key,
+            search_http_proxy=settings.search_http_proxy,
         ),
         analysis_agent=create_market_analysis_agent(model=model),
         search_readiness=search_readiness,
@@ -101,11 +102,20 @@ def get_default_runtime() -> AnalysisRuntime:
     model, tavily_api_key = _model_and_tavily_key(settings)
     search_readiness = None
     if requires_search_readiness(settings.app_environment):
+        readiness_options = (
+            {
+                "requested_provider": SearchProvider.DUCKDUCKGO,
+                "search_http_proxy": settings.search_http_proxy,
+            }
+            if settings.search_provider == SearchProvider.DUCKDUCKGO.value
+            else {}
+        )
         search_readiness = establish_search_readiness(
             model=model,
             model_name=settings.model_name,
             base_url=settings.openai_base_url,
             tavily_api_key=tavily_api_key,
+            **readiness_options,
         )
     return _cache_runtime(
         _assemble_runtime(
@@ -124,11 +134,20 @@ async def get_default_runtime_async() -> AnalysisRuntime:
     model, tavily_api_key = _model_and_tavily_key(settings)
     search_readiness = None
     if requires_search_readiness(settings.app_environment):
+        readiness_options = (
+            {
+                "requested_provider": SearchProvider.DUCKDUCKGO,
+                "search_http_proxy": settings.search_http_proxy,
+            }
+            if settings.search_provider == SearchProvider.DUCKDUCKGO.value
+            else {}
+        )
         search_readiness = await establish_search_readiness_async(
             model=model,
             model_name=settings.model_name,
             base_url=settings.openai_base_url,
             tavily_api_key=tavily_api_key,
+            **readiness_options,
         )
     return _cache_runtime(
         _assemble_runtime(

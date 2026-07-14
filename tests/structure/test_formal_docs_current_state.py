@@ -189,7 +189,7 @@ def test_v2_product_api_contract_is_typed_from_zod_schema_through_same_origin_bf
     assert 'method === "GET" && /^api\\/v2\\/tasks\\/' in proxy
     assert "create analysis、run list、get task" in status
     assert "`GET /api/v2/tasks/{task_id}` 支持显式 `run_id`" in status
-    assert "`done=0`、`partial=12`、`blocked=1`、`not_started=3`" in status
+    assert "`done=0`、`partial=13`、`blocked=0`、`not_started=3`" in status
     assert "V2 不是 production ready" in status
     assert "V1 parity/removal 均不存在" in status
 
@@ -371,7 +371,7 @@ def test_v2_live_and_historical_ownership_is_documented_and_preserved_by_fronten
     assert "Product task GET 现在可以用 `run_id` 选择历史 Product Run" in status
     assert "官方 HITL 尚未交付" in status
     assert "完整 command/event protocol" in status
-    assert "strict real Playwright 在 research 阶段" in status
+    assert "strict real Playwright 已在开发 Runtime 下通过" in status
 
 
 def test_main_flow_checkpoint_records_latest_proof_gate_hardening_summary():

@@ -90,6 +90,7 @@ ActorContext
 | deepagents | 0.6.12 |
 | langchain-openai | 1.3.5 |
 | langchain-tavily | 0.2.18 |
+| ddgs | 9.14.4 |
 | langgraph-checkpoint-postgres | 3.1.0 |
 | langgraph-cli | 0.4.31 |
 | langgraph-api | 0.11.0 |

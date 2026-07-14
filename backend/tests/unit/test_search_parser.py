@@ -7,10 +7,12 @@ from openai import APITimeoutError
 
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
+    DuckDuckGoSearchProvider,
     ResearchUnavailable,
     SearchEvidenceUnavailable,
     TavilySearchProvider,
     parse_builtin_search_response,
+    parse_duckduckgo_response,
     parse_tavily_response,
 )
 from crypto_alert_v2.providers.retry_policy import SearchRetryPolicy
@@ -725,6 +727,65 @@ def test_tavily_parser_returns_normalized_web_evidence() -> None:
     assert str(evidence[0].final_url) == "https://www.imf.org/en/Topics/fintech"
     assert evidence[0].source == "tavily"
     assert evidence[0].excerpt == "Rates and the dollar moved before the event."
+
+
+def test_duckduckgo_parser_returns_normalized_provider_evidence() -> None:
+    evidence = parse_duckduckgo_response(
+        query="bitcoin macro",
+        response=[
+            {
+                "link": "https://www.reuters.com/markets/currencies/",
+                "title": "Bitcoin and macro markets",
+                "snippet": "Bitcoin moved as global rates and the dollar changed.",
+                "date": "2026-07-14T09:30:00+00:00",
+                "source": "Reuters",
+            }
+        ],
+        fetched_at=datetime(2026, 7, 14, 10, 0, tzinfo=UTC),
+    )
+
+    assert len(evidence) == 1
+    assert str(evidence[0].final_url) == (
+        "https://www.reuters.com/markets/currencies/"
+    )
+    assert evidence[0].source == "duckduckgo"
+    assert evidence[0].author == "Reuters"
+    assert evidence[0].published_at == datetime(
+        2026, 7, 14, 9, 30, tzinfo=UTC
+    )
+
+
+def test_duckduckgo_provider_invokes_the_official_tool_with_typed_input() -> None:
+    class RecordingTool:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object]] = []
+
+        def invoke(self, input: object, config: object = None) -> object:
+            self.calls.append((input, config))
+            return [
+                {
+                    "link": "https://www.cmegroup.com/markets/cryptocurrencies.html",
+                    "title": "Cryptocurrency markets",
+                    "snippet": "Public market evidence.",
+                }
+            ]
+
+    tool = RecordingTool()
+    evidence = DuckDuckGoSearchProvider(
+        tool=tool,  # type: ignore[arg-type]
+        retry_policy=SearchRetryPolicy(max_attempts=1),
+    ).search(
+        "current bitcoin market",
+        config={"metadata": {"correlation_id": "corr-ddg-1"}},
+    )
+
+    assert tool.calls == [
+        (
+            {"query": "current bitcoin market"},
+            {"metadata": {"correlation_id": "corr-ddg-1"}},
+        )
+    ]
+    assert [item.source for item in evidence] == ["duckduckgo"]
 
 
 def test_tavily_error_is_not_a_successful_empty_result() -> None:

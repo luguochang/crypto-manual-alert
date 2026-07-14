@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 
 from crypto_alert_v2.domain.models import MarketAnalysis
 from crypto_alert_v2.providers.errors import TRANSIENT_MODEL_ERRORS
+from crypto_alert_v2.providers.model import as_chat_completions_model
 
 
 SYSTEM_PROMPT = """You are the deterministic analysis component of a crypto market
@@ -19,7 +20,7 @@ plain text and do not place orders or imply automatic execution.
 
 def create_market_analysis_agent(*, model: BaseChatModel | Any) -> Any:
     return create_agent(
-        model=model,
+        model=as_chat_completions_model(model),
         tools=[],
         system_prompt=SYSTEM_PROMPT,
         response_format=ToolStrategy(MarketAnalysis),

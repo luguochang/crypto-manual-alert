@@ -20,8 +20,10 @@ export async function proxyProductRequest(
   }
   try {
     const upstreamUrl = buildUpstreamUrl(request, pathSegments);
-    const authorization = await resolveAuthorization(request);
-    if (requiresAuthenticatedRuntime() && authorization === null) {
+    const authenticatedRuntime = requiresAuthenticatedRuntime();
+    const authorization = localAuthorization(upstreamUrl, authenticatedRuntime)
+      ?? await resolveAuthorization(request);
+    if (authenticatedRuntime && authorization === null) {
       return Response.json({ detail: "Authentication required." }, { status: 401 });
     }
     const headers = buildServerOwnedHeaders(request, pathSegments, authorization);
@@ -47,6 +49,23 @@ export async function proxyProductRequest(
       { status: 502 },
     );
   }
+}
+
+function localAuthorization(upstreamUrl: string, authenticatedRuntime: boolean): string | null {
+  if (authenticatedRuntime) return null;
+  const url = new URL(upstreamUrl);
+  if (!isLoopbackHostname(url.hostname)) return null;
+  const token = process.env.AGENT_SERVER_LOCAL_TOKEN?.trim();
+  return token ? `Bearer ${token}` : null;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const octets = normalized.split(".");
+  return octets.length === 4
+    && octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    && Number(octets[0]) === 127;
 }
 
 function isAllowedProductRoute(method: string, pathSegments: string[]): boolean {

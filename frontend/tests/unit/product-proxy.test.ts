@@ -17,11 +17,37 @@ describe("Product BFF proxy", () => {
     delete process.env.DEVELOPMENT_BOOTSTRAP_TENANT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID;
     delete process.env.AGENT_SERVER_INTERNAL_JWT_AUDIENCE;
+    delete process.env.AGENT_SERVER_LOCAL_TOKEN;
     delete process.env.INTERNAL_JWT_AUDIENCE;
     delete process.env.INTERNAL_JWT_ISSUER;
     delete process.env.INTERNAL_JWT_KID;
     delete process.env.INTERNAL_JWT_PRIVATE_KEY;
     vi.unstubAllEnvs();
+  });
+
+  it("injects the local Agent token only for a development loopback upstream", async () => {
+    process.env.APP_ENVIRONMENT = "development";
+    process.env.AGENT_SERVER_LOCAL_TOKEN = "server-owned-local-token";
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json(taskProjection("queued"), { status: 202 });
+    });
+
+    const response = await proxyProductRequest(
+      new Request("http://127.0.0.1:3001/api/product/api/v2/analysis", {
+        method: "POST",
+        headers: { authorization: "Bearer browser-forgery" },
+        body: "{}",
+      }),
+      ["api", "v2", "analysis"],
+      fetcher,
+    );
+
+    expect(response.status).toBe(202);
+    const authorization = new Headers(fetcher.mock.calls[0]?.[1]?.headers)
+      .get("authorization");
+    expect(authorization).toBe("Bearer server-owned-local-token");
   });
 
   it("preserves the local Agent Server app base path and strips browser authority headers", async () => {

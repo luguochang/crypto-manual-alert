@@ -12,11 +12,13 @@ from crypto_alert_v2.providers.capability_probe import (
 )
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
+    DuckDuckGoSearchProvider,
     ResearchResult,
     TavilySearchProvider,
     WebEvidence,
 )
 from crypto_alert_v2.providers.errors import TRANSIENT_MODEL_ERRORS
+from crypto_alert_v2.providers.model import as_chat_completions_model
 
 
 RESEARCH_PROMPT = """Extract only facts supported by the supplied cited evidence.
@@ -36,7 +38,7 @@ class CitedResearchCollector:
     def __init__(self, model: ChatOpenAI, search: EvidenceSearch) -> None:
         self._search = search
         self._agent = create_agent(
-            model=model,
+            model=as_chat_completions_model(model),
             tools=[],
             system_prompt=RESEARCH_PROMPT,
             response_format=ToolStrategy(ResearchBundle),
@@ -89,6 +91,11 @@ class TavilyResearchCollector(CitedResearchCollector):
         super().__init__(model, TavilySearchProvider(api_key=api_key))
 
 
+class DuckDuckGoResearchCollector(CitedResearchCollector):
+    def __init__(self, model: ChatOpenAI, *, proxy: str | None = None) -> None:
+        super().__init__(model, DuckDuckGoSearchProvider(proxy=proxy))
+
+
 class CapabilityAwareResearchCollector:
     def __init__(
         self,
@@ -96,10 +103,12 @@ class CapabilityAwareResearchCollector:
         *,
         tavily_api_key: str | None,
         provider: SearchProvider,
+        search_http_proxy: str | None = None,
     ) -> None:
         self._model = model
         self._tavily_api_key = tavily_api_key
         self._provider = provider
+        self._search_http_proxy = search_http_proxy
         self._selected: CitedResearchCollector | None = None
 
     def collect(
@@ -108,6 +117,11 @@ class CapabilityAwareResearchCollector:
         if self._selected is None:
             if self._provider is SearchProvider.BUILTIN:
                 self._selected = BuiltinResearchCollector(self._model)
+            elif self._provider is SearchProvider.DUCKDUCKGO:
+                self._selected = DuckDuckGoResearchCollector(
+                    self._model,
+                    proxy=self._search_http_proxy,
+                )
             else:
                 if self._tavily_api_key is None:
                     raise SearchReadinessError(

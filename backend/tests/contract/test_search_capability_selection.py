@@ -5,7 +5,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from crypto_alert_v2.agents.research import CapabilityAwareResearchCollector
 from crypto_alert_v2.providers.capability_probe import (
@@ -13,12 +13,13 @@ from crypto_alert_v2.providers.capability_probe import (
     SearchReadiness,
     SearchProvider,
     SearchReadinessError,
-    _chat_completions_probe_model,
     _with_probe_retry,
     establish_search_readiness,
+    establish_search_readiness_async,
     select_search_provider,
 )
 from crypto_alert_v2.providers.errors import ResearchUnavailable, TRANSIENT_MODEL_ERRORS
+from crypto_alert_v2.providers.model import as_chat_completions_model
 from crypto_alert_v2.providers.retry_policy import SearchRetryPolicy
 from crypto_alert_v2.providers.search import BuiltinWebSearchProvider
 
@@ -40,6 +41,10 @@ class RecordingRunnable:
     def with_retry(self, **kwargs: object) -> "RecordingRunnable":
         self.retry_options = kwargs
         return self
+
+
+class TransportStructuredResult(BaseModel):
+    supported: bool
 
 
 def ready_capabilities(**overrides: object) -> ModelCapabilities:
@@ -64,12 +69,76 @@ def test_generic_capabilities_use_chat_completions_not_responses_api() -> None:
         output_version="responses/v1",
     )
 
-    chat_model = _chat_completions_probe_model(responses_model)
+    chat_model = as_chat_completions_model(responses_model)
 
     assert chat_model is not responses_model
     assert chat_model.use_responses_api is False
     assert chat_model.output_version is None
     assert chat_model.root_client is responses_model.root_client
+    assert chat_model.client is responses_model.client
+    assert responses_model.use_responses_api is True
+    assert responses_model.output_version == "responses/v1"
+
+
+def test_non_openai_model_is_not_replaced() -> None:
+    model = object()
+
+    assert as_chat_completions_model(model) is model
+
+
+def test_structured_model_routes_to_chat_completions_transport() -> None:
+    request_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl_transport_contract",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "capability-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"supported":true}',
+                            "refusal": None,
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        responses_model = ChatOpenAI(
+            model="capability-test",
+            api_key="test-key",
+            base_url="https://model.invalid/v1",
+            http_client=http_client,
+            use_responses_api=True,
+            output_version="responses/v1",
+            max_retries=0,
+        )
+        structured = as_chat_completions_model(
+            responses_model
+        ).with_structured_output(TransportStructuredResult)
+
+        result = structured.invoke("Return supported true.")
+    finally:
+        http_client.close()
+
+    assert result == TransportStructuredResult(supported=True)
+    assert request_paths == ["/v1/chat/completions"]
 
 
 def test_capability_probe_uses_official_transient_retry_contract() -> None:
@@ -161,9 +230,11 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
 
 def test_openai_transport_receives_search_budget_as_actual_request_timeout() -> None:
     request_timeouts: list[dict[str, float]] = []
+    request_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         request_timeouts.append(request.extensions["timeout"])
+        request_paths.append(request.url.path)
         return httpx.Response(
             200,
             request=request,
@@ -229,6 +300,7 @@ def test_openai_transport_receives_search_budget_as_actual_request_timeout() -> 
         http_client.close()
 
     assert evidence
+    assert request_paths == ["/v1/responses"]
     assert len(request_timeouts) == 1
     assert request_timeouts[0]
     assert all(
@@ -323,6 +395,29 @@ def test_explicit_tavily_provider_requires_its_key() -> None:
         collector.collect("bounded research")
 
 
+def test_explicit_duckduckgo_provider_uses_the_official_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import crypto_alert_v2.agents.research as research_module
+
+    selected = RecordingResearchCollector()
+    monkeypatch.setattr(
+        research_module,
+        "DuckDuckGoResearchCollector",
+        lambda _, **__: selected,
+    )
+    collector = CapabilityAwareResearchCollector(
+        object(),  # type: ignore[arg-type]
+        tavily_api_key=None,
+        provider=SearchProvider.DUCKDUCKGO,
+    )
+
+    result = collector.collect("bounded research")
+
+    assert result is not None
+    assert selected.queries == ["bounded research"]
+
+
 def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
     tavily_probe_calls = 0
 
@@ -355,6 +450,49 @@ def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
         SearchReadiness.model_validate({**public, "selected_provider": "fixture"})
     with pytest.raises(ValidationError):
         readiness.selected_provider = SearchProvider.TAVILY  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_explicit_duckduckgo_readiness_is_probed_and_frozen() -> None:
+    probe_proxies: list[str | None] = []
+
+    async def duckduckgo_probe(proxy: str | None) -> bool:
+        probe_proxies.append(proxy)
+        return True
+
+    readiness = await establish_search_readiness_async(
+        model=object(),  # type: ignore[arg-type]
+        model_name="capability-test",
+        base_url="https://model.example/v1",
+        tavily_api_key=None,
+        capability_probe=lambda _: ready_capabilities(
+            builtin_web_search_invoked=False,
+            builtin_web_search_citation_count=0,
+        ),
+        requested_provider=SearchProvider.DUCKDUCKGO,
+        duckduckgo_probe=duckduckgo_probe,
+        search_http_proxy="http://127.0.0.1:7890",
+        now=lambda: datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+    )
+
+    assert readiness.selected_provider is SearchProvider.DUCKDUCKGO
+    assert readiness.duckduckgo_connected is True
+    assert readiness.tavily_connected is False
+    assert probe_proxies == ["http://127.0.0.1:7890"]
+
+
+def test_duckduckgo_readiness_requires_a_successful_provider_probe() -> None:
+    with pytest.raises(ValidationError, match="DuckDuckGo"):
+        SearchReadiness(
+            status="ready",
+            selected_provider=SearchProvider.DUCKDUCKGO,
+            probed_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+            model="capability-test",
+            endpoint="https://model.example",
+            capabilities=ready_capabilities(),
+            tavily_configured=False,
+            tavily_connected=False,
+        )
 
 
 def test_failed_builtin_without_tavily_fails_readiness() -> None:

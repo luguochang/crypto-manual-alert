@@ -27,9 +27,21 @@ test("real Product chain renders committed model analysis with a cited source", 
   );
   await page.getByRole("button", { name: "开始分析" }).click();
 
-  await expect(page.getByTestId("task-status")).toContainText("分析完成", {
+  const statusHeading = page.getByTestId("task-status").getByRole("heading");
+  await expect(statusHeading).toHaveText(/^(?:分析完成|分析失败)$/, {
     timeout: 360_000,
   });
+  const terminalStatus = (await statusHeading.innerText()).trim();
+  if (terminalStatus === "分析失败") {
+    const failure = page.locator("section.failure-panel[role='alert']");
+    await expect(failure).toBeVisible();
+    const visibleFailure = (await failure.innerText()).replace(/\s+/g, " ").trim();
+    await testInfo.attach("visible-product-failure", {
+      body: visibleFailure,
+      contentType: "text/plain",
+    });
+    throw new Error(`Real Product flow failed: ${visibleFailure}`);
+  }
   await expect(page.getByTestId("analysis-result")).toBeVisible();
   await expect(page.getByText("暂不操作", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();

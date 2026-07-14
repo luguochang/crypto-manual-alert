@@ -10,8 +10,10 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from crypto_alert_v2.providers.errors import TRANSIENT_MODEL_ERRORS
+from crypto_alert_v2.providers.model import as_chat_completions_model
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
+    DuckDuckGoSearchProvider,
     TavilySearchProvider,
 )
 
@@ -19,6 +21,7 @@ from crypto_alert_v2.providers.search import (
 class SearchProvider(StrEnum):
     BUILTIN = "builtin_web_search"
     TAVILY = "tavily"
+    DUCKDUCKGO = "duckduckgo"
 
 
 class CapabilityFailure(BaseModel):
@@ -51,6 +54,7 @@ class SearchReadiness(BaseModel):
     capabilities: ModelCapabilities
     tavily_configured: bool
     tavily_connected: bool
+    duckduckgo_connected: bool = False
 
     @field_validator("endpoint")
     @classmethod
@@ -99,6 +103,13 @@ class SearchReadiness(BaseModel):
             raise ValueError(
                 "Tavily selection requires configured and connected readiness"
             )
+        if (
+            self.selected_provider is SearchProvider.DUCKDUCKGO
+            and not self.duckduckgo_connected
+        ):
+            raise ValueError(
+                "DuckDuckGo selection requires connected readiness"
+            )
         return self
 
 
@@ -122,12 +133,6 @@ def _failure_name(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _chat_completions_probe_model(model: ChatOpenAI) -> ChatOpenAI:
-    return model.model_copy(
-        update={"use_responses_api": False, "output_version": None}
-    )
-
-
 def _with_probe_retry(runnable: Any) -> Any:
     return runnable.with_retry(
         retry_if_exception_type=TRANSIENT_MODEL_ERRORS,
@@ -138,7 +143,7 @@ def _with_probe_retry(runnable: Any) -> Any:
 def probe_openai_capabilities(model: ChatOpenAI) -> ModelCapabilities:
     """Probe required model capabilities using official LangChain interfaces."""
 
-    chat_model = _chat_completions_probe_model(model)
+    chat_model = as_chat_completions_model(model)
     failures: dict[str, str] = {}
     tool_calling = False
     usage_reporting = False
@@ -250,6 +255,9 @@ def establish_search_readiness(
     tavily_api_key: str | None,
     capability_probe: Callable[[ChatOpenAI], ModelCapabilities] | None = None,
     tavily_probe: Callable[[str], bool] | None = None,
+    requested_provider: SearchProvider | None = None,
+    duckduckgo_probe: Callable[[str | None], bool] | None = None,
+    search_http_proxy: str | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> SearchReadiness:
     """Run one fresh startup probe and freeze a strict-environment choice."""
@@ -257,6 +265,7 @@ def establish_search_readiness(
     capabilities = (capability_probe or probe_openai_capabilities)(model)
     tavily_configured = bool(tavily_api_key)
     tavily_connected = False
+    duckduckgo_connected = False
 
     missing_model_capabilities = [
         name
@@ -279,7 +288,18 @@ def establish_search_readiness(
         capabilities.builtin_web_search_invoked
         and capabilities.builtin_web_search_citation_count > 0
     )
-    if not builtin_ready and tavily_configured:
+    if requested_provider is SearchProvider.DUCKDUCKGO:
+        connectivity_probe = duckduckgo_probe or probe_duckduckgo_connectivity
+        try:
+            duckduckgo_connected = bool(connectivity_probe(search_http_proxy))
+        except Exception as exc:
+            error_type = getattr(exc, "error_type", None) or type(exc).__name__
+            raise SearchReadinessError(
+                f"DuckDuckGo connectivity failed: {error_type}"
+            ) from exc
+        if not duckduckgo_connected:
+            raise SearchReadinessError("DuckDuckGo connectivity failed")
+    elif not builtin_ready and tavily_configured:
         connectivity_probe = tavily_probe or probe_tavily_connectivity
         try:
             tavily_connected = bool(connectivity_probe(tavily_api_key or ""))
@@ -289,10 +309,14 @@ def establish_search_readiness(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
 
-    selected_provider = select_search_provider(
-        capabilities,
-        tavily_configured=tavily_configured,
-        tavily_connected=tavily_connected,
+    selected_provider = (
+        SearchProvider.DUCKDUCKGO
+        if requested_provider is SearchProvider.DUCKDUCKGO
+        else select_search_provider(
+            capabilities,
+            tavily_configured=tavily_configured,
+            tavily_connected=tavily_connected,
+        )
     )
     clock = now or _utc_now
     return SearchReadiness(
@@ -304,6 +328,7 @@ def establish_search_readiness(
         capabilities=capabilities,
         tavily_configured=tavily_configured,
         tavily_connected=tavily_connected,
+        duckduckgo_connected=duckduckgo_connected,
     )
 
 
@@ -315,6 +340,9 @@ async def establish_search_readiness_async(
     tavily_api_key: str | None,
     capability_probe: Callable[[ChatOpenAI], ModelCapabilities] | None = None,
     tavily_probe: Callable[[str], Awaitable[bool]] | None = None,
+    requested_provider: SearchProvider | None = None,
+    duckduckgo_probe: Callable[[str | None], Awaitable[bool]] | None = None,
+    search_http_proxy: str | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> SearchReadiness:
     """Run startup selection while awaiting the official async Tavily API."""
@@ -325,6 +353,7 @@ async def establish_search_readiness_async(
     )
     tavily_configured = bool(tavily_api_key)
     tavily_connected = False
+    duckduckgo_connected = False
 
     missing_model_capabilities = [
         name
@@ -347,7 +376,22 @@ async def establish_search_readiness_async(
         capabilities.builtin_web_search_invoked
         and capabilities.builtin_web_search_citation_count > 0
     )
-    if not builtin_ready and tavily_configured:
+    if requested_provider is SearchProvider.DUCKDUCKGO:
+        connectivity_probe = (
+            duckduckgo_probe or probe_duckduckgo_connectivity_async
+        )
+        try:
+            duckduckgo_connected = bool(
+                await connectivity_probe(search_http_proxy)
+            )
+        except Exception as exc:
+            error_type = getattr(exc, "error_type", None) or type(exc).__name__
+            raise SearchReadinessError(
+                f"DuckDuckGo connectivity failed: {error_type}"
+            ) from exc
+        if not duckduckgo_connected:
+            raise SearchReadinessError("DuckDuckGo connectivity failed")
+    elif not builtin_ready and tavily_configured:
         connectivity_probe = tavily_probe or probe_tavily_connectivity_async
         try:
             tavily_connected = bool(
@@ -359,10 +403,14 @@ async def establish_search_readiness_async(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
 
-    selected_provider = select_search_provider(
-        capabilities,
-        tavily_configured=tavily_configured,
-        tavily_connected=tavily_connected,
+    selected_provider = (
+        SearchProvider.DUCKDUCKGO
+        if requested_provider is SearchProvider.DUCKDUCKGO
+        else select_search_provider(
+            capabilities,
+            tavily_configured=tavily_configured,
+            tavily_connected=tavily_connected,
+        )
     )
     clock = now or _utc_now
     return SearchReadiness(
@@ -374,6 +422,7 @@ async def establish_search_readiness_async(
         capabilities=capabilities,
         tavily_configured=tavily_configured,
         tavily_connected=tavily_connected,
+        duckduckgo_connected=duckduckgo_connected,
     )
 
 
@@ -389,6 +438,17 @@ async def probe_tavily_connectivity_async(api_key: str) -> bool:
         "Find one current public Bitcoin market news source."
     )
     return bool(evidence)
+
+
+def probe_duckduckgo_connectivity(proxy: str | None) -> bool:
+    evidence = DuckDuckGoSearchProvider(proxy=proxy).search(
+        "current Bitcoin market news"
+    )
+    return bool(evidence)
+
+
+async def probe_duckduckgo_connectivity_async(proxy: str | None) -> bool:
+    return await asyncio.to_thread(probe_duckduckgo_connectivity, proxy)
 
 
 def _utc_now() -> datetime:

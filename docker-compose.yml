@@ -216,6 +216,7 @@ services:
       INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
     command:
       - python
       - -m
@@ -226,6 +227,10 @@ services:
       - type: volume
         source: internal-jwt-private
         target: /run/internal-jwt-private
+        read_only: true
+      - type: volume
+        source: internal-jwt-public
+        target: /run/internal-jwt-public
         read_only: true
     depends_on:
       migrate:

@@ -289,7 +289,7 @@ def test_research_query_has_a_bounded_source_budget() -> None:
     graph.invoke(valid_input(), context=runtime)
 
     assert len(research.queries) == 1
-    assert "exactly one current public BTC macro news source" in research.queries[0]
+    assert research.queries[0] == "BTC cryptocurrency macro market news 4h"
     assert "BTC-USDT-SWAP" not in research.queries[0]
 
 

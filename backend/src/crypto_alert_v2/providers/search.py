@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError
@@ -222,6 +223,49 @@ class TavilySearchProvider:
         )
 
 
+class DuckDuckGoSearchProvider:
+    """No-key search through a maintained client behind a LangChain tool."""
+
+    def __init__(
+        self,
+        *,
+        proxy: str | None = None,
+        tool: SearchTool | None = None,
+        retry_policy: SearchRetryPolicy | None = None,
+    ) -> None:
+        self._proxy = proxy
+        self._tool = tool
+        self._retry_policy = retry_policy or SearchRetryPolicy()
+
+    def search(
+        self, query: str, config: RunnableConfig | None = None
+    ) -> list[WebEvidence]:
+        def invoke(remaining_seconds: float, _: int) -> list[WebEvidence]:
+            tool = self._tool or _create_duckduckgo_tool(
+                proxy=self._proxy,
+                timeout=remaining_seconds,
+            )
+            try:
+                response = tool.invoke({"query": query}, config=config)
+            except Exception as exc:
+                raise _normalize_search_error(
+                    exc,
+                    provider="duckduckgo",
+                    label="DuckDuckGo search",
+                ) from exc
+            return parse_duckduckgo_response(
+                query=query,
+                response=response,
+                fetched_at=datetime.now(UTC),
+            )
+
+        return self._retry_policy.execute(
+            invoke,
+            provider="duckduckgo",
+            correlation_id=_search_correlation_id(config),
+        )
+
+
 def _content_hash(*parts: str) -> str:
     payload = "\n".join(parts).encode("utf-8")
     return sha256(payload).hexdigest()
@@ -427,6 +471,98 @@ def parse_tavily_response(
     return evidence
 
 
+def parse_duckduckgo_response(
+    *,
+    query: str,
+    response: Any,
+    fetched_at: datetime,
+) -> list[WebEvidence]:
+    if not isinstance(response, list):
+        raise ResearchUnavailable(
+            "DuckDuckGo search returned an invalid response",
+            provider="duckduckgo",
+            retryable=True,
+            error_type="InvalidProviderResponse",
+        )
+
+    evidence: list[WebEvidence] = []
+    seen_urls: set[str] = set()
+    for raw in response:
+        if not isinstance(raw, Mapping):
+            continue
+        url = str(raw.get("url") or raw.get("link") or "").strip()
+        if not _is_public_https_url(url) or url in seen_urls:
+            continue
+        title = str(raw.get("title") or url).strip()
+        excerpt = str(raw.get("body") or raw.get("snippet") or "").strip()
+        if not excerpt:
+            continue
+        published_at = _provider_datetime(raw.get("date"), fetched_at=fetched_at)
+        try:
+            item = WebEvidence(
+                query=query,
+                final_url=url,
+                fetched_at=fetched_at,
+                published_at=published_at,
+                content_hash=_content_hash(url, title, excerpt),
+                parser_version="langchain-ddgs-v1",
+                title=title,
+                author=str(raw.get("source") or "").strip() or None,
+                source="duckduckgo",
+                excerpt=excerpt[:1000],
+                evidence_relation="supports",
+            )
+        except ValidationError:
+            continue
+        seen_urls.add(url)
+        evidence.append(item)
+
+    if not evidence:
+        raise ResearchUnavailable(
+            "DuckDuckGo search returned no valid public HTTPS evidence",
+            provider="duckduckgo",
+            retryable=True,
+            error_type="EmptyEvidence",
+        )
+    return evidence
+
+
+def _provider_datetime(value: Any, *, fetched_at: datetime) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    parsed = parsed.astimezone(UTC)
+    return parsed if parsed <= fetched_at else None
+
+
+def _create_duckduckgo_tool(
+    *,
+    proxy: str | None,
+    timeout: float,
+) -> BaseTool:
+    def search_duckduckgo(query: str) -> list[dict[str, Any]]:
+        from ddgs import DDGS
+
+        return DDGS(proxy=proxy, timeout=max(1, int(timeout))).news(
+            query,
+            max_results=8,
+        )
+
+    return StructuredTool.from_function(
+        func=search_duckduckgo,
+        name="duckduckgo_search",
+        description=(
+            "Search current public news with DuckDuckGo and return provider URLs, "
+            "titles, excerpts, publication timestamps, and source names."
+        ),
+    )
+
+
 def _invoke_tavily_tool(
     tool: SearchTool,
     input: dict[str, str],
@@ -496,6 +632,8 @@ def _normalize_search_error(
 
 def _is_retryable_search_error(exc: Exception) -> bool:
     if isinstance(exc, TRANSIENT_MODEL_ERRORS):
+        return True
+    if type(exc).__module__.startswith("ddgs."):
         return True
     name = type(exc).__name__.lower()
     if any(marker in name for marker in ("timeout", "connection", "ratelimit")):

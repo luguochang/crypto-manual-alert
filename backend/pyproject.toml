@@ -24,6 +24,7 @@ dependencies = [
     "PyJWT==2.13.0",
     "SQLAlchemy==2.0.51",
     "uvicorn==0.51.0",
+    "ddgs==9.14.4",
 ]
 
 [project.scripts]

@@ -151,11 +151,7 @@ def research_events(
 ) -> AnalysisState:
     request = AnalysisRequest.model_validate(state["request"])
     asset = request.symbol.partition("-")[0]
-    query = (
-        f"Find exactly one current public {asset} macro news source relevant to "
-        f"the next {request.horizon}. Return its title, one-sentence finding, and "
-        "complete HTTPS URL."
-    )
+    query = f"{asset} cryptocurrency macro market news {request.horizon}"
     try:
         result = _runtime(runtime).research_collector.collect(query, config=config)
     except (
