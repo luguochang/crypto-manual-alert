@@ -257,6 +257,7 @@ def test_builtin_search_rejects_reserved_or_internal_provider_url(url: str) -> N
 
 def test_builtin_search_provider_normalizes_model_timeout_as_retryable() -> None:
     attempts = 0
+    bound_tool_types: list[str] = []
     records = []
 
     def time_out(_: object) -> AIMessage:
@@ -267,7 +268,13 @@ def test_builtin_search_provider_normalizes_model_timeout_as_retryable() -> None
         )
 
     class TimedOutModel:
-        def bind_tools(self, _: object, **__: object) -> object:
+        def bind_tools(
+            self,
+            tools: list[dict[str, str]],
+            **__: object,
+        ) -> object:
+            bound_tool_types.append(tools[0]["type"])
+
             class BoundSearch:
                 def invoke(
                     self,
@@ -296,6 +303,7 @@ def test_builtin_search_provider_normalizes_model_timeout_as_retryable() -> None
     assert raised.value.attempt == 3
     assert "APITimeoutError" in str(raised.value)
     assert attempts == 3
+    assert bound_tool_types == ["web_search", "web_search", "web_search"]
     assert [record.attempt for record in records] == [1, 2, 3]
     assert [record.outcome for record in records] == [
         "retryable_failure",
@@ -392,6 +400,234 @@ def test_builtin_search_provider_has_one_retry_owner_and_records_each_attempt() 
     assert [record.correlation_id for record in records] == [
         "corr-search-1",
         "corr-search-1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_response", "first_error_type"),
+    [
+        (
+            AIMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": "No completed server search was returned.",
+                        "annotations": [],
+                    }
+                ]
+            ),
+            "UnverifiedServerToolCall",
+        ),
+        (
+            AIMessage(
+                content=[
+                    {
+                        "type": "web_search_call",
+                        "id": "search_without_citation",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "text",
+                        "text": "The search completed without a provider citation.",
+                        "annotations": [],
+                    },
+                ]
+            ),
+            "MissingProviderCitation",
+        ),
+    ],
+    ids=["unverified-server-tool-call", "missing-provider-citation"],
+)
+def test_builtin_search_uses_preview_on_the_same_retry_budget_after_unverified_evidence(
+    first_response: AIMessage,
+    first_error_type: str,
+) -> None:
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    clock = Clock()
+    responses = [
+        first_response,
+        AIMessage(
+            content=[
+                {
+                    "type": "web_search_call",
+                    "id": "preview_search",
+                    "status": "completed",
+                },
+                {
+                    "type": "text",
+                    "text": "Verified evidence returned by the compatibility search.",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url": "https://www.reuters.com/markets/currencies/",
+                            "title": "Currencies",
+                        }
+                    ],
+                },
+            ]
+        ),
+    ]
+    bound_tool_types: list[str] = []
+    invocation_timeouts: list[float] = []
+    records = []
+
+    class BoundSearch:
+        def invoke(
+            self,
+            input: object,
+            config: object = None,
+            **kwargs: object,
+        ) -> AIMessage:
+            del input, config
+            invocation_timeouts.append(float(kwargs["timeout"]))
+            clock.advance(0.25)
+            return responses.pop(0)
+
+    class RecordingModel:
+        def bind_tools(
+            self,
+            tools: list[dict[str, str]],
+            **kwargs: object,
+        ) -> BoundSearch:
+            assert kwargs == {}
+            bound_tool_types.append(tools[0]["type"])
+            return BoundSearch()
+
+    evidence = BuiltinWebSearchProvider(  # type: ignore[arg-type]
+        RecordingModel(),
+        retry_policy=SearchRetryPolicy(
+            max_attempts=2,
+            total_budget_seconds=10.0,
+            backoff_seconds=(1.0,),
+            monotonic=clock.monotonic,
+            sleep=clock.advance,
+            record_attempt=records.append,
+        ),
+    ).search(
+        "current Bitcoin currency news",
+        config={"metadata": {"correlation_id": "corr-preview-1"}},
+    )
+
+    assert bound_tool_types == ["web_search", "web_search_preview"]
+    assert len(invocation_timeouts) == 2
+    assert 0 < invocation_timeouts[1] < invocation_timeouts[0] <= 10.0
+    assert [record.remaining_budget_seconds for record in records] == pytest.approx(
+        invocation_timeouts
+    )
+    assert [record.attempt for record in records] == [1, 2]
+    assert [record.outcome for record in records] == [
+        "retryable_failure",
+        "succeeded",
+    ]
+    assert records[0].error_type == first_error_type
+    assert {record.correlation_id for record in records} == {"corr-preview-1"}
+    assert responses == []
+    assert [str(item.final_url) for item in evidence] == [
+        "https://www.reuters.com/markets/currencies/"
+    ]
+    assert evidence[0].title == "Currencies"
+    assert evidence[0].excerpt == (
+        "Verified evidence returned by the compatibility search."
+    )
+    assert evidence[0].source == "openai_builtin_web_search"
+
+
+def test_builtin_search_switches_to_preview_only_after_evidence_failure() -> None:
+    responses: list[AIMessage | Exception] = [
+        TimeoutError("transient model timeout"),
+        AIMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": "No completed server search was returned.",
+                    "annotations": [],
+                }
+            ]
+        ),
+        AIMessage(
+            content=[
+                {
+                    "type": "web_search_call",
+                    "id": "preview_search",
+                    "status": "completed",
+                },
+                {
+                    "type": "text",
+                    "text": "Verified evidence after compatibility selection.",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url": "https://www.reuters.com/technology/",
+                            "title": "Technology",
+                        }
+                    ],
+                },
+            ]
+        ),
+    ]
+    bound_tool_types: list[str] = []
+    records = []
+
+    class BoundSearch:
+        def invoke(
+            self,
+            input: object,
+            config: object = None,
+            **kwargs: object,
+        ) -> AIMessage:
+            del input, config
+            assert 0 < float(kwargs["timeout"]) <= 30
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    class RecordingModel:
+        def bind_tools(
+            self,
+            tools: list[dict[str, str]],
+            **kwargs: object,
+        ) -> BoundSearch:
+            assert kwargs == {}
+            bound_tool_types.append(tools[0]["type"])
+            return BoundSearch()
+
+    evidence = BuiltinWebSearchProvider(  # type: ignore[arg-type]
+        RecordingModel(),
+        retry_policy=SearchRetryPolicy(
+            backoff_seconds=(0.0,),
+            sleep=lambda _: None,
+            record_attempt=records.append,
+        ),
+    ).search("current Bitcoin technology news")
+
+    assert bound_tool_types == [
+        "web_search",
+        "web_search",
+        "web_search_preview",
+    ]
+    assert [record.error_type for record in records] == [
+        "TimeoutError",
+        "UnverifiedServerToolCall",
+        None,
+    ]
+    assert [record.outcome for record in records] == [
+        "retryable_failure",
+        "retryable_failure",
+        "succeeded",
+    ]
+    assert responses == []
+    assert [str(item.final_url) for item in evidence] == [
+        "https://www.reuters.com/technology/"
     ]
 
 

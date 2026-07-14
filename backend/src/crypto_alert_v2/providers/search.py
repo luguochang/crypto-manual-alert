@@ -76,16 +76,20 @@ class BuiltinWebSearchProvider:
     def search(
         self, query: str, config: RunnableConfig | None = None
     ) -> list[WebEvidence]:
-        bound_search = self._model.bind_tools([{"type": "web_search"}])
         prompt = (
             "You must use web search. Cite only provider-returned URL citation "
             "annotations. Use no more than four sources and stop once those sources "
             "are found.\n\n"
             f"{query}"
         )
+        search_tool_type = "web_search"
 
         def invoke(remaining_seconds: float, _: int) -> list[WebEvidence]:
+            nonlocal search_tool_type
             try:
+                bound_search = self._model.bind_tools(
+                    [{"type": search_tool_type}]
+                )
                 response = bound_search.invoke(
                     prompt,
                     config=config,
@@ -104,6 +108,11 @@ class BuiltinWebSearchProvider:
                     fetched_at=datetime.now(UTC),
                 )
             except ResearchUnavailable as exc:
+                if exc.error_type in {
+                    "UnverifiedServerToolCall",
+                    "MissingProviderCitation",
+                }:
+                    search_tool_type = "web_search_preview"
                 raise ResearchUnavailable(
                     str(exc),
                     provider="builtin_web_search",

@@ -87,7 +87,19 @@ def test_capability_probe_uses_official_transient_retry_contract() -> None:
 def test_official_bound_chat_model_receives_per_attempt_search_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 100.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    clock = Clock()
     timeouts: list[float] = []
+    tool_types: list[str] = []
     generations = [
         AIMessage(content=[{"type": "text", "text": "No provider evidence."}]),
         AIMessage(
@@ -115,6 +127,8 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
     def fake_generate(self, messages, stop=None, run_manager=None, **kwargs):
         del self, messages, stop, run_manager
         timeouts.append(float(kwargs["timeout"]))
+        tool_types.append(kwargs["tools"][0]["type"])
+        clock.advance(0.25)
         return ChatResult(
             generations=[ChatGeneration(message=generations.pop(0))]
         )
@@ -131,13 +145,18 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
 
     evidence = BuiltinWebSearchProvider(
         model,
-        retry_policy=SearchRetryPolicy(sleep=lambda _: None),
+        retry_policy=SearchRetryPolicy(
+            total_budget_seconds=10.0,
+            backoff_seconds=(1.0,),
+            monotonic=clock.monotonic,
+            sleep=clock.advance,
+        ),
     ).search("current Bitcoin news")
 
     assert evidence
+    assert tool_types == ["web_search", "web_search_preview"]
     assert len(timeouts) == 2
-    assert all(0 < timeout <= 30 for timeout in timeouts)
-    assert timeouts[1] <= timeouts[0]
+    assert 0 < timeouts[1] < timeouts[0] <= 10
 
 
 def test_openai_transport_receives_search_budget_as_actual_request_timeout() -> None:
