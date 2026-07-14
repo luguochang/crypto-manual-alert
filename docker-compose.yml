@@ -89,6 +89,7 @@ services:
         required: false
     environment:
       APP_ENVIRONMENT: production
+      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
       AGENT_SERVER_URL: http://127.0.0.1:8123
       AGENT_ASSISTANT_ID: crypto_analysis
       MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
@@ -130,6 +131,8 @@ services:
         condition: service_completed_successfully
       internal-jwt-keys:
         condition: service_completed_successfully
+      development-bootstrap:
+        condition: service_completed_successfully
 
   agent-server-readiness:
     image: crypto-manual-alert-v2-backend:local
@@ -161,50 +164,6 @@ services:
         condition: service_completed_successfully
       agent-server:
         condition: service_healthy
-
-  product-api:
-    image: crypto-manual-alert-v2-backend:local
-    restart: unless-stopped
-    init: true
-    environment:
-      APP_ENVIRONMENT: production
-      PRODUCT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-crypto_alert}:${POSTGRES_PASSWORD:-crypto_alert_local}@postgres:5432/${POSTGRES_DB:-crypto_alert_v2}
-      INTERNAL_JWT_KID: compose-ephemeral
-      INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
-      INTERNAL_JWT_AUDIENCE: crypto-alert-product-api
-      INTERNAL_JWT_MAX_TTL_SECONDS: "60"
-      INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
-    command:
-      - uvicorn
-      - crypto_alert_v2.api.app:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8011"
-    ports:
-      - "127.0.0.1:${PRODUCT_API_PORT:-8011}:8011"
-    volumes:
-      - type: volume
-        source: internal-jwt-public
-        target: /run/internal-jwt-public
-        read_only: true
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8011/api/v2/health', timeout=5)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"
-      interval: 5s
-      timeout: 8s
-      retries: 12
-      start_period: 10s
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      internal-jwt-keys:
-        condition: service_completed_successfully
-      development-bootstrap:
-        condition: service_completed_successfully
 
   command-worker:
     image: crypto-manual-alert-v2-backend:local
@@ -254,12 +213,11 @@ services:
     init: true
     environment:
       APP_ENVIRONMENT: development
-      PRODUCT_API_BASE_URL: http://product-api:8011
+      PRODUCT_API_BASE_URL: http://agent-server:8123/app
       AGENT_SERVER_URL: http://agent-server:8123
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_KID: compose-ephemeral
       INTERNAL_JWT_ISSUER: crypto-manual-alert-v2-compose
-      INTERNAL_JWT_AUDIENCE: crypto-alert-product-api
       INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
       DEVELOPMENT_BOOTSTRAP_ENABLED: "true"
       DEVELOPMENT_BOOTSTRAP_PROFILE: local-proof
@@ -286,7 +244,7 @@ services:
       retries: 18
       start_period: 15s
     depends_on:
-      product-api:
+      agent-server:
         condition: service_healthy
       command-worker:
         condition: service_started

@@ -5,7 +5,8 @@ import { requiresAuthenticatedRuntime } from "@/lib/runtime/app-environment";
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 export type AuthorizationResolver = (request: Request) => Promise<string | null>;
 
-const defaultProductApiBaseUrl = "http://127.0.0.1:8011";
+const defaultProductApiBaseUrl = "http://127.0.0.1:8123/app";
+const defaultAgentServerAudience = "crypto-alert-agent-server";
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
 export async function proxyProductRequest(
@@ -65,7 +66,14 @@ async function defaultAuthorizationResolver(request: Request): Promise<string | 
     !requiresAuthenticatedRuntime()
     && !isDevelopmentBootstrapRuntime()
   ) return null;
-  return resolveInternalAuthorization(request);
+  return resolveInternalAuthorization(request, undefined, {
+    audience: agentServerAudience(),
+  });
+}
+
+function agentServerAudience(): string {
+  return process.env.AGENT_SERVER_INTERNAL_JWT_AUDIENCE?.trim()
+    || defaultAgentServerAudience;
 }
 
 function buildUpstreamUrl(request: Request, pathSegments: string[]): string {

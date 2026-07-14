@@ -210,7 +210,7 @@ def create_app(
     return product
 
 
-def create_default_app() -> FastAPI:
+def create_default_app(*, token_audience: str | None = None) -> FastAPI:
     settings = get_settings()
     engine = create_async_engine(settings.product_database_url, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -227,7 +227,11 @@ def create_default_app() -> FastAPI:
         token_verifier = InternalTokenVerifier(
             public_keys=internal_jwt_public_keys,
             issuer=settings.internal_jwt_issuer,
-            audience=settings.internal_jwt_audience,
+            audience=(
+                token_audience
+                if token_audience is not None
+                else settings.internal_jwt_audience
+            ),
             max_ttl_seconds=settings.internal_jwt_max_ttl_seconds,
         )
 

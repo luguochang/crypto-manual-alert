@@ -25,6 +25,90 @@ def _development_settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)
 
 
+def test_custom_http_app_constructs_product_app_for_agent_server_audience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("crypto_alert_v2.http.app")
+    settings = Settings(
+        _env_file=None,
+        app_environment="test",
+        internal_jwt_audience="standalone-product-audience",
+        agent_server_internal_jwt_audience="official-agent-audience",
+    )
+    product = module.FastAPI()
+    captured_audiences: list[str] = []
+
+    def product_factory(*, token_audience: str):
+        captured_audiences.append(token_audience)
+        return product
+
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        module,
+        "create_default_product_app",
+        product_factory,
+        raising=False,
+    )
+
+    application = module.create_app()
+
+    assert captured_audiences == ["official-agent-audience"]
+    assert application.state.product_app is product
+
+
+@pytest.mark.parametrize(
+    ("token_audience", "expected_audience"),
+    [
+        (None, "standalone-product-audience"),
+        ("official-agent-audience", "official-agent-audience"),
+    ],
+)
+def test_default_product_app_preserves_or_overrides_standalone_audience(
+    token_audience: str | None,
+    expected_audience: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = importlib.import_module("crypto_alert_v2.api.app")
+    settings = Settings(
+        _env_file=None,
+        app_environment="production",
+        internal_jwt_public_keys={"test-key": "test-public-key"},
+        internal_jwt_audience="standalone-product-audience",
+    )
+    captured_audiences: list[str] = []
+
+    class RecordingEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class RecordingVerifier:
+        def __init__(self, **kwargs: object) -> None:
+            captured_audiences.append(str(kwargs["audience"]))
+
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        module,
+        "create_async_engine",
+        lambda *_args, **_kwargs: RecordingEngine(),
+    )
+    monkeypatch.setattr(
+        module,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: "session-factory",
+    )
+    monkeypatch.setattr(
+        module,
+        "ProductAnalysisService",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(module, "InternalTokenVerifier", RecordingVerifier)
+
+    kwargs = {} if token_audience is None else {"token_audience": token_audience}
+    module.create_default_app(**kwargs)
+
+    assert captured_audiences == [expected_audience]
+
+
 async def _seeded_actors_for_default_app(
     monkeypatch: pytest.MonkeyPatch,
     settings: Settings,
@@ -396,10 +480,12 @@ async def test_agent_healthcheck_uses_official_sdk_with_short_lived_jwt(
         client_config.update(kwargs)
         return Client()
 
-    readiness_request = {}
+    readiness_requests: list[tuple[str, str]] = []
 
     async def readiness_fetcher(*, url, headers):
-        readiness_request.update({"url": url, "headers": headers})
+        readiness_requests.append((url, headers["authorization"]))
+        if url.endswith("/app/api/v2/health"):
+            return {"status": "ok", "version": "2.0.0"}
         return {
             "status": "ready",
             "selected_provider": "builtin_web_search",
@@ -439,8 +525,11 @@ async def test_agent_healthcheck_uses_official_sdk_with_short_lived_jwt(
     assert claims["tenant_id"] == "probe-tenant"
     assert claims["workspace_id"] == "probe-workspace"
     assert claims["exp"] - claims["iat"] == 60
-    assert readiness_request["url"] == ("http://127.0.0.1:8123/app/system/readiness")
-    assert readiness_request["headers"]["authorization"] == authorization
+    assert [url for url, _authorization in readiness_requests] == [
+        "http://127.0.0.1:8123/app/system/readiness",
+        "http://127.0.0.1:8123/app/api/v2/health",
+    ]
+    assert {header for _url, header in readiness_requests} == {authorization}
 
 
 @pytest.mark.asyncio

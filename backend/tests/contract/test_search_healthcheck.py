@@ -2,7 +2,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from crypto_alert_v2.auth.agent_healthcheck import validate_search_readiness_payload
+from crypto_alert_v2.auth.agent_healthcheck import (
+    validate_product_health_payload,
+    validate_search_readiness_payload,
+)
 
 
 def _payload() -> dict[str, object]:
@@ -68,3 +71,26 @@ def test_healthcheck_rejects_semantically_inconsistent_ready_payload(
 ) -> None:
     with pytest.raises(RuntimeError, match="sanitized search readiness"):
         validate_search_readiness_payload(payload)
+
+
+def test_healthcheck_accepts_strict_product_health_payload() -> None:
+    health = validate_product_health_payload({"status": "ok", "version": "2.0.0"})
+
+    assert health == {"status": "ok", "version": "2.0.0"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"status": "ok"},
+        {"status": "degraded", "version": "2.0.0"},
+        {"status": "ok", "version": "2.0.1"},
+        {"status": "ok", "version": "2.0.0", "detail": "unexpected"},
+    ],
+)
+def test_healthcheck_rejects_invalid_product_health_payload(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(RuntimeError, match="invalid Product health"):
+        validate_product_health_payload(payload)

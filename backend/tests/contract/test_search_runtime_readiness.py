@@ -1,9 +1,11 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import importlib
 import json
 from pathlib import Path
 import time
+from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -410,6 +412,60 @@ def test_production_http_lifespan_cannot_bypass_missing_readiness(
     with pytest.raises(SearchReadinessError, match="requires search readiness"):
         with TestClient(http_app_module.app):
             pass
+
+
+def test_custom_app_exposes_product_health_without_shadowing_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http_app_module = importlib.import_module("crypto_alert_v2.http.app")
+    product_app_module = importlib.import_module("crypto_alert_v2.api.app")
+    product_app = product_app_module.create_app(
+        service=product_app_module.UnavailableProductService(),
+        mode="test",
+    )
+    monkeypatch.setattr(
+        http_app_module,
+        "get_settings",
+        lambda: Settings(_env_file=None, app_environment="test"),
+    )
+    application = http_app_module.create_app(product_app=product_app)
+
+    with TestClient(application) as client:
+        health_response = client.get("/app/api/v2/health")
+        readiness_response = client.get("/app/system/readiness")
+
+    assert health_response.status_code == 200
+    assert health_response.json() == {"status": "ok", "version": "2.0.0"}
+    assert readiness_response.status_code == 503
+    assert readiness_response.json() == {
+        "detail": "Search readiness is not available in this environment."
+    }
+
+
+def test_custom_app_enters_and_exits_product_lifespan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    http_app_module = importlib.import_module("crypto_alert_v2.http.app")
+    lifecycle_events: list[str] = []
+
+    @asynccontextmanager
+    async def product_lifespan(_: FastAPI) -> AsyncIterator[None]:
+        lifecycle_events.append("startup")
+        yield
+        lifecycle_events.append("shutdown")
+
+    product_app = FastAPI(lifespan=product_lifespan)
+    monkeypatch.setattr(
+        http_app_module,
+        "get_settings",
+        lambda: Settings(_env_file=None, app_environment="test"),
+    )
+    application = http_app_module.create_app(product_app=product_app)
+
+    with TestClient(application):
+        assert lifecycle_events == ["startup"]
+
+    assert lifecycle_events == ["startup", "shutdown"]
 
 
 def test_langgraph_config_mounts_authenticated_custom_http_app() -> None:

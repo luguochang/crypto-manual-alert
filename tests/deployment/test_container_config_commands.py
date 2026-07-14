@@ -13,7 +13,6 @@ V2_SERVICES = {
     "development-bootstrap",
     "agent-server",
     "agent-server-readiness",
-    "product-api",
     "command-worker",
     "frontend",
 }
@@ -166,14 +165,6 @@ def test_compose_commands_address_the_v2_runtime_entrypoints():
         "-m",
         "crypto_alert_v2.auth.agent_healthcheck",
     ]
-    assert services["product-api"]["command"] == [
-        "uvicorn",
-        "crypto_alert_v2.api.app:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8011",
-    ]
     assert services["command-worker"]["command"] == [
         "python",
         "-m",
@@ -192,10 +183,6 @@ def test_compose_healthchecks_cover_the_v2_product_path():
     agent_healthcheck = services["agent-server"]["healthcheck"]["test"][-1]
     assert "socket.create_connection(('127.0.0.1', 8123)" in agent_healthcheck
     assert "authorization" not in agent_healthcheck.lower()
-
-    product_healthcheck = services["product-api"]["healthcheck"]["test"][-1]
-    assert "http://127.0.0.1:8011/api/v2/health" in product_healthcheck
-    assert "data.get('status') == 'ok'" in product_healthcheck
 
     frontend_healthcheck = services["frontend"]["healthcheck"]["test"][-1]
     for required_path in (
@@ -240,20 +227,18 @@ def test_compose_authenticated_readiness_retries_boundedly_before_worker_start()
     assert "bearer" not in agent_liveness
 
 
-def test_compose_publishes_only_loopback_product_endpoints():
+def test_compose_publishes_only_loopback_http_endpoints():
     services = _load_compose()["services"]
 
     assert services["agent-server"]["ports"] == [
         "127.0.0.1:${AGENT_SERVER_PORT:-8123}:8123"
     ]
-    assert services["product-api"]["ports"] == [
-        "127.0.0.1:${PRODUCT_API_PORT:-8011}:8011"
-    ]
     assert services["frontend"]["ports"] == [
         "127.0.0.1:${FRONTEND_PORT:-3001}:3001"
     ]
-    for service_name in V2_SERVICES - {"agent-server", "product-api", "frontend"}:
+    for service_name in V2_SERVICES - {"agent-server", "frontend"}:
         assert "ports" not in services[service_name]
+    assert "8011" not in (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
 
 def test_compose_secret_env_file_is_optional_and_limited_to_secret_consumers():
@@ -274,8 +259,14 @@ def test_compose_keeps_backend_upstreams_and_credentials_off_the_browser_surface
     services = _load_compose()["services"]
     frontend_environment = services["frontend"]["environment"]
 
-    assert frontend_environment["PRODUCT_API_BASE_URL"] == "http://product-api:8011"
+    assert frontend_environment["PRODUCT_API_BASE_URL"] == (
+        "http://agent-server:8123/app"
+    )
     assert frontend_environment["AGENT_SERVER_URL"] == "http://agent-server:8123"
+    assert "INTERNAL_JWT_AUDIENCE" not in frontend_environment
+    assert services["agent-server"]["environment"]["PRODUCT_DATABASE_URL"].startswith(
+        "postgresql+asyncpg://"
+    )
     assert not any(name.startswith("NEXT_PUBLIC_") for name in frontend_environment)
     for forbidden in (
         "NEXT_PUBLIC_API_BASE_URL",
@@ -295,7 +286,6 @@ def test_compose_separates_development_bootstrap_from_production_services():
     for service_name in (
         "agent-server",
         "agent-server-readiness",
-        "product-api",
         "command-worker",
     ):
         assert services[service_name]["environment"]["APP_ENVIRONMENT"] == "production"
@@ -327,7 +317,6 @@ def test_compose_internal_jwt_keys_follow_least_privilege_mounts():
         "agent-server-readiness": {
             "/run/internal-jwt-private": "internal-jwt-private"
         },
-        "product-api": {"/run/internal-jwt-public": "internal-jwt-public"},
         "command-worker": {"/run/internal-jwt-private": "internal-jwt-private"},
         "frontend": {"/run/internal-jwt-private": "internal-jwt-private"},
     }
@@ -358,12 +347,7 @@ def test_compose_internal_jwt_keys_follow_least_privilege_mounts():
     assert services["agent-server"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"] == (
         "60"
     )
-    assert services["product-api"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"] == (
-        "60"
-    )
-    assert services["product-api"]["environment"]["INTERNAL_JWT_AUDIENCE"] == (
-        "crypto-alert-product-api"
-    )
+    assert "INTERNAL_JWT_AUDIENCE" not in services["agent-server"]["environment"]
 
 
 def test_compose_dependencies_gate_migrations_auth_and_readiness_in_order():
@@ -374,15 +358,11 @@ def test_compose_dependencies_gate_migrations_auth_and_readiness_in_order():
         "agent-server": {
             "migrate": "service_completed_successfully",
             "internal-jwt-keys": "service_completed_successfully",
+            "development-bootstrap": "service_completed_successfully",
         },
         "agent-server-readiness": {
             "internal-jwt-keys": "service_completed_successfully",
             "agent-server": "service_healthy",
-        },
-        "product-api": {
-            "migrate": "service_completed_successfully",
-            "internal-jwt-keys": "service_completed_successfully",
-            "development-bootstrap": "service_completed_successfully",
         },
         "command-worker": {
             "migrate": "service_completed_successfully",
@@ -391,7 +371,7 @@ def test_compose_dependencies_gate_migrations_auth_and_readiness_in_order():
             "agent-server-readiness": "service_completed_successfully",
         },
         "frontend": {
-            "product-api": "service_healthy",
+            "agent-server": "service_healthy",
             "command-worker": "service_started",
         },
     }

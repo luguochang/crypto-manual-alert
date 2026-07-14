@@ -16,13 +16,15 @@ describe("Product BFF proxy", () => {
     delete process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT;
     delete process.env.DEVELOPMENT_BOOTSTRAP_TENANT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID;
+    delete process.env.AGENT_SERVER_INTERNAL_JWT_AUDIENCE;
+    delete process.env.INTERNAL_JWT_AUDIENCE;
     delete process.env.INTERNAL_JWT_ISSUER;
     delete process.env.INTERNAL_JWT_KID;
     delete process.env.INTERNAL_JWT_PRIVATE_KEY;
     vi.unstubAllEnvs();
   });
 
-  it("uses the server-only loopback base URL and strips browser authority headers", async () => {
+  it("preserves the local Agent Server app base path and strips browser authority headers", async () => {
     const fetcher = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         void input;
@@ -54,7 +56,7 @@ describe("Product BFF proxy", () => {
     expect(response.status).toBe(202);
     expect(fetcher).toHaveBeenCalledOnce();
     const [upstreamUrl, upstreamInit] = fetcher.mock.calls[0] ?? [];
-    expect(upstreamUrl).toBe("http://127.0.0.1:8011/api/v2/analysis");
+    expect(upstreamUrl).toBe("http://127.0.0.1:8123/app/api/v2/analysis");
     const headers = new Headers(upstreamInit?.headers);
     expect(headers.get("authorization")).toBeNull();
     expect(headers.get("x-api-key")).toBeNull();
@@ -63,7 +65,14 @@ describe("Product BFF proxy", () => {
     expect(headers.get("idempotency-key")).toBe("analysis-admission-1");
   });
 
-  it("signs Product requests for the deployment-controlled development identity", async () => {
+  it.each([
+    ["default", undefined, "crypto-alert-agent-server"],
+    ["configured", "agent-server-override", "agent-server-override"],
+  ] as const)("signs Product requests for the %s Agent Server audience", async (
+    _case,
+    configuredAudience,
+    expectedAudience,
+  ) => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     process.env.APP_ENVIRONMENT = "development";
     process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
@@ -71,6 +80,10 @@ describe("Product BFF proxy", () => {
       .toString();
     process.env.INTERNAL_JWT_KID = "compose-product-key";
     process.env.INTERNAL_JWT_ISSUER = "compose-local";
+    process.env.INTERNAL_JWT_AUDIENCE = "browser-authority";
+    if (configuredAudience) {
+      process.env.AGENT_SERVER_INTERNAL_JWT_AUDIENCE = configuredAudience;
+    }
     process.env.DEVELOPMENT_BOOTSTRAP_ENABLED = "true";
     process.env.DEVELOPMENT_BOOTSTRAP_PROFILE = "local-proof";
     process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT = "compose-user";
@@ -97,6 +110,11 @@ describe("Product BFF proxy", () => {
     const authorization = new Headers(fetcher.mock.calls[0]?.[1]?.headers)
       .get("authorization") ?? "";
     expect(authorization).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
+    const payloadSegment = authorization.replace(/^Bearer /, "").split(".")[1] ?? "";
+    const payload = JSON.parse(
+      Buffer.from(payloadSegment, "base64url").toString("utf8"),
+    ) as { aud?: string };
+    expect(payload.aud).toBe(expectedAudience);
   });
 
   it.each([
@@ -127,7 +145,7 @@ describe("Product BFF proxy", () => {
   });
 
   it("honors a server environment override and returns a readable gateway failure", async () => {
-    process.env.PRODUCT_API_BASE_URL = "http://127.0.0.1:8999/base/";
+    process.env.PRODUCT_API_BASE_URL = "http://127.0.0.1:8999/app/";
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void input;
       void init;
@@ -141,7 +159,7 @@ describe("Product BFF proxy", () => {
     );
 
     expect(fetcher).toHaveBeenCalledWith(
-      "http://127.0.0.1:8999/base/api/v2/tasks/00000000-0000-0000-0000-000000000001",
+      "http://127.0.0.1:8999/app/api/v2/tasks/00000000-0000-0000-0000-000000000001",
       expect.any(Object),
     );
     expect(response.status).toBe(502);
@@ -160,7 +178,7 @@ describe("Product BFF proxy", () => {
 
     expect(response.status).toBe(200);
     expect(fetcher).toHaveBeenCalledWith(
-      "http://127.0.0.1:8011/api/v2/runs?limit=25",
+      "http://127.0.0.1:8123/app/api/v2/runs?limit=25",
       expect.objectContaining({ method: "GET" }),
     );
 

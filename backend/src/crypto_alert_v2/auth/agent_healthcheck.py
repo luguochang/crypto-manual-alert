@@ -12,7 +12,7 @@ from crypto_alert_v2.config import Settings, get_settings
 from crypto_alert_v2.providers.capability_probe import SearchReadiness
 
 
-ReadinessFetcher = Callable[..., Awaitable[Mapping[str, Any]]]
+AuthenticatedJsonFetcher = Callable[..., Awaitable[Mapping[str, Any]]]
 
 
 def validate_search_readiness_payload(payload: object) -> SearchReadiness:
@@ -29,7 +29,16 @@ def validate_search_readiness_payload(payload: object) -> SearchReadiness:
     return readiness
 
 
-async def _fetch_search_readiness(
+def validate_product_health_payload(payload: object) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping) or dict(payload) != {
+        "status": "ok",
+        "version": "2.0.0",
+    }:
+        raise RuntimeError("Agent Server returned invalid Product health")
+    return payload
+
+
+async def _fetch_authenticated_json(
     *,
     url: str,
     headers: Mapping[str, str],
@@ -42,7 +51,7 @@ async def _fetch_search_readiness(
         response.raise_for_status()
         payload = response.json()
     if not isinstance(payload, Mapping):
-        raise RuntimeError("Agent Server search readiness response must be an object")
+        raise RuntimeError("Agent Server readiness response must be an object")
     return payload
 
 
@@ -50,7 +59,7 @@ async def check_agent_server(
     settings: Settings,
     *,
     client_factory: Callable[..., Any] = get_client,
-    readiness_fetcher: ReadinessFetcher = _fetch_search_readiness,
+    readiness_fetcher: AuthenticatedJsonFetcher = _fetch_authenticated_json,
 ) -> None:
     if settings.app_environment.strip().lower() != "production":
         raise RuntimeError("Agent Server healthcheck requires production mode")
@@ -106,10 +115,19 @@ async def check_agent_server(
         headers=headers,
     )
     validate_search_readiness_payload(readiness_payload)
+    product_health_payload = await readiness_fetcher(
+        url=settings.agent_server_url.rstrip("/") + "/app/api/v2/health",
+        headers=headers,
+    )
+    validate_product_health_payload(product_health_payload)
 
 
 if __name__ == "__main__":
     asyncio.run(check_agent_server(get_settings()))
 
 
-__all__ = ["check_agent_server", "validate_search_readiness_payload"]
+__all__ = [
+    "check_agent_server",
+    "validate_product_health_payload",
+    "validate_search_readiness_payload",
+]

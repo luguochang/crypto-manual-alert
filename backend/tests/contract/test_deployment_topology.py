@@ -105,21 +105,20 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     config = json.loads(result.stdout)
     services = config["services"]
 
-    assert {
+    assert set(services) == {
         "postgres",
         "migrate",
         "internal-jwt-keys",
         "development-bootstrap",
         "agent-server",
         "agent-server-readiness",
-        "product-api",
         "command-worker",
         "frontend",
-    } <= set(services)
-    assert "crypto_alert_v2.api.app:app" in services["product-api"]["command"]
+    }
+    assert "product-api" not in services
     assert "crypto_alert_v2.commands.worker" in services["command-worker"]["command"]
     assert services["frontend"]["environment"]["PRODUCT_API_BASE_URL"] == (
-        "http://product-api:8011"
+        "http://agent-server:8123/app"
     )
     assert services["frontend"]["environment"]["AGENT_SERVER_URL"] == (
         "http://agent-server:8123"
@@ -131,13 +130,12 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         name.startswith("NEXT_PUBLIC_") and "AGENT_SERVER" in name
         for name in services["frontend"]["environment"]
     )
-    assert services["product-api"]["environment"]["PRODUCT_DATABASE_URL"].startswith(
+    assert services["agent-server"]["environment"]["PRODUCT_DATABASE_URL"].startswith(
         "postgresql+asyncpg://"
     )
     for service_name in (
         "agent-server",
         "agent-server-readiness",
-        "product-api",
         "command-worker",
     ):
         assert services[service_name]["environment"]["APP_ENVIRONMENT"] == (
@@ -176,7 +174,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "DEVELOPMENT_BOOTSTRAP_SUBJECT": "dev-user",
         "DEVELOPMENT_BOOTSTRAP_TENANT_ID": "dev-tenant",
         "DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID": "dev-workspace",
-        "PRODUCT_DATABASE_URL": services["product-api"]["environment"][
+        "PRODUCT_DATABASE_URL": services["agent-server"]["environment"][
             "PRODUCT_DATABASE_URL"
         ],
     }
@@ -245,23 +243,16 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     for service_name in (
         "development-bootstrap",
         "agent-server-readiness",
-        "product-api",
         "command-worker",
         "frontend",
     ):
         assert "MARKET_DATA_HTTP_PROXY" not in services[service_name]["environment"]
-    assert services["product-api"]["environment"]["INTERNAL_JWT_AUDIENCE"] == (
-        "crypto-alert-product-api"
+    assert "INTERNAL_JWT_AUDIENCE" not in services["agent-server"]["environment"]
+    assert (
+        services["agent-server"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"]
+        == "60"
     )
-    for service_name in ("agent-server", "product-api"):
-        assert (
-            services[service_name]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"]
-            == "60"
-        )
 
-    assert _volume_sources(services["product-api"]) == {
-        "/run/internal-jwt-public": "internal-jwt-public"
-    }
     assert _volume_sources(services["command-worker"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"
     }
@@ -293,8 +284,22 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         services["command-worker"]["depends_on"]["agent-server-readiness"]["condition"]
         == "service_completed_successfully"
     )
+    assert {
+        dependency: settings["condition"]
+        for dependency, settings in services["agent-server"]["depends_on"].items()
+    } == {
+        "migrate": "service_completed_successfully",
+        "internal-jwt-keys": "service_completed_successfully",
+        "development-bootstrap": "service_completed_successfully",
+    }
+    assert (
+        services["frontend"]["depends_on"]["agent-server"]["condition"]
+        == "service_healthy"
+    )
 
     compose_source = (ROOT / "docker-compose.yml").read_text()
+    assert "product-api" not in compose_source
+    assert "8011" not in compose_source
     assert "AGENT_SERVER_LOCAL_TOKEN" not in compose_source
     assert "local-agent-dev-only" not in compose_source
     assert "host.docker.internal:7890" not in compose_source
