@@ -47,6 +47,14 @@ class RemoteCancelResult:
     state: RemoteRunState | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RemoteInterrupt:
+    interrupt_id: str
+    namespace: str
+    checkpoint_id: str
+    value: dict[str, Any]
+
+
 class AgentServerRunner:
     def __init__(
         self,
@@ -88,6 +96,7 @@ class AgentServerRunner:
         product_thread_id: str | None,
         product_run_id: str,
         submission: AnalysisSubmission,
+        review_policy: Literal["bypass", "required"] = "bypass",
     ) -> RemoteRunHandle:
         metadata = {
             "tenant_id": actor.tenant_id,
@@ -126,7 +135,10 @@ class AgentServerRunner:
             if existing is not None:
                 return existing
         run_options: dict[str, Any] = {
-            "input": {"request": submission.model_dump(mode="json")},
+            "input": {
+                "request": submission.model_dump(mode="json"),
+                "review_policy": review_policy,
+            },
             "durability": "sync",
             "metadata": metadata,
         }
@@ -226,6 +238,74 @@ class AgentServerRunner:
             **_authorization_options(handle),
         )
 
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> tuple[RemoteInterrupt, ...]:
+        state = await self._client.threads.get_state(
+            handle.thread_id,
+            subgraphs=True,
+            **_authorization_options(handle),
+        )
+        if not isinstance(state, dict):
+            raise RuntimeError("Agent Server returned an invalid Thread state")
+        interrupts = _collect_remote_interrupts(state)
+        if not interrupts:
+            raise RuntimeError("Interrupted Agent Server Run has no resumable interrupt")
+        return interrupts
+
+    async def resume(
+        self,
+        *,
+        actor: ActorContext,
+        handle: RemoteRunHandle,
+        task_id: str,
+        product_run_id: str,
+        response: dict[str, Any],
+        checkpoint_id: str,
+    ) -> RemoteRunHandle:
+        authorization = handle.authorization or (
+            self._authorization_provider(actor)
+            if self._authorization_provider is not None
+            else None
+        )
+        metadata = {
+            "tenant_id": actor.tenant_id,
+            "workspace_id": actor.workspace_id,
+            "user_id": actor.user_id,
+            "task_id": task_id,
+            "product_run_id": product_run_id,
+            "resume_of_official_run_id": handle.run_id,
+        }
+        existing = await self._find_existing_run(
+            actor=actor,
+            task_id=task_id,
+            product_run_id=product_run_id,
+            thread_id=handle.thread_id,
+            authorization=authorization,
+        )
+        if existing is not None:
+            return existing
+        options: dict[str, Any] = {
+            "command": {"resume": response},
+            "checkpoint_id": checkpoint_id,
+            "durability": "sync",
+            "metadata": metadata,
+        }
+        if authorization:
+            options["headers"] = {"authorization": authorization}
+        run = await self._client.runs.create(
+            handle.thread_id,
+            handle.assistant_id,
+            **options,
+        )
+        return RemoteRunHandle(
+            assistant_id=_required_remote_id(run, "assistant_id"),
+            thread_id=handle.thread_id,
+            run_id=_required_remote_id(run, "run_id"),
+            authorization=authorization,
+        )
+
     async def get(self, handle: RemoteRunHandle) -> RemoteRunState:
         run = await self._client.runs.get(
             handle.thread_id,
@@ -293,10 +373,87 @@ def _authorization_options(handle: RemoteRunHandle) -> dict[str, Any]:
     )
 
 
+def _collect_remote_interrupts(state: dict[str, Any]) -> tuple[RemoteInterrupt, ...]:
+    collected: dict[tuple[str, str, str], RemoteInterrupt] = {}
+
+    def visit(snapshot: dict[str, Any]) -> None:
+        checkpoint = snapshot.get("checkpoint")
+        checkpoint_id = _checkpoint_value(checkpoint, "checkpoint_id")
+        namespace = _checkpoint_value(checkpoint, "checkpoint_ns", allow_empty=True)
+        for item in snapshot.get("interrupts") or ():
+            parsed = _parse_remote_interrupt(
+                item,
+                checkpoint_id=checkpoint_id,
+                namespace=namespace,
+            )
+            collected[(parsed.interrupt_id, parsed.namespace, parsed.checkpoint_id)] = parsed
+        for task in snapshot.get("tasks") or ():
+            if not isinstance(task, dict):
+                continue
+            task_state = task.get("state")
+            if isinstance(task_state, dict):
+                visit(task_state)
+                continue
+            task_checkpoint = task.get("checkpoint") or checkpoint
+            task_checkpoint_id = _checkpoint_value(task_checkpoint, "checkpoint_id")
+            task_namespace = _checkpoint_value(
+                task_checkpoint,
+                "checkpoint_ns",
+                allow_empty=True,
+            )
+            for item in task.get("interrupts") or ():
+                parsed = _parse_remote_interrupt(
+                    item,
+                    checkpoint_id=task_checkpoint_id,
+                    namespace=task_namespace,
+                )
+                collected[
+                    (parsed.interrupt_id, parsed.namespace, parsed.checkpoint_id)
+                ] = parsed
+
+    visit(state)
+    return tuple(collected.values())
+
+
+def _checkpoint_value(
+    checkpoint: object,
+    field_name: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    value = checkpoint.get(field_name) if isinstance(checkpoint, dict) else None
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise RuntimeError(f"Agent Server Thread state omitted {field_name}")
+    return value
+
+
+def _parse_remote_interrupt(
+    payload: object,
+    *,
+    checkpoint_id: str,
+    namespace: str,
+) -> RemoteInterrupt:
+    if not isinstance(payload, dict):
+        raise RuntimeError("Agent Server returned an invalid interrupt")
+    interrupt_id = payload.get("id")
+    value = payload.get("value")
+    if not isinstance(interrupt_id, str) or not interrupt_id.strip():
+        raise RuntimeError("Agent Server interrupt omitted id")
+    if not isinstance(value, dict):
+        raise RuntimeError("Agent Server interrupt value must be an object")
+    return RemoteInterrupt(
+        interrupt_id=interrupt_id.strip(),
+        namespace=namespace,
+        checkpoint_id=checkpoint_id,
+        value=value,
+    )
+
+
 __all__ = [
     "AgentServerRunner",
     "RemoteCancelOutcome",
     "RemoteCancelResult",
+    "RemoteInterrupt",
     "RemoteRunHandle",
     "RemoteRunResult",
     "RemoteRunState",

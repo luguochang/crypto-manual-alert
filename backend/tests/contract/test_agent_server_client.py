@@ -12,10 +12,18 @@ from crypto_alert_v2.auth.context import ActorContext
 class RecordingThreads:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] | None = None
+        self.state_result: dict[str, Any] = {}
+        self.get_state_args: tuple[Any, ...] | None = None
+        self.get_state_kwargs: dict[str, Any] | None = None
 
     async def create(self, **kwargs: Any) -> dict[str, Any]:
         self.kwargs = kwargs
         return {"thread_id": "thread-1"}
+
+    async def get_state(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.get_state_args = args
+        self.get_state_kwargs = kwargs
+        return self.state_result
 
 
 class RecordingRuns:
@@ -115,7 +123,10 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
     }
     assert client.runs.create_args == ("thread-1", "crypto_analysis")
     assert client.runs.create_kwargs == {
-        "input": {"request": submission.model_dump(mode="json")},
+        "input": {
+            "request": submission.model_dump(mode="json"),
+            "review_policy": "bypass",
+        },
         "durability": "sync",
         "metadata": {
             "tenant_id": "tenant-1",
@@ -234,6 +245,159 @@ async def test_runner_rejects_an_unknown_official_run_status() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_runner_reads_official_root_and_nested_interrupt_identity() -> None:
+    client = RecordingClient()
+    client.threads.state_result = {
+        "checkpoint": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "root-checkpoint",
+        },
+        "interrupts": [
+            {
+                "id": "root-interrupt",
+                "value": {"schema_version": "hitl.review.v1", "kind": "review"},
+            }
+        ],
+        "tasks": [
+            {
+                "id": "nested-task",
+                "name": "research-subgraph",
+                "checkpoint": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "research:child",
+                    "checkpoint_id": "nested-checkpoint",
+                },
+                "interrupts": [
+                    {
+                        "id": "nested-interrupt",
+                        "value": {
+                            "schema_version": "hitl.review.v1",
+                            "kind": "source_review",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    interrupts = await runner.get_interrupts(_remote_handle())
+
+    assert [
+        (
+            item.interrupt_id,
+            item.namespace,
+            item.checkpoint_id,
+            item.value["kind"],
+        )
+        for item in interrupts
+    ] == [
+        ("root-interrupt", "", "root-checkpoint", "review"),
+        (
+            "nested-interrupt",
+            "research:child",
+            "nested-checkpoint",
+            "source_review",
+        ),
+    ]
+    assert client.threads.get_state_args == ("thread-1",)
+    assert client.threads.get_state_kwargs == {"subgraphs": True}
+
+
+@pytest.mark.asyncio
+async def test_runner_resumes_with_official_command_and_checkpoint() -> None:
+    client = RecordingClient()
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        authorization_provider=lambda _: "Bearer resume-token",
+    )
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+
+    resumed = await runner.resume(
+        actor=actor,
+        handle=_remote_handle(),
+        task_id="task-1",
+        product_run_id="product-run-2",
+        response={"action": "approve", "response_version": 1},
+        checkpoint_id="checkpoint-1",
+    )
+
+    assert client.runs.create_args == (
+        "thread-1",
+        "11111111-1111-4111-8111-111111111111",
+    )
+    assert client.runs.create_kwargs == {
+        "command": {
+            "resume": {"action": "approve", "response_version": 1}
+        },
+        "checkpoint_id": "checkpoint-1",
+        "durability": "sync",
+        "metadata": {
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "task_id": "task-1",
+            "product_run_id": "product-run-2",
+            "resume_of_official_run_id": "run-1",
+        },
+        "headers": {"authorization": "Bearer resume-token"},
+    }
+    assert resumed == RemoteRunHandle(
+        assistant_id="11111111-1111-4111-8111-111111111111",
+        thread_id="thread-1",
+        run_id="run-1",
+    )
+    assert resumed.authorization == "Bearer resume-token"
+    assert client.runs.events == ["list", "create"]
+
+
+@pytest.mark.asyncio
+async def test_runner_recovers_an_ambiguous_resume_without_duplicate_create() -> None:
+    client = RecordingClient()
+    client.runs.list_results = [
+        {
+            "run_id": "existing-resume-run",
+            "assistant_id": "11111111-1111-4111-8111-111111111111",
+            "metadata": {
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "user_id": "user-1",
+                "task_id": "task-1",
+                "product_run_id": "product-run-2",
+            },
+        }
+    ]
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    resumed = await runner.resume(
+        actor=ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:read", "analysis:write"),
+        ),
+        handle=_remote_handle(),
+        task_id="task-1",
+        product_run_id="product-run-2",
+        response={"action": "approve", "response_version": 1},
+        checkpoint_id="checkpoint-1",
+    )
+
+    assert resumed.run_id == "existing-resume-run"
+    assert client.runs.events == ["list"]
+    assert client.runs.create_args is None
+
+
 async def _async_value(value: Any) -> Any:
     return value
 
@@ -298,6 +462,40 @@ async def test_runner_recovers_an_existing_product_run_without_creating_another(
     assert handle.assistant_id == "22222222-2222-4222-8222-222222222222"
     assert client.runs.events == ["list"]
     assert client.runs.create_args is None
+
+
+@pytest.mark.asyncio
+async def test_runner_injects_server_owned_required_review_policy() -> None:
+    client = RecordingClient()
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    submission = AnalysisSubmission(
+        symbol="BTC-USDT-SWAP",
+        horizon="4h",
+        query_text="Require an explicit review.",
+        notify=False,
+    )
+
+    await runner.start(
+        actor=actor,
+        task_id="task-required-review",
+        product_thread_id="00000000-0000-0000-0000-000000000456",
+        product_run_id="product-run-required-review",
+        submission=submission,
+        review_policy="required",
+    )
+
+    assert client.runs.create_kwargs is not None
+    assert client.runs.create_kwargs["input"] == {
+        "request": submission.model_dump(mode="json"),
+        "review_policy": "required",
+    }
 
 
 @pytest.mark.asyncio
