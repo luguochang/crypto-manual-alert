@@ -207,6 +207,17 @@ class TerminalCancelJoinFailureRunner(TerminalCancelRaceRunner):
         raise ConnectionError("terminal output temporarily unavailable")
 
 
+class TerminalThenUnconfirmedCancelRunner(TerminalCancelJoinFailureRunner):
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        if self.cancelled:
+            self.cancelled.append(handle)
+            return RemoteCancelResult(
+                outcome="unconfirmed",
+                state=RemoteRunState(status="running"),
+            )
+        return await super().cancel(handle)
+
+
 class UnconfirmedCancelRunner(InspectingRunner):
     async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
         self.cancelled.append(handle)
@@ -602,7 +613,7 @@ async def test_terminal_join_replay_does_not_duplicate_persisted_output(
     )
 
     assert await restarted_dispatcher.dispatch_once() is True
-    assert replay_runner.events == ["get", "join"]
+    assert replay_runner.events == ["join"]
     assert await persisted_output_counts(session_factory, task_id) == expected_counts
     async with session_factory() as session:
         replayed_run = await session.scalar(select(Run).where(Run.task_id == task_id))
@@ -1206,6 +1217,55 @@ async def test_terminal_output_failure_does_not_consume_cancel_failure_semantics
     assert failed["errors"][0]["code"] == "terminal_projection_unavailable"
     assert failed["errors"][0]["error_type"] == "ConnectionError"
     assert failed["errors"][0]["code"] != "agent_cancel_failed"
+    assert len(runner.cancelled) == 1
+
+
+@pytest.mark.asyncio
+async def test_observed_terminal_survives_lease_retry_without_recancelling(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = TerminalThenUnconfirmedCancelRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="durable-terminal-observation-worker",
+        clock=clock,
+        max_cancel_attempts=2,
+        reconciliation_interval_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    await service.cancel_task(
+        actor(),
+        str(queued["task_id"]),
+        "cancel-after-durable-terminal-observation",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        observed_status = await session.scalar(
+            select(Run.observed_terminal_status).where(Run.task_id == task_id)
+        )
+    assert observed_status == "success"
+    assert len(runner.cancelled) == 1
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["errors"][0]["code"] == "terminal_projection_unavailable"
+    assert failed["errors"][0]["code"] != "agent_cancel_failed"
+    assert runner.events.count("join") == 2
     assert len(runner.cancelled) == 1
 
 

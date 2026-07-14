@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -64,6 +64,9 @@ class RemoteRunner(Protocol):
     async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult: ...
 
 
+ObservedTerminalStatus = Literal["error", "success", "timeout"]
+
+
 @dataclass(frozen=True, slots=True)
 class CommandLease:
     command_id: UUID
@@ -77,6 +80,7 @@ class CommandLease:
     actor: ActorContext
     submission: AnalysisSubmission | None
     remote_handle: RemoteRunHandle | None = None
+    observed_terminal_status: ObservedTerminalStatus | None = None
 
 
 class CommandDispatcher:
@@ -307,6 +311,14 @@ class CommandDispatcher:
                     else None
                 ),
                 remote_handle=remote_handle,
+                observed_terminal_status=(
+                    cast(
+                        ObservedTerminalStatus | None,
+                        product_run.observed_terminal_status,
+                    )
+                    if product_run is not None
+                    else None
+                ),
             )
 
     async def execute(self, lease: CommandLease) -> bool:
@@ -348,6 +360,13 @@ class CommandDispatcher:
                     pass
                 return False
 
+        if lease.observed_terminal_status is not None:
+            return await self._project_remote_terminal(
+                lease,
+                handle,
+                RemoteRunState(status=lease.observed_terminal_status),
+            )
+
         try:
             remote_state = await self._runner.get(handle)
         except Exception:
@@ -365,6 +384,20 @@ class CommandDispatcher:
 
     async def _execute_cancel(self, lease: CommandLease) -> bool:
         handle = lease.remote_handle
+        if lease.observed_terminal_status is not None:
+            if handle is None:
+                return await self._schedule_terminal_retry(
+                    lease,
+                    RuntimeError("Observed terminal Run has no registered handle"),
+                )
+            authorize = getattr(self._runner, "authorize", None)
+            if authorize is not None:
+                handle = authorize(handle, lease.actor)
+            return await self._project_remote_terminal(
+                lease,
+                handle,
+                RemoteRunState(status=lease.observed_terminal_status),
+            )
         if handle is None and lease.product_run_id is not None:
             try:
                 async with asyncio.timeout(self._remote_operation_timeout_seconds):
@@ -406,6 +439,8 @@ class CommandDispatcher:
         handle: RemoteRunHandle,
         remote_state: RemoteRunState,
     ) -> bool:
+        if not await self._remember_remote_terminal(lease, remote_state):
+            return False
         if remote_state.status in {"error", "timeout"}:
             return await self._finalize(
                 lease,
@@ -447,6 +482,39 @@ class CommandDispatcher:
                 ],
             )
         return await self._finalize(lease, terminal)
+
+    async def _remember_remote_terminal(
+        self,
+        lease: CommandLease,
+        remote_state: RemoteRunState,
+    ) -> bool:
+        if remote_state.status not in {"error", "success", "timeout"}:
+            raise RuntimeError("Remote Run is not terminal")
+        if lease.product_run_id is None:
+            return False
+        now = self._clock()
+        async with self._session_factory() as session, session.begin():
+            command = await self._locked_command(
+                session,
+                lease,
+                now,
+                allow_expired=True,
+            )
+            if command is None:
+                return False
+            product_run = await session.scalar(
+                select(Run).where(Run.id == lease.product_run_id).with_for_update()
+            )
+            if product_run is None:
+                return False
+            if (
+                product_run.observed_terminal_status is not None
+                and product_run.observed_terminal_status != remote_state.status
+            ):
+                raise RuntimeError("Official Run terminal status changed after observation")
+            product_run.observed_terminal_status = remote_state.status
+            product_run.last_heartbeat_at = now
+            return True
 
     async def _schedule_terminal_retry(
         self,
