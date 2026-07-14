@@ -47,6 +47,22 @@ class AgentStreamBindingView(BaseModel):
     run_id: StrictStr = Field(min_length=1, max_length=255)
 
 
+class PendingInterruptView(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    run_id: StrictStr = Field(min_length=1, max_length=255)
+    interrupt_id: StrictStr = Field(min_length=1, max_length=255)
+    namespace: StrictStr = Field(max_length=2000)
+    checkpoint_id: StrictStr = Field(min_length=1, max_length=255)
+    response_version: int = Field(ge=1)
+    status: Literal["pending", "responding"]
+    payload: dict[str, Any]
+    response: dict[str, Any] | None = None
+    expires_at: datetime | None = None
+    responded_at: datetime | None = None
+
+
 class TaskView(BaseModel):
     task_id: str
     status: Literal[
@@ -69,6 +85,7 @@ class TaskView(BaseModel):
     artifact: Artifact | None = None
     errors: list[ProductErrorView] = Field(default_factory=list)
     agent_stream: AgentStreamBindingView | None = None
+    pending_interrupts: list[PendingInterruptView] = Field(default_factory=list)
 
 
 class RunSummaryView(BaseModel):

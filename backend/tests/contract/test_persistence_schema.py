@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import importlib.util
 from io import StringIO
 from pathlib import Path
@@ -10,7 +11,17 @@ from uuid import uuid4
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
-from sqlalchemy import CheckConstraint, DateTime, Index, Integer, String, UniqueConstraint
+from pydantic import ValidationError
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +31,12 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    INTERRUPT_STATUSES,
+    InterruptProjection,
     MarketSnapshot,
     Membership,
+    OBSERVED_TERMINAL_STATUSES,
+    REVIEW_POLICIES,
     Run,
     Task,
     TaskCommand,
@@ -30,6 +45,11 @@ from crypto_alert_v2.persistence.models import (
     User,
     WebEvidence,
     Workspace,
+)
+from crypto_alert_v2.api.schemas import (
+    AnalysisSubmission,
+    PendingInterruptView,
+    TaskView,
 )
 from crypto_alert_v2.persistence.repositories import (
     ArtifactRepository,
@@ -42,7 +62,7 @@ from crypto_alert_v2.persistence.repositories import (
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
-EXPECTED_TABLES = {
+INITIAL_TABLES = {
     "tenants",
     "users",
     "workspaces",
@@ -57,6 +77,7 @@ EXPECTED_TABLES = {
     "decisions",
     "task_commands",
 }
+EXPECTED_TABLES = INITIAL_TABLES | {"interrupt_inbox"}
 
 TABLE_MODELS = (
     Tenant,
@@ -72,6 +93,7 @@ TABLE_MODELS = (
     ArtifactVersion,
     Decision,
     TaskCommand,
+    InterruptProjection,
 )
 
 WORKSPACE_SCOPED_TABLES = EXPECTED_TABLES - {"tenants", "users", "workspaces"}
@@ -89,6 +111,8 @@ EXPECTED_JSONB_COLUMNS = {
     ("decisions", "evidence_verdict"),
     ("decisions", "risk_verdict"),
     ("task_commands", "payload"),
+    ("interrupt_inbox", "payload"),
+    ("interrupt_inbox", "response"),
 }
 
 RUN_STATUSES = {
@@ -165,6 +189,19 @@ def test_actor_external_identifiers_and_lineage_keys_are_unique() -> None:
     assert frozenset({"external_subject"}) not in _unique_column_sets("users")
     assert frozenset({"workspace_id", "user_id"}) in _unique_column_sets("memberships")
     assert frozenset({"task_id", "attempt"}) in _unique_column_sets("runs")
+    assert frozenset({"resume_of_run_id"}) in _unique_column_sets("runs")
+    assert frozenset(
+        {"tenant_id", "workspace_id", "owner_user_id", "task_id", "id"}
+    ) in _unique_column_sets("runs")
+    assert frozenset(
+        {
+            "tenant_id",
+            "workspace_id",
+            "official_interrupt_id",
+            "checkpoint_id",
+            "response_version",
+        }
+    ) in _unique_column_sets("interrupt_inbox")
     assert frozenset({"artifact_id", "version_number"}) in _unique_column_sets(
         "artifact_versions"
     )
@@ -213,6 +250,12 @@ def test_run_persists_reconciliation_deadline_and_projection_fence() -> None:
     assert isinstance(table.c.cancel_requested_at.type, DateTime)
     assert table.c.cancel_requested_at.type.timezone is True
     assert table.c.cancel_requested_at.nullable is True
+    assert isinstance(table.c.observed_terminal_status.type, String)
+    assert table.c.observed_terminal_status.type.length == 32
+    assert table.c.observed_terminal_status.nullable is True
+    assert isinstance(table.c.resume_of_run_id.type, UUID)
+    assert table.c.resume_of_run_id.type.as_uuid is True
+    assert table.c.resume_of_run_id.nullable is True
 
     indexes = {
         cast(Index, index).name: tuple(
@@ -224,6 +267,183 @@ def test_run_persists_reconciliation_deadline_and_projection_fence() -> None:
         "status",
         "reconciliation_deadline_at",
     )
+    assert indexes["ix_runs_tenant_workspace_resume"] == (
+        "tenant_id",
+        "workspace_id",
+        "resume_of_run_id",
+    )
+
+
+def test_workspace_review_policy_is_server_owned_and_constrained() -> None:
+    column = Workspace.__table__.c.review_policy
+
+    assert isinstance(column.type, String)
+    assert column.type.length == 32
+    assert column.nullable is False
+    assert column.default is not None
+    assert column.default.arg == "bypass"
+    assert column.server_default is not None
+    assert str(column.server_default.arg) == "'bypass'"
+
+    constraint = next(
+        constraint
+        for constraint in Workspace.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_workspaces_review_policy"
+    )
+    sql = str(constraint.sqltext)
+    assert {value for value in REVIEW_POLICIES if f"'{value}'" in sql} == set(
+        REVIEW_POLICIES
+    )
+    assert "review_policy" not in AnalysisSubmission.model_fields
+
+
+def test_run_resume_lineage_is_actor_task_scoped_and_terminal_observation_is_typed() -> None:
+    table = Run.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    resume_fk = constraints["fk_runs_resume_scope"]
+    assert isinstance(resume_fk, ForeignKeyConstraint)
+    assert tuple(column.name for column in resume_fk.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "resume_of_run_id",
+    )
+    assert tuple(element.target_fullname for element in resume_fk.elements) == (
+        "app.runs.tenant_id",
+        "app.runs.workspace_id",
+        "app.runs.owner_user_id",
+        "app.runs.task_id",
+        "app.runs.id",
+    )
+    assert resume_fk.ondelete == "CASCADE"
+
+    no_self = constraints["ck_runs_resume_not_self"]
+    assert isinstance(no_self, CheckConstraint)
+    assert "resume_of_run_id <> id" in str(no_self.sqltext)
+
+    observed = constraints["ck_runs_observed_terminal_status"]
+    assert isinstance(observed, CheckConstraint)
+    observed_sql = str(observed.sqltext)
+    assert {
+        value
+        for value in OBSERVED_TERMINAL_STATUSES
+        if f"'{value}'" in observed_sql
+    } == set(OBSERVED_TERMINAL_STATUSES)
+    assert "interrupted" not in observed_sql
+    assert "running" not in observed_sql
+
+
+def test_interrupt_projection_has_formal_state_scope_and_query_contracts() -> None:
+    table = InterruptProjection.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    assert {
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+        "official_interrupt_id",
+        "namespace",
+        "checkpoint_id",
+        "response_version",
+        "status",
+        "payload",
+        "response",
+        "expires_at",
+        "responded_at",
+        "created_at",
+        "updated_at",
+    } <= set(table.c.keys())
+    assert table.c.response_version.default.arg == 1
+    assert str(table.c.response_version.server_default.arg) == "1"
+    assert table.c.status.default.arg == "pending"
+    assert str(table.c.status.server_default.arg) == "'pending'"
+    assert isinstance(table.c.namespace.type, Text)
+    assert table.c.namespace.nullable is False
+
+    run_scope = constraints["fk_interrupt_inbox_run_scope"]
+    assert isinstance(run_scope, ForeignKeyConstraint)
+    assert tuple(column.name for column in run_scope.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+    )
+    assert tuple(element.target_fullname for element in run_scope.elements) == (
+        "app.runs.tenant_id",
+        "app.runs.workspace_id",
+        "app.runs.owner_user_id",
+        "app.runs.task_id",
+        "app.runs.id",
+    )
+
+    status_constraint = constraints["ck_interrupt_inbox_status"]
+    assert isinstance(status_constraint, CheckConstraint)
+    status_sql = str(status_constraint.sqltext)
+    assert {
+        value for value in INTERRUPT_STATUSES if f"'{value}'" in status_sql
+    } == set(INTERRUPT_STATUSES)
+
+    indexes = _index_column_sets("interrupt_inbox")
+    assert (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "status",
+        "expires_at",
+    ) in indexes
+    assert ("tenant_id", "workspace_id", "task_id", "status") in indexes
+    assert ("tenant_id", "workspace_id", "run_id", "status") in indexes
+    assert ("checkpoint_id", "official_interrupt_id") in indexes
+
+
+def test_task_view_exposes_only_typed_pending_interrupts() -> None:
+    now = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
+    interrupt = {
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "interrupt_id": "interrupt-1",
+        "namespace": "research:approval",
+        "checkpoint_id": "checkpoint-1",
+        "response_version": 1,
+        "status": "pending",
+        "payload": {"action": "approve"},
+        "expires_at": now,
+    }
+    view = TaskView.model_validate(
+        {
+            "task_id": "task-1",
+            "status": "waiting_human",
+            "symbol": "BTC-USDT-SWAP",
+            "horizon": "4h",
+            "query_text": "Review this analysis.",
+            "created_at": now,
+            "pending_interrupts": [interrupt],
+        }
+    )
+
+    assert view.pending_interrupts == [PendingInterruptView.model_validate(interrupt)]
+    assert PendingInterruptView.model_validate(
+        {**interrupt, "namespace": ""}
+    ).namespace == ""
+    assert TaskView.model_validate(
+        {
+            "task_id": "task-2",
+            "status": "queued",
+            "symbol": "ETH-USDT-SWAP",
+            "horizon": "4h",
+            "created_at": now,
+        }
+    ).pending_interrupts == []
+    with pytest.raises(ValidationError):
+        PendingInterruptView.model_validate({**interrupt, "status": "resolved"})
+    with pytest.raises(ValidationError):
+        PendingInterruptView.model_validate({**interrupt, "response_version": 0})
 
 
 def test_workspace_access_paths_have_composite_indexes() -> None:
@@ -474,6 +694,20 @@ def _load_run_recovery_revision() -> Any:
     return revision
 
 
+def _load_interrupt_projection_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT / "alembic" / "versions" / "0006_interrupt_projection.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_interrupt_projection_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
 def test_initial_revision_explicitly_creates_and_drops_the_product_tables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -487,10 +721,10 @@ def test_initial_revision_explicitly_creates_and_drops_the_product_tables(
     revision.downgrade()
 
     assert set(operations.created_tables) == {
-        (table_name, PRODUCT_SCHEMA) for table_name in EXPECTED_TABLES
+        (table_name, PRODUCT_SCHEMA) for table_name in INITIAL_TABLES
     }
     assert set(operations.dropped_tables) == {
-        (table_name, PRODUCT_SCHEMA) for table_name in EXPECTED_TABLES
+        (table_name, PRODUCT_SCHEMA) for table_name in INITIAL_TABLES
     }
 
 
@@ -687,6 +921,69 @@ def test_run_recovery_revision_upgrade_and_downgrade_compile_for_postgresql() ->
         "ALTER TABLE app.runs DROP COLUMN projection_fence;",
         "ALTER TABLE app.runs DROP COLUMN reconciliation_deadline_at;",
     ]
+    positions = [downgrade_sql.index(statement) for statement in downgrade_statements]
+    assert positions == sorted(positions)
+
+
+def _render_interrupt_projection_sql(method_name: str) -> str:
+    revision = _load_interrupt_projection_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_interrupt_projection_revision_compiles_complete_upgrade_and_downgrade() -> None:
+    revision = _load_interrupt_projection_revision()
+
+    assert revision.revision == "0006_interrupt_projection"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0005_run_recovery_state"
+
+    upgrade_sql = _render_interrupt_projection_sql("upgrade")
+    downgrade_sql = _render_interrupt_projection_sql("downgrade")
+
+    required_upgrade_statements = (
+        "ALTER TABLE app.workspaces ADD COLUMN review_policy "
+        "VARCHAR(32) DEFAULT 'bypass' NOT NULL;",
+        "ALTER TABLE app.workspaces ADD CONSTRAINT ck_workspaces_review_policy "
+        "CHECK (review_policy IN ('bypass', 'required'));",
+        "ALTER TABLE app.runs ADD COLUMN resume_of_run_id UUID;",
+        "ALTER TABLE app.runs ADD COLUMN observed_terminal_status VARCHAR(32);",
+        "ALTER TABLE app.runs ADD CONSTRAINT ck_runs_observed_terminal_status "
+        "CHECK (observed_terminal_status IS NULL OR observed_terminal_status "
+        "IN ('error', 'success', 'timeout'));",
+        "ALTER TABLE app.runs ADD CONSTRAINT fk_runs_resume_scope "
+        "FOREIGN KEY(tenant_id, workspace_id, owner_user_id, task_id, "
+        "resume_of_run_id) REFERENCES app.runs (tenant_id, workspace_id, "
+        "owner_user_id, task_id, id) ON DELETE CASCADE;",
+        "CREATE TABLE app.interrupt_inbox (",
+        "namespace TEXT NOT NULL",
+        "CONSTRAINT fk_interrupt_inbox_run_scope FOREIGN KEY(tenant_id, "
+        "workspace_id, owner_user_id, task_id, run_id) REFERENCES app.runs "
+        "(tenant_id, workspace_id, owner_user_id, task_id, id) ON DELETE CASCADE",
+        "CONSTRAINT ck_interrupt_inbox_status CHECK (status IN "
+        "('pending', 'responding', 'resolved', 'expired', 'cancelled'))",
+        "CREATE INDEX ix_interrupt_inbox_scope_status_expiry ON "
+        "app.interrupt_inbox (tenant_id, workspace_id, owner_user_id, status, "
+        "expires_at);",
+    )
+    for statement in required_upgrade_statements:
+        assert statement in upgrade_sql
+
+    downgrade_statements = (
+        "DROP TABLE app.interrupt_inbox;",
+        "ALTER TABLE app.runs DROP CONSTRAINT fk_runs_resume_scope;",
+        "ALTER TABLE app.runs DROP CONSTRAINT ck_runs_observed_terminal_status;",
+        "ALTER TABLE app.runs DROP COLUMN observed_terminal_status;",
+        "ALTER TABLE app.runs DROP COLUMN resume_of_run_id;",
+        "ALTER TABLE app.workspaces DROP CONSTRAINT ck_workspaces_review_policy;",
+        "ALTER TABLE app.workspaces DROP COLUMN review_policy;",
+    )
     positions = [downgrade_sql.index(statement) for statement in downgrade_statements]
     assert positions == sorted(positions)
 

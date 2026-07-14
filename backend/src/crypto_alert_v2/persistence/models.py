@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -38,6 +39,17 @@ RUN_STATUSES = (
     "cancelled",
 )
 
+REVIEW_POLICIES = (
+    "bypass",
+    "required",
+)
+
+OBSERVED_TERMINAL_STATUSES = (
+    "error",
+    "success",
+    "timeout",
+)
+
 TASK_COMMAND_TYPES = (
     "submit",
     "respond",
@@ -54,6 +66,14 @@ TASK_COMMAND_STATUSES = (
     "rejected",
     "cancelled",
     "failed",
+)
+
+INTERRUPT_STATUSES = (
+    "pending",
+    "responding",
+    "resolved",
+    "expired",
+    "cancelled",
 )
 
 
@@ -91,6 +111,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "workspaces"
     __table_args__ = (
+        CheckConstraint(
+            f"review_policy IN ({_sql_values(REVIEW_POLICIES)})",
+            name="ck_workspaces_review_policy",
+        ),
         UniqueConstraint(
             "tenant_id",
             "external_id",
@@ -106,6 +130,12 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    review_policy: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="bypass",
+        server_default=text("'bypass'"),
+    )
 
 
 class Membership(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -236,10 +266,52 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             f"status IN ({_sql_values(RUN_STATUSES)})",
             name="ck_runs_status",
         ),
+        CheckConstraint(
+            "observed_terminal_status IS NULL OR "
+            f"observed_terminal_status IN ({_sql_values(OBSERVED_TERMINAL_STATUSES)})",
+            name="ck_runs_observed_terminal_status",
+        ),
         UniqueConstraint("task_id", "attempt", name="uq_runs_task_attempt"),
         UniqueConstraint("official_run_id", name="uq_runs_official_run_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "task_id",
+            "id",
+            name="uq_runs_projection_scope",
+        ),
+        UniqueConstraint("resume_of_run_id", name="uq_runs_resume_of_run"),
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "workspace_id",
+                "owner_user_id",
+                "task_id",
+                "resume_of_run_id",
+            ],
+            [
+                f"{PRODUCT_SCHEMA}.runs.tenant_id",
+                f"{PRODUCT_SCHEMA}.runs.workspace_id",
+                f"{PRODUCT_SCHEMA}.runs.owner_user_id",
+                f"{PRODUCT_SCHEMA}.runs.task_id",
+                f"{PRODUCT_SCHEMA}.runs.id",
+            ],
+            name="fk_runs_resume_scope",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "resume_of_run_id IS NULL OR resume_of_run_id <> id",
+            name="ck_runs_resume_not_self",
+        ),
         Index("ix_runs_tenant_workspace_status", "tenant_id", "workspace_id", "status"),
         Index("ix_runs_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"),
+        Index(
+            "ix_runs_tenant_workspace_resume",
+            "tenant_id",
+            "workspace_id",
+            "resume_of_run_id",
+        ),
         Index("ix_runs_status_reconcile_deadline", "status", "reconciliation_deadline_at"),
     )
 
@@ -291,6 +363,139 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     terminal_output_hash: Mapped[str | None] = mapped_column(String(64))
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    observed_terminal_status: Mapped[str | None] = mapped_column(String(32))
+    resume_of_run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+
+
+class InterruptProjection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "interrupt_inbox"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(INTERRUPT_STATUSES)})",
+            name="ck_interrupt_inbox_status",
+        ),
+        CheckConstraint(
+            "response_version >= 1",
+            name="ck_interrupt_inbox_response_version",
+        ),
+        CheckConstraint(
+            "responded_at IS NULL OR response IS NOT NULL",
+            name="ck_interrupt_inbox_response_timestamp",
+        ),
+        CheckConstraint(
+            "status <> 'pending' OR (response IS NULL AND responded_at IS NULL)",
+            name="ck_interrupt_inbox_pending_empty",
+        ),
+        CheckConstraint(
+            "status NOT IN ('responding', 'resolved') OR response IS NOT NULL",
+            name="ck_interrupt_inbox_active_response",
+        ),
+        CheckConstraint(
+            "status <> 'resolved' OR responded_at IS NOT NULL",
+            name="ck_interrupt_inbox_resolved_timestamp",
+        ),
+        CheckConstraint(
+            "status <> 'expired' OR expires_at IS NOT NULL",
+            name="ck_interrupt_inbox_expired_timestamp",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "workspace_id", "owner_user_id", "task_id", "run_id"],
+            [
+                f"{PRODUCT_SCHEMA}.runs.tenant_id",
+                f"{PRODUCT_SCHEMA}.runs.workspace_id",
+                f"{PRODUCT_SCHEMA}.runs.owner_user_id",
+                f"{PRODUCT_SCHEMA}.runs.task_id",
+                f"{PRODUCT_SCHEMA}.runs.id",
+            ],
+            name="fk_interrupt_inbox_run_scope",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "official_interrupt_id",
+            "checkpoint_id",
+            "response_version",
+            name="uq_interrupt_inbox_scope_response",
+        ),
+        Index(
+            "ix_interrupt_inbox_scope_status_expiry",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+            "expires_at",
+        ),
+        Index(
+            "ix_interrupt_inbox_scope_task_status",
+            "tenant_id",
+            "workspace_id",
+            "task_id",
+            "status",
+        ),
+        Index(
+            "ix_interrupt_inbox_scope_run_status",
+            "tenant_id",
+            "workspace_id",
+            "run_id",
+            "status",
+        ),
+        Index(
+            "ix_interrupt_inbox_checkpoint_interrupt",
+            "checkpoint_id",
+            "official_interrupt_id",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    official_interrupt_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    checkpoint_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    response_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    response: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MarketSnapshot(UUIDPrimaryKeyMixin, Base):
@@ -608,8 +813,12 @@ __all__ = [
     "Artifact",
     "ArtifactVersion",
     "Decision",
+    "INTERRUPT_STATUSES",
+    "InterruptProjection",
     "MarketSnapshot",
     "Membership",
+    "OBSERVED_TERMINAL_STATUSES",
+    "REVIEW_POLICIES",
     "RUN_STATUSES",
     "Run",
     "TASK_COMMAND_STATUSES",
