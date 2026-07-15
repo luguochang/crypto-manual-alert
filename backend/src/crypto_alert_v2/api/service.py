@@ -20,12 +20,14 @@ from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
     InboxQueryStatus,
     InterruptResponseSubmission,
+    InterruptResponsesSubmission,
 )
 from crypto_alert_v2.auth.context import ActorContext
-from crypto_alert_v2.graph.request import ReviewResponse
+from crypto_alert_v2.graph.request import ArtifactReviewPayload, ReviewResponse
 from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
+    InterruptPause,
     InterruptProjection,
     Membership,
     Run,
@@ -56,6 +58,10 @@ class InterruptResponseConflictError(RuntimeError):
     pass
 
 
+class InterruptBatchRequiredError(InterruptResponseConflictError):
+    pass
+
+
 class InvalidInboxCursorError(ValueError):
     pass
 
@@ -63,17 +69,25 @@ class InvalidInboxCursorError(ValueError):
 @dataclass(frozen=True, slots=True)
 class _InboxCursor:
     created_at: datetime
-    projection_id: UUID
+    pause_id: UUID
     scope: str
     status: str
 
 
-_INBOX_CURSOR_VERSION = 2
+_INBOX_CURSOR_VERSION = 3
 _INBOX_CURSOR_MAX_LENGTH = 2048
 _INBOX_CURSOR_NONCE_LENGTH = 12
 _INBOX_CURSOR_AAD = b"crypto-alert-v2:product-inbox-cursor:v2"
 _INBOX_QUERY_STATUSES = frozenset(
-    {"active", "pending", "responding", "resolved", "expired", "all"}
+    {
+        "active",
+        "pending",
+        "responding",
+        "resolved",
+        "expired",
+        "resume_failed",
+        "all",
+    }
 )
 _INBOX_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
     "active": ("pending", "responding"),
@@ -81,6 +95,7 @@ _INBOX_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
     "responding": ("responding",),
     "resolved": ("resolved",),
     "expired": ("expired",),
+    "resume_failed": ("resume_failed",),
 }
 
 
@@ -105,7 +120,7 @@ def _encode_inbox_cursor(cursor: _InboxCursor, *, key: bytes) -> str:
     created_at = cursor.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
     payload = {
         "created_at": created_at,
-        "id": str(cursor.projection_id),
+        "id": str(cursor.pause_id),
         "scope": cursor.scope,
         "status": cursor.status,
         "v": _INBOX_CURSOR_VERSION,
@@ -175,7 +190,7 @@ def _parse_inbox_cursor(
             raise ValueError
         parsed = _InboxCursor(
             created_at=created_at.astimezone(UTC),
-            projection_id=UUID(payload["id"]),
+            pause_id=UUID(payload["id"]),
             scope=scope,
             status=status,
         )
@@ -304,6 +319,12 @@ def _public_error(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         "agent_run_timeout": "官方执行超过允许时限，当前未生成分析结果。",
         "terminal_projection_unavailable": "官方执行已结束，但暂时无法读取最终结果。",
         "terminal_projection_conflict": "终态投影发生一致性冲突，当前结果未被采用。",
+        "agent_resume_failed": (
+            "人工审核决定已保存，但官方 Agent 未能在恢复期限内继续运行。"
+        ),
+        "interrupt_member_limit_exceeded": (
+            "官方执行返回的并行审核项超过产品上限，当前任务已安全终止。"
+        ),
     }
     diagnostics: dict[str, Any] = {}
     provider = first.get("provider")
@@ -444,36 +465,80 @@ async def _task_view(
             "thread_id": official_thread_id,
             "run_id": latest_run.official_run_id,
         }
-    pending_interrupts: list[dict[str, Any]] = []
-    projections = (
-        await session.scalars(
-            select(InterruptProjection)
-            .where(
-                InterruptProjection.task_id == task.id,
-                InterruptProjection.tenant_id == resolved.tenant_id,
-                InterruptProjection.workspace_id == resolved.workspace_id,
-                InterruptProjection.owner_user_id == resolved.user_id,
-                InterruptProjection.status.in_(("pending", "responding")),
+    active_pauses = list(
+        (
+            await session.scalars(
+                select(InterruptPause)
+                .where(
+                    InterruptPause.task_id == task.id,
+                    InterruptPause.tenant_id == resolved.tenant_id,
+                    InterruptPause.workspace_id == resolved.workspace_id,
+                    InterruptPause.owner_user_id == resolved.user_id,
+                    InterruptPause.status.in_(("pending", "responding")),
+                    *(
+                        (
+                            or_(
+                                InterruptPause.run_id == selected_run_id,
+                                InterruptPause.resume_run_id == selected_run_id,
+                            ),
+                        )
+                        if selected_run_id is not None
+                        else ()
+                    ),
+                )
+                .order_by(
+                    InterruptPause.pause_version.desc(),
+                    InterruptPause.created_at.desc(),
+                    InterruptPause.id.desc(),
+                )
             )
-            .order_by(
-                InterruptProjection.created_at,
-                InterruptProjection.id,
-            )
+        ).all()
+    )
+    if len(active_pauses) > 1:
+        raise RuntimeError("Task has more than one active interrupt pause")
+    pending_interrupts = None
+    if active_pauses:
+        pause = active_pauses[0]
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection)
+                    .where(
+                        InterruptProjection.pause_id == pause.id,
+                        InterruptProjection.task_id == task.id,
+                        InterruptProjection.tenant_id == resolved.tenant_id,
+                        InterruptProjection.workspace_id == resolved.workspace_id,
+                        InterruptProjection.owner_user_id == resolved.user_id,
+                    )
+                    .order_by(
+                        InterruptProjection.created_at,
+                        InterruptProjection.id,
+                    )
+                )
+            ).all()
         )
-    ).all()
-    pending_interrupts = [
-        {
-            "task_id": str(projection.task_id),
-            "interrupt_id": projection.official_interrupt_id,
-            "response_version": projection.response_version,
-            "status": projection.status,
-            "payload": projection.payload,
-            "response": projection.response,
-            "expires_at": projection.expires_at,
-            "responded_at": projection.responded_at,
+        if not projections or any(
+            projection.status != pause.status for projection in projections
+        ):
+            raise RuntimeError("Interrupt pause projection state is inconsistent")
+        pending_interrupts = {
+            "pause_id": pause.id,
+            "pause_version": pause.pause_version,
+            "status": pause.status,
+            "expires_at": pause.expires_at,
+            "members": [
+                {
+                    "interrupt_id": projection.official_interrupt_id,
+                    "response_version": projection.response_version,
+                    "status": projection.status,
+                    "payload": projection.payload,
+                    "response": projection.response,
+                    "responded_at": projection.responded_at,
+                }
+                for projection in projections
+            ],
         }
-        for projection in projections
-    ]
+        effective_status = "waiting_human"
     request_payload = task.request_payload
     return {
         "task_id": str(task.id),
@@ -697,6 +762,18 @@ class ProductAnalysisService:
             )
             if task is None:
                 return None
+            if run_id is not None:
+                selected_run_exists = await session.scalar(
+                    select(Run.id).where(
+                        Run.id == run_id,
+                        Run.task_id == task.id,
+                        Run.tenant_id == resolved.tenant_id,
+                        Run.workspace_id == resolved.workspace_id,
+                        Run.owner_user_id == resolved.user_id,
+                    )
+                )
+                if selected_run_exists is None:
+                    return None
             return await _task_view(
                 session,
                 resolved,
@@ -830,24 +907,105 @@ class ProductAnalysisService:
             task_uuid = UUID(task_id)
         except ValueError:
             return None
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(actor, resolved)
+            task = await session.scalar(
+                select(Task)
+                .where(
+                    Task.id == task_uuid,
+                    Task.tenant_id == resolved.tenant_id,
+                    Task.workspace_id == resolved.workspace_id,
+                    Task.owner_user_id == resolved.user_id,
+                )
+            )
+            if task is None:
+                return None
+            projection = await session.scalar(
+                select(InterruptProjection)
+                .where(
+                    InterruptProjection.task_id == task.id,
+                    InterruptProjection.tenant_id == resolved.tenant_id,
+                    InterruptProjection.workspace_id == resolved.workspace_id,
+                    InterruptProjection.owner_user_id == resolved.user_id,
+                    InterruptProjection.official_interrupt_id == interrupt_id,
+                )
+                .order_by(
+                    InterruptProjection.response_version.desc(),
+                    InterruptProjection.created_at.desc(),
+                    InterruptProjection.id.desc(),
+                )
+                .limit(1)
+            )
+            if projection is None or projection.pause_id is None:
+                return None
+            member_count = len(
+                (
+                    await session.scalars(
+                        select(InterruptProjection.id)
+                        .where(
+                            InterruptProjection.pause_id == projection.pause_id,
+                            InterruptProjection.task_id == task.id,
+                        )
+                    )
+                ).all()
+            )
+            if member_count != 1:
+                raise InterruptBatchRequiredError(
+                    "This pause has multiple interrupts and requires respond-all."
+                )
+            pause_id = projection.pause_id
+            pause_version = await session.scalar(
+                select(InterruptPause.pause_version).where(
+                    InterruptPause.id == pause_id,
+                    InterruptPause.task_id == task.id,
+                )
+            )
+            if pause_version is None:
+                return None
 
-        review_response = ReviewResponse.model_validate(
+        response = ReviewResponse.model_validate(
             submission.model_dump(exclude={"response_version"})
         )
-        response = review_response.model_dump(mode="json", exclude_none=True)
-        request_identity = {
-            "task_id": str(task_uuid),
-            "interrupt_id": interrupt_id,
-            "response_version": submission.response_version,
-            "response": response,
-        }
-        request_hash = _payload_hash(request_identity)
+        batch = InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_id,
+                "pause_version": pause_version,
+                "responses": [
+                    {
+                        "interrupt_id": interrupt_id,
+                        "response_version": submission.response_version,
+                        "response": response,
+                    }
+                ],
+            }
+        )
+        return await self.respond_interrupts(
+            actor,
+            task_id,
+            batch,
+            idempotency_key,
+        )
+
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: InterruptResponsesSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        try:
+            task_uuid = UUID(task_id)
+        except ValueError:
+            return None
+
         command_idempotency_key = (
-            "respond:"
+            "respond-all:"
             + sha256(
-                f"{task_uuid}:{interrupt_id}:{idempotency_key}".encode()
+                f"{task_uuid}:{submission.pause_id}:{idempotency_key}".encode()
             ).hexdigest()
         )
+        submitted = {item.interrupt_id: item for item in submission.responses}
 
         async with self._session_factory() as session, session.begin():
             resolved = await resolve_actor(session, actor)
@@ -879,6 +1037,84 @@ class ProductAnalysisService:
                     )
                 ).all()
             )
+            pause = await session.scalar(
+                select(InterruptPause)
+                .where(
+                    InterruptPause.id == submission.pause_id,
+                    InterruptPause.task_id == task.id,
+                    InterruptPause.tenant_id == resolved.tenant_id,
+                    InterruptPause.workspace_id == resolved.workspace_id,
+                    InterruptPause.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if pause is None:
+                return None
+            projections = list(
+                (
+                    await session.scalars(
+                        select(InterruptProjection)
+                        .where(
+                            InterruptProjection.pause_id == pause.id,
+                            InterruptProjection.task_id == task.id,
+                            InterruptProjection.tenant_id == resolved.tenant_id,
+                            InterruptProjection.workspace_id == resolved.workspace_id,
+                            InterruptProjection.owner_user_id == resolved.user_id,
+                        )
+                        .order_by(InterruptProjection.id)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if not projections:
+                raise InterruptResponseConflictError(
+                    "Interrupt pause has no registered members."
+                )
+            expected_ids = {item.official_interrupt_id for item in projections}
+            if set(submitted) != expected_ids:
+                raise InterruptResponseConflictError(
+                    "Interrupt responses must exactly match the active pause members."
+                )
+            if pause.pause_version != submission.pause_version:
+                raise InterruptResponseConflictError("Interrupt pause version is stale.")
+
+            canonical_responses: list[dict[str, Any]] = []
+            for projection in sorted(
+                projections,
+                key=lambda item: item.official_interrupt_id,
+            ):
+                item = submitted[projection.official_interrupt_id]
+                if projection.response_version != item.response_version:
+                    raise InterruptResponseConflictError(
+                        "Interrupt response_version is stale."
+                    )
+                response = ReviewResponse.model_validate(item.response).model_dump(
+                    mode="json",
+                    exclude_none=True,
+                )
+                canonical_responses.append(
+                    {
+                        "projection_id": str(projection.id),
+                        "interrupt_id": projection.official_interrupt_id,
+                        "namespace": projection.namespace,
+                        "checkpoint_id": projection.checkpoint_id,
+                        "response_version": projection.response_version,
+                        "response": response,
+                    }
+                )
+            request_identity = {
+                "task_id": str(task.id),
+                "pause_id": str(pause.id),
+                "pause_version": pause.pause_version,
+                "root_checkpoint": {
+                    "thread_id": pause.root_thread_id,
+                    "checkpoint_ns": pause.root_checkpoint_ns,
+                    "checkpoint_id": pause.root_checkpoint_id,
+                    "checkpoint_map": pause.root_checkpoint_map,
+                },
+                "responses": canonical_responses,
+            }
+            request_hash = _payload_hash(request_identity)
             replay = next(
                 (
                     command
@@ -895,8 +1131,19 @@ class ProductAnalysisService:
                     )
                 return await _task_view(session, resolved, task)
 
-            waiting_run = await session.scalar(
+            parent_run = await session.scalar(
                 select(Run)
+                .where(
+                    Run.id == pause.run_id,
+                    Run.task_id == task.id,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            latest_waiting_run_id = await session.scalar(
+                select(Run.id)
                 .where(
                     Run.task_id == task.id,
                     Run.tenant_id == resolved.tenant_id,
@@ -904,63 +1151,31 @@ class ProductAnalysisService:
                     Run.owner_user_id == resolved.user_id,
                     Run.status == "waiting_human",
                 )
-                .order_by(Run.attempt.desc())
+                .order_by(Run.attempt.desc(), Run.id.desc())
                 .limit(1)
                 .with_for_update()
             )
-            if waiting_run is None or task.status != "waiting_human":
-                raise InterruptResponseConflictError(
-                    "Task is not waiting for this interrupt."
-                )
-
-            projections = list(
-                (
-                    await session.scalars(
-                        select(InterruptProjection)
-                        .where(
-                            InterruptProjection.task_id == task.id,
-                            InterruptProjection.tenant_id == resolved.tenant_id,
-                            InterruptProjection.workspace_id == resolved.workspace_id,
-                            InterruptProjection.owner_user_id == resolved.user_id,
-                            InterruptProjection.official_interrupt_id == interrupt_id,
-                        )
-                        .order_by(
-                            InterruptProjection.response_version.desc(),
-                            InterruptProjection.created_at.desc(),
-                            InterruptProjection.id.desc(),
-                        )
-                        .with_for_update()
-                    )
-                ).all()
-            )
-            if not projections:
-                return None
-            projection = next(
-                (
-                    candidate
-                    for candidate in projections
-                    if candidate.run_id == waiting_run.id
-                ),
-                None,
-            )
-            if projection is None:
+            if (
+                parent_run is None
+                or parent_run.status != "waiting_human"
+                or parent_run.id != latest_waiting_run_id
+                or task.status != "waiting_human"
+            ):
                 raise InterruptResponseConflictError(
                     "Interrupt is stale for the latest waiting run."
                 )
-            if projection.response_version != submission.response_version:
-                raise InterruptResponseConflictError(
-                    "Interrupt response_version is stale."
-                )
             now = datetime.now(UTC)
-            if projection.status == "expired" or (
-                projection.status == "pending"
-                and projection.expires_at is not None
-                and projection.expires_at <= now
+            if pause.status == "expired" or (
+                pause.status == "pending"
+                and pause.expires_at is not None
+                and pause.expires_at <= now
             ):
                 raise InterruptResponseConflictError(
                     "Interrupt response window has expired."
                 )
-            if projection.status != "pending":
+            if pause.status != "pending" or any(
+                projection.status != "pending" for projection in projections
+            ):
                 raise InterruptResponseConflictError(
                     "Interrupt has already been responded to."
                 )
@@ -972,23 +1187,31 @@ class ProductAnalysisService:
                 owner_user_id=resolved.user_id,
                 thread_id=task.thread_id,
                 task_id=task.id,
-                attempt=waiting_run.attempt + 1,
+                attempt=parent_run.attempt + 1,
                 status="queued",
-                input_payload=waiting_run.input_payload,
-                resume_of_run_id=waiting_run.id,
+                input_payload=parent_run.input_payload,
+                resume_of_run_id=parent_run.id,
             )
             command_payload = {
-                "projection_id": str(projection.id),
-                "interrupt_id": projection.official_interrupt_id,
-                "checkpoint_id": projection.checkpoint_id,
-                "response_version": projection.response_version,
-                "response": response,
+                "pause_id": str(pause.id),
+                "pause_version": pause.pause_version,
+                "root_checkpoint": request_identity["root_checkpoint"],
+                "responses": canonical_responses,
                 "expired": False,
             }
-            projection.status = "responding"
-            projection.response = response
-            projection.responded_at = now
             session.add(resume_run)
+            await session.flush()
+            pause.status = "responding"
+            pause.resume_run_id = resume_run.id
+            pause.accepted_payload_hash = request_hash
+            for projection, canonical in zip(
+                sorted(projections, key=lambda item: item.official_interrupt_id),
+                canonical_responses,
+                strict=True,
+            ):
+                projection.status = "responding"
+                projection.response = canonical["response"]
+                projection.responded_at = now
             session.add(
                 TaskCommand(
                     id=uuid4(),
@@ -1092,20 +1315,20 @@ class ProductAnalysisService:
                 else None
             )
             statement = (
-                select(InterruptProjection, Task)
+                select(InterruptPause, Task)
                 .join(
                     Task,
                     and_(
-                        InterruptProjection.task_id == Task.id,
-                        InterruptProjection.tenant_id == Task.tenant_id,
-                        InterruptProjection.workspace_id == Task.workspace_id,
-                        InterruptProjection.owner_user_id == Task.owner_user_id,
+                        InterruptPause.task_id == Task.id,
+                        InterruptPause.tenant_id == Task.tenant_id,
+                        InterruptPause.workspace_id == Task.workspace_id,
+                        InterruptPause.owner_user_id == Task.owner_user_id,
                     ),
                 )
                 .where(
-                    InterruptProjection.tenant_id == resolved.tenant_id,
-                    InterruptProjection.workspace_id == resolved.workspace_id,
-                    InterruptProjection.owner_user_id == resolved.user_id,
+                    InterruptPause.tenant_id == resolved.tenant_id,
+                    InterruptPause.workspace_id == resolved.workspace_id,
+                    InterruptPause.owner_user_id == resolved.user_id,
                     Task.tenant_id == resolved.tenant_id,
                     Task.workspace_id == resolved.workspace_id,
                     Task.owner_user_id == resolved.user_id,
@@ -1113,57 +1336,114 @@ class ProductAnalysisService:
             )
             status_filter = _INBOX_STATUS_FILTERS.get(status)
             if status_filter is not None:
-                statement = statement.where(
-                    InterruptProjection.status.in_(status_filter)
-                )
+                statement = statement.where(InterruptPause.status.in_(status_filter))
             if parsed_cursor is not None:
                 statement = statement.where(
                     or_(
-                        InterruptProjection.created_at < parsed_cursor.created_at,
+                        InterruptPause.created_at < parsed_cursor.created_at,
                         and_(
-                            InterruptProjection.created_at
-                            == parsed_cursor.created_at,
-                            InterruptProjection.id < parsed_cursor.projection_id,
+                            InterruptPause.created_at == parsed_cursor.created_at,
+                            InterruptPause.id < parsed_cursor.pause_id,
                         ),
                     )
                 )
             rows = (
                 await session.execute(
                     statement.order_by(
-                        InterruptProjection.created_at.desc(),
-                        InterruptProjection.id.desc(),
+                        InterruptPause.created_at.desc(),
+                        InterruptPause.id.desc(),
                     ).limit(limit + 1)
                 )
             ).all()
             page = rows[:limit]
             next_cursor = None
             if len(rows) > limit:
-                last_projection = page[-1][0]
+                last_pause = page[-1][0]
                 next_cursor = _encode_inbox_cursor(
                     _InboxCursor(
-                        created_at=last_projection.created_at,
-                        projection_id=last_projection.id,
+                        created_at=last_pause.created_at,
+                        pause_id=last_pause.id,
                         scope=scope,
                         status=status,
                     ),
                     key=self._inbox_cursor_key,
                 )
-            return {
-                "items": [
+            pause_ids = [pause.id for pause, _ in page]
+            projections_by_pause: dict[UUID, list[InterruptProjection]] = {
+                pause_id: [] for pause_id in pause_ids
+            }
+            if pause_ids:
+                projections = list(
+                    (
+                        await session.scalars(
+                            select(InterruptProjection)
+                            .where(
+                                InterruptProjection.pause_id.in_(pause_ids),
+                                InterruptProjection.tenant_id == resolved.tenant_id,
+                                InterruptProjection.workspace_id
+                                == resolved.workspace_id,
+                                InterruptProjection.owner_user_id == resolved.user_id,
+                            )
+                            .order_by(
+                                InterruptProjection.created_at,
+                                InterruptProjection.id,
+                            )
+                        )
+                    ).all()
+                )
+                for projection in projections:
+                    projections_by_pause[projection.pause_id].append(projection)
+
+            items = []
+            for pause, task in page:
+                members = projections_by_pause[pause.id]
+                if not members or len(members) > 64:
+                    raise RuntimeError("Interrupt pause has an invalid member count")
+                expected_member_statuses = {
+                    "pending": {"pending"},
+                    "responding": {"responding"},
+                    "resolved": {"resolved"},
+                    "expired": {"expired"},
+                    "resume_failed": {"responding", "expired"},
+                    "cancelled": {"cancelled"},
+                }[pause.status]
+                if any(
+                    member.status not in expected_member_statuses for member in members
+                ):
+                    raise RuntimeError("Interrupt pause projection state is inconsistent")
+                payloads = [
+                    ArtifactReviewPayload.model_validate(member.payload)
+                    for member in members
+                ]
+                symbol = task.request_payload["symbol"]
+                horizon = task.request_payload["horizon"]
+                if any(
+                    payload.artifact.analysis.instrument != symbol
+                    or payload.artifact.analysis.horizon != horizon
+                    for payload in payloads
+                ):
+                    raise RuntimeError("Interrupt pause review scope is inconsistent")
+                response_times = [member.responded_at for member in members]
+                responded_at = (
+                    max(item for item in response_times if item is not None)
+                    if all(item is not None for item in response_times)
+                    else None
+                )
+                items.append(
                     {
-                        "task_id": str(projection.task_id),
-                        "status": projection.status,
-                        "payload": projection.payload,
-                        "response": projection.response,
-                        "expires_at": projection.expires_at,
-                        "responded_at": projection.responded_at,
-                        "created_at": projection.created_at,
-                        "updated_at": projection.updated_at,
-                        "symbol": task.request_payload["symbol"],
-                        "horizon": task.request_payload["horizon"],
+                        "task_id": str(pause.task_id),
+                        "pause_id": pause.id,
+                        "pause_version": pause.pause_version,
+                        "status": pause.status,
+                        "member_count": len(members),
+                        "payload": payloads[0].model_dump(mode="json"),
+                        "expires_at": pause.expires_at,
+                        "responded_at": responded_at,
+                        "created_at": pause.created_at,
+                        "updated_at": pause.updated_at,
+                        "symbol": symbol,
+                        "horizon": horizon,
                         "query_text": task.request_payload.get("query_text"),
                     }
-                    for projection, task in page
-                ],
-                "next_cursor": next_cursor,
-            }
+                )
+            return {"items": items, "next_cursor": next_cursor}

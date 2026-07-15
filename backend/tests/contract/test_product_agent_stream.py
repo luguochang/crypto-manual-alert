@@ -131,6 +131,8 @@ class ScalarSession:
     async def scalars(self, statement: object) -> SimpleNamespace:
         self.scalar_statements.append(statement)
         sql = str(statement)
+        if "FROM app.interrupt_pauses" in sql:
+            return SimpleNamespace(all=lambda: [])
         if "FROM app.web_evidence" in sql:
             return SimpleNamespace(all=lambda: [])
         if "FROM app.interrupt_inbox" in sql:

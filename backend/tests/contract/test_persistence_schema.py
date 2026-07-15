@@ -31,7 +31,9 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    INTERRUPT_PAUSE_STATUSES,
     INTERRUPT_STATUSES,
+    InterruptPause,
     InterruptProjection,
     MarketSnapshot,
     Membership,
@@ -48,7 +50,8 @@ from crypto_alert_v2.persistence.models import (
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
-    PendingInterruptView,
+    PendingInterruptMemberView,
+    PendingInterruptPauseView,
     TaskView,
 )
 from crypto_alert_v2.domain.models import (
@@ -85,7 +88,7 @@ INITIAL_TABLES = {
     "decisions",
     "task_commands",
 }
-EXPECTED_TABLES = INITIAL_TABLES | {"interrupt_inbox"}
+EXPECTED_TABLES = INITIAL_TABLES | {"interrupt_inbox", "interrupt_pauses"}
 
 TABLE_MODELS = (
     Tenant,
@@ -101,6 +104,7 @@ TABLE_MODELS = (
     ArtifactVersion,
     Decision,
     TaskCommand,
+    InterruptPause,
     InterruptProjection,
 )
 
@@ -121,6 +125,7 @@ EXPECTED_JSONB_COLUMNS = {
     ("task_commands", "payload"),
     ("interrupt_inbox", "payload"),
     ("interrupt_inbox", "response"),
+    ("interrupt_pauses", "root_checkpoint_map"),
 }
 
 RUN_STATUSES = {
@@ -410,6 +415,148 @@ def test_interrupt_projection_has_formal_state_scope_and_query_contracts() -> No
     assert ("checkpoint_id", "official_interrupt_id") in indexes
 
 
+def test_interrupt_pause_is_the_scope_safe_multi_interrupt_aggregate() -> None:
+    table = InterruptPause.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+    active_index = next(
+        index
+        for index in table.indexes
+        if index.name == "uq_interrupt_pauses_one_active_task"
+    )
+
+    assert {
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+        "pause_version",
+        "root_thread_id",
+        "root_checkpoint_ns",
+        "root_checkpoint_id",
+        "root_checkpoint_map",
+        "member_set_hash",
+        "status",
+        "expires_at",
+        "resume_run_id",
+        "accepted_payload_hash",
+        "created_at",
+        "updated_at",
+    } <= set(table.c.keys())
+    assert table.c.pause_version.default.arg == 1
+    assert str(table.c.pause_version.server_default.arg) == "1"
+    assert table.c.status.default.arg == "pending"
+    assert str(table.c.status.server_default.arg) == "'pending'"
+    assert isinstance(table.c.root_checkpoint_ns.type, Text)
+    assert isinstance(table.c.root_checkpoint_map.type, JSONB)
+    assert table.c.resume_run_id.nullable is True
+    assert table.c.accepted_payload_hash.nullable is True
+    assert active_index.unique is True
+    assert tuple(column.name for column in active_index.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+    )
+    assert str(active_index.dialect_options["postgresql"]["where"]) == (
+        "status IN ('pending', 'responding')"
+    )
+
+    assert frozenset({"run_id", "pause_version"}) in _unique_column_sets(
+        "interrupt_pauses"
+    )
+    assert frozenset(
+        {"run_id", "root_checkpoint_ns", "root_checkpoint_id"}
+    ) in _unique_column_sets("interrupt_pauses")
+    assert frozenset({"resume_run_id"}) in _unique_column_sets("interrupt_pauses")
+    assert frozenset(
+        {
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "task_id",
+            "run_id",
+            "id",
+        }
+    ) in _unique_column_sets("interrupt_pauses")
+
+    run_scope = constraints["fk_interrupt_pauses_run_scope"]
+    assert isinstance(run_scope, ForeignKeyConstraint)
+    assert tuple(column.name for column in run_scope.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+    )
+    assert tuple(element.target_fullname for element in run_scope.elements) == (
+        "app.runs.tenant_id",
+        "app.runs.workspace_id",
+        "app.runs.owner_user_id",
+        "app.runs.task_id",
+        "app.runs.id",
+    )
+
+    resume_scope = constraints["fk_interrupt_pauses_resume_scope"]
+    assert isinstance(resume_scope, ForeignKeyConstraint)
+    assert tuple(column.name for column in resume_scope.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "resume_run_id",
+    )
+    assert tuple(element.target_fullname for element in resume_scope.elements) == (
+        "app.runs.tenant_id",
+        "app.runs.workspace_id",
+        "app.runs.owner_user_id",
+        "app.runs.task_id",
+        "app.runs.id",
+    )
+
+    status_constraint = constraints["ck_interrupt_pauses_status"]
+    assert isinstance(status_constraint, CheckConstraint)
+    status_sql = str(status_constraint.sqltext)
+    assert {
+        value for value in INTERRUPT_PAUSE_STATUSES if f"'{value}'" in status_sql
+    } == set(INTERRUPT_PAUSE_STATUSES)
+
+
+def test_interrupt_projection_membership_is_optional_unique_and_bidirectional() -> None:
+    table = InterruptProjection.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    assert table.c.pause_id.nullable is False
+    assert frozenset({"pause_id", "official_interrupt_id"}) in _unique_column_sets(
+        "interrupt_inbox"
+    )
+
+    pause_scope = constraints["fk_interrupt_inbox_pause_scope"]
+    assert isinstance(pause_scope, ForeignKeyConstraint)
+    assert tuple(column.name for column in pause_scope.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+        "pause_id",
+    )
+    assert tuple(element.target_fullname for element in pause_scope.elements) == (
+        "app.interrupt_pauses.tenant_id",
+        "app.interrupt_pauses.workspace_id",
+        "app.interrupt_pauses.owner_user_id",
+        "app.interrupt_pauses.task_id",
+        "app.interrupt_pauses.run_id",
+        "app.interrupt_pauses.id",
+    )
+    assert pause_scope.ondelete == "CASCADE"
+
+    assert InterruptPause.projections.property.back_populates == "pause"
+    assert InterruptPause.projections.property.uselist is True
+    assert InterruptProjection.pause.property.back_populates == "projections"
+    assert InterruptProjection.pause.property.uselist is False
+
+
 def test_task_view_exposes_only_typed_pending_interrupts() -> None:
     now = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
     payload = ArtifactReviewPayload(
@@ -424,12 +571,17 @@ def test_task_view_exposes_only_typed_pending_interrupts() -> None:
         ),
     ).model_dump(mode="json")
     interrupt = {
-        "task_id": "task-1",
         "interrupt_id": "interrupt-1",
         "response_version": 1,
         "status": "pending",
         "payload": payload,
+    }
+    pause = {
+        "pause_id": "11111111-1111-4111-8111-111111111111",
+        "pause_version": 1,
+        "status": "pending",
         "expires_at": now,
+        "members": [interrupt],
     }
     view = TaskView.model_validate(
         {
@@ -439,16 +591,16 @@ def test_task_view_exposes_only_typed_pending_interrupts() -> None:
             "horizon": "4h",
             "query_text": "Review this analysis.",
             "created_at": now,
-            "pending_interrupts": [interrupt],
+            "pending_interrupts": pause,
         }
     )
 
-    assert view.pending_interrupts == [PendingInterruptView.model_validate(interrupt)]
+    assert view.pending_interrupts == PendingInterruptPauseView.model_validate(pause)
     serialized = view.model_dump(mode="json")
     for internal_field in ("run_id", "namespace", "checkpoint_id"):
-        assert internal_field not in serialized["pending_interrupts"][0]
+        assert internal_field not in serialized["pending_interrupts"]["members"][0]
         with pytest.raises(ValidationError):
-            PendingInterruptView.model_validate(
+            PendingInterruptMemberView.model_validate(
                 {**interrupt, internal_field: "must-not-leak"}
             )
     assert TaskView.model_validate(
@@ -459,11 +611,13 @@ def test_task_view_exposes_only_typed_pending_interrupts() -> None:
             "horizon": "4h",
             "created_at": now,
         }
-    ).pending_interrupts == []
+    ).pending_interrupts is None
     with pytest.raises(ValidationError):
-        PendingInterruptView.model_validate({**interrupt, "status": "resolved"})
+        PendingInterruptMemberView.model_validate({**interrupt, "status": "resolved"})
     with pytest.raises(ValidationError):
-        PendingInterruptView.model_validate({**interrupt, "response_version": 0})
+        PendingInterruptMemberView.model_validate(
+            {**interrupt, "response_version": 0}
+        )
 
 
 def test_workspace_access_paths_have_composite_indexes() -> None:

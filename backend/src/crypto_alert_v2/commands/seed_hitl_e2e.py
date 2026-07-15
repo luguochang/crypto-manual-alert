@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import ipaddress
 import json
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -14,11 +14,16 @@ from langgraph_sdk import get_client
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from crypto_alert_v2.api.agent_server import AgentServerRunner, RemoteRunHandle
+from crypto_alert_v2.api.agent_server import (
+    AgentServerRunner,
+    RemoteInterruptSet,
+    RemoteRunHandle,
+)
 from crypto_alert_v2.api.service import ProductAnalysisService
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.config import Settings, get_settings
 from crypto_alert_v2.persistence.models import (
+    InterruptPause,
     InterruptProjection,
     Run,
     Task,
@@ -30,6 +35,16 @@ from crypto_alert_v2.persistence.models import (
 
 
 ASSISTANT_ID = "crypto_analysis"
+MULTI_INTERRUPT_ASSISTANT_ID = "multi_interrupt_fixture"
+FixtureKind = Literal["canonical", "multi_interrupt"]
+FIXTURE_ASSISTANTS: dict[FixtureKind, str] = {
+    "canonical": ASSISTANT_ID,
+    "multi_interrupt": MULTI_INTERRUPT_ASSISTANT_ID,
+}
+FIXTURE_INTERRUPT_COUNTS: dict[FixtureKind, int] = {
+    "canonical": 1,
+    "multi_interrupt": 2,
+}
 FIXTURE_ACTOR = ActorContext(
     tenant_id="dev-tenant",
     workspace_id="dev-workspace",
@@ -114,6 +129,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--count", type=int, default=1, choices=range(1, 11))
     parser.add_argument("--label-prefix", default="browser")
     parser.add_argument("--ttl-seconds", type=int, default=1800)
+    parser.add_argument(
+        "--fixture",
+        choices=tuple(FIXTURE_ASSISTANTS),
+        default="canonical",
+    )
     return parser
 
 
@@ -143,6 +163,32 @@ def _authorization(settings: Settings) -> str:
 
 def _request_hash() -> str:
     canonical = json.dumps(REQUEST, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _interrupt_member_set_hash(interrupt_set: RemoteInterruptSet) -> str:
+    root_checkpoint = interrupt_set.checkpoint
+    members = [
+        {
+            "interrupt_id": item.interrupt_id,
+            "namespace": item.namespace,
+            "checkpoint_id": item.checkpoint_id,
+        }
+        for item in sorted(interrupt_set.interrupts, key=lambda item: item.interrupt_id)
+    ]
+    canonical = json.dumps(
+        {
+            "root_checkpoint": {
+                "thread_id": root_checkpoint.thread_id,
+                "checkpoint_ns": root_checkpoint.checkpoint_ns,
+                "checkpoint_id": root_checkpoint.checkpoint_id,
+                "checkpoint_map": root_checkpoint.checkpoint_map,
+            },
+            "members": members,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -182,7 +228,8 @@ async def _seed_one(
     authorization: str,
     label: str,
     ttl_seconds: int,
-) -> dict[str, str]:
+    fixture: FixtureKind,
+) -> dict[str, Any]:
     tenant_id, workspace_id, user_id = actor_ids
     thread_id = uuid4()
     task_id = uuid4()
@@ -195,24 +242,31 @@ async def _seed_one(
         "task_id": str(task_id),
         "product_run_id": str(product_run_id),
         "fixture": label,
+        "fixture_kind": fixture,
     }
+    assistant_id = FIXTURE_ASSISTANTS[fixture]
     await client.threads.create(
         thread_id=str(thread_id),
-        graph_id=ASSISTANT_ID,
+        graph_id=assistant_id,
         metadata=metadata,
         headers=headers,
     )
     try:
-        await client.threads.update_state(
-            str(thread_id),
-            GRAPH_STATE,
-            as_node="build_artifact",
-            headers=headers,
-        )
+        initial_input: dict[str, Any] | None
+        if fixture == "canonical":
+            await client.threads.update_state(
+                str(thread_id),
+                GRAPH_STATE,
+                as_node="build_artifact",
+                headers=headers,
+            )
+            initial_input = None
+        else:
+            initial_input = {"completion_count": 0}
         raw_run = await client.runs.create(
             str(thread_id),
-            ASSISTANT_ID,
-            input=None,
+            assistant_id,
+            input=initial_input,
             durability="sync",
             metadata=metadata,
             headers=headers,
@@ -239,13 +293,17 @@ async def _seed_one(
                 "official fixture did not reach a canonical interrupt "
                 f"(raw={raw_status}, normalized={normalized_status})"
             )
-        interrupts = await runner.get_interrupts(handle)
-        if len(interrupts) != 1:
+        interrupt_set = await runner.get_interrupts(handle)
+        expected_interrupt_count = FIXTURE_INTERRUPT_COUNTS[fixture]
+        if len(interrupt_set) != expected_interrupt_count:
             raise RuntimeError(
-                f"expected one canonical official interrupt, got {len(interrupts)}"
+                f"expected {expected_interrupt_count} {fixture} official "
+                f"interrupt(s), got {len(interrupt_set)}"
             )
-        remote_interrupt = interrupts[0]
+        root_checkpoint = interrupt_set.checkpoint
         now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        pause_id = uuid4()
         async with session_factory() as session, session.begin():
             session.add(
                 Thread(
@@ -287,7 +345,7 @@ async def _seed_one(
                     status="waiting_human",
                     official_assistant_id=handle.assistant_id,
                     official_run_id=handle.run_id,
-                    checkpoint_id=remote_interrupt.checkpoint_id,
+                    checkpoint_id=root_checkpoint.checkpoint_id,
                     input_payload=REQUEST,
                     output_payload=None,
                     failure_code=None,
@@ -305,25 +363,51 @@ async def _seed_one(
             )
             await session.flush()
             session.add(
-                InterruptProjection(
-                    id=uuid4(),
+                InterruptPause(
+                    id=pause_id,
                     tenant_id=tenant_id,
                     workspace_id=workspace_id,
                     owner_user_id=user_id,
                     task_id=task_id,
                     run_id=product_run_id,
-                    official_interrupt_id=remote_interrupt.interrupt_id,
-                    namespace=remote_interrupt.namespace,
-                    checkpoint_id=remote_interrupt.checkpoint_id,
-                    response_version=1,
+                    pause_version=1,
+                    root_thread_id=root_checkpoint.thread_id,
+                    root_checkpoint_ns=root_checkpoint.checkpoint_ns,
+                    root_checkpoint_id=root_checkpoint.checkpoint_id,
+                    root_checkpoint_map=root_checkpoint.checkpoint_map,
+                    member_set_hash=_interrupt_member_set_hash(interrupt_set),
                     status="pending",
-                    payload=remote_interrupt.value,
-                    expires_at=now + timedelta(seconds=ttl_seconds),
-                    responded_at=None,
+                    expires_at=expires_at,
                 )
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    InterruptProjection(
+                        id=uuid4(),
+                        tenant_id=tenant_id,
+                        workspace_id=workspace_id,
+                        owner_user_id=user_id,
+                        task_id=task_id,
+                        run_id=product_run_id,
+                        pause_id=pause_id,
+                        official_interrupt_id=remote_interrupt.interrupt_id,
+                        namespace=remote_interrupt.namespace,
+                        checkpoint_id=remote_interrupt.checkpoint_id,
+                        response_version=1,
+                        status="pending",
+                        payload=remote_interrupt.value,
+                        expires_at=expires_at,
+                        responded_at=None,
+                    )
+                    for remote_interrupt in interrupt_set.interrupts
+                ]
             )
         return {
             "label": label,
+            "fixture": fixture,
+            "assistant_id": assistant_id,
+            "member_count": len(interrupt_set),
             "task_id": str(task_id),
             "official_raw_status": raw_status,
             "normalized_status": normalized_status,
@@ -343,7 +427,11 @@ async def _run(args: argparse.Namespace) -> None:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     service = ProductAnalysisService(session_factory=session_factory)
     client = get_client(url=settings.agent_server_url)
-    runner = AgentServerRunner(client=client, assistant_id=ASSISTANT_ID)
+    fixture = cast(FixtureKind, args.fixture)
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id=FIXTURE_ASSISTANTS[fixture],
+    )
     try:
         await service.bootstrap_actor(FIXTURE_ACTOR)
         actor_ids = await _resolved_actor_ids(session_factory)
@@ -358,6 +446,7 @@ async def _run(args: argparse.Namespace) -> None:
                     authorization=authorization,
                     label=f"{args.label_prefix}-{index + 1}",
                     ttl_seconds=args.ttl_seconds,
+                    fixture=fixture,
                 )
             )
         print(json.dumps(results, sort_keys=True))

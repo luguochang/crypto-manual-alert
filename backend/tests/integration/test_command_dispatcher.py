@@ -19,13 +19,17 @@ from sqlalchemy.ext.asyncio import (
 
 from crypto_alert_v2.api.agent_server import (
     RemoteCancelResult,
+    RemoteCheckpoint,
     RemoteInterrupt,
+    RemoteInterruptSet,
+    RemoteResumeIndeterminateError,
     RemoteRunHandle,
     RemoteRunState,
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
     InterruptResponseSubmission,
+    InterruptResponsesSubmission,
     TerminalGraphOutput,
 )
 from crypto_alert_v2.api.service import ProductAnalysisService, TaskNotCancellableError
@@ -36,6 +40,7 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    InterruptPause,
     InterruptProjection,
     MarketSnapshot,
     Membership,
@@ -140,23 +145,34 @@ class InspectingRunner:
     async def get_interrupts(
         self,
         handle: RemoteRunHandle,
-    ) -> tuple[RemoteInterrupt, ...]:
+    ) -> RemoteInterruptSet:
         self.events.append("get_interrupts")
-        return (
-            RemoteInterrupt(
-                interrupt_id=f"interrupt-{handle.run_id}",
-                namespace="",
-                checkpoint_id=f"checkpoint-{handle.run_id}",
-                value={
-                    "kind": "artifact_review",
-                    "schema_version": "1.0",
-                    "allowed_actions": ["approve", "reject", "edit"],
-                    "review_iteration": 2 if handle.run_id.startswith("resumed-") else 1,
-                    "artifact": {
-                        **successful_terminal_output()["artifact"],
-                        "status": "draft",
+        checkpoint_id = f"checkpoint-{handle.run_id}"
+        return RemoteInterruptSet(
+            checkpoint=RemoteCheckpoint(
+                thread_id=handle.thread_id,
+                checkpoint_ns="",
+                checkpoint_id=checkpoint_id,
+                checkpoint_map={},
+            ),
+            interrupts=(
+                RemoteInterrupt(
+                    interrupt_id=f"interrupt-{handle.run_id}",
+                    namespace="",
+                    checkpoint_id=checkpoint_id,
+                    value={
+                        "kind": "artifact_review",
+                        "schema_version": "1.0",
+                        "allowed_actions": ["approve", "reject", "edit"],
+                        "review_iteration": (
+                            2 if handle.run_id.startswith("resumed-") else 1
+                        ),
+                        "artifact": {
+                            **successful_terminal_output()["artifact"],
+                            "status": "draft",
+                        },
                     },
-                },
+                ),
             ),
         )
 
@@ -236,10 +252,127 @@ class SuccessfulJoinRunner(InspectingRunner):
 class ReviewAwareRunner(SuccessfulJoinRunner):
     async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
         output = await super().join(handle)
-        response = self.resume_requests[-1]["response"] if self.resume_requests else None
+        responses = (
+            self.resume_requests[-1]["responses"] if self.resume_requests else None
+        )
+        response = (
+            next(iter(responses.values())) if isinstance(responses, dict) else None
+        )
         if isinstance(response, dict) and response.get("action") == "reject":
             return blocked_terminal_output()
         return output
+
+
+class MultiInterruptRunner(SuccessfulJoinRunner):
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> RemoteInterruptSet:
+        single = await super().get_interrupts(handle)
+        root = single.interrupts[0]
+        return RemoteInterruptSet(
+            checkpoint=single.checkpoint,
+            interrupts=(
+                root,
+                RemoteInterrupt(
+                    interrupt_id=f"nested-{handle.run_id}",
+                    namespace="research:child",
+                    checkpoint_id=f"nested-checkpoint-{handle.run_id}",
+                    value=deepcopy(root.value),
+                ),
+            ),
+        )
+
+
+class MultiReviewAwareRunner(MultiInterruptRunner):
+    async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
+        output = await super().join(handle)
+        responses = (
+            self.resume_requests[-1]["responses"] if self.resume_requests else None
+        )
+        if isinstance(responses, dict) and any(
+            isinstance(response, dict) and response.get("action") == "reject"
+            for response in responses.values()
+        ):
+            return blocked_terminal_output()
+        return output
+
+
+class FailingResumeMultiRunner(MultiReviewAwareRunner):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory)
+        self.fail_resume = True
+
+    async def resume(self, **kwargs: object) -> RemoteRunHandle:
+        if self.fail_resume:
+            self.events.append("resume")
+            self.resume_requests.append(dict(kwargs))
+            raise ConnectionError("resume temporarily unavailable")
+        return await super().resume(**kwargs)
+
+
+class IndeterminateResumeMultiRunner(MultiReviewAwareRunner):
+    async def resume(self, **kwargs: object) -> RemoteRunHandle:
+        self.events.append("resume")
+        self.resume_requests.append(dict(kwargs))
+        raise RemoteResumeIndeterminateError("resume acceptance is unknown")
+
+
+class ReconcileOnlyResumeMultiRunner(MultiReviewAwareRunner):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        visible_after: int,
+    ) -> None:
+        super().__init__(session_factory)
+        self.visible_after = visible_after
+        self.find_calls = 0
+
+    async def resume(self, **kwargs: object) -> RemoteRunHandle:
+        self.resume_requests.append(dict(kwargs))
+        raise AssertionError("durable indeterminate intent must never create again")
+
+    async def find(self, **kwargs: object) -> RemoteRunHandle | None:
+        self.events.append("find")
+        self.find_calls += 1
+        if self.find_calls < self.visible_after:
+            return None
+        return RemoteRunHandle(
+            assistant_id="official-assistant",
+            thread_id=str(kwargs["product_thread_id"]),
+            run_id=f"resumed-{kwargs['product_run_id']}",
+        )
+
+
+class TerminalResumeCancelRunner(MultiInterruptRunner):
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancelled.append(handle)
+        return RemoteCancelResult(
+            outcome="terminal",
+            state=RemoteRunState(status="success"),
+        )
+
+
+class OverLimitInterruptRunner(SuccessfulJoinRunner):
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> RemoteInterruptSet:
+        single = await super().get_interrupts(handle)
+        root = single.interrupts[0]
+        return RemoteInterruptSet(
+            checkpoint=single.checkpoint,
+            interrupts=tuple(
+                RemoteInterrupt(
+                    interrupt_id=f"interrupt-{index:02d}-{handle.run_id}",
+                    namespace=f"review:{index}",
+                    checkpoint_id=f"checkpoint-{index:02d}-{handle.run_id}",
+                    value=deepcopy(root.value),
+                )
+                for index in range(65)
+            ),
+        )
 
 
 class TerminalCancelRaceRunner(SuccessfulJoinRunner):
@@ -335,6 +468,16 @@ class CancelFailureRunner(InspectingRunner):
         return await super().cancel(handle)
 
 
+class SourceCancelFailureRunner(InspectingRunner):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory)
+        self.cancel_attempts: list[RemoteRunHandle] = []
+
+    async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
+        self.cancel_attempts.append(handle)
+        raise ConnectionError("source Run cancellation permanently unavailable")
+
+
 def actor() -> ActorContext:
     return ActorContext(
         tenant_id="dispatcher-tenant",
@@ -370,85 +513,37 @@ async def queue_review_response(
     task_id: UUID,
     response: dict[str, object],
 ) -> tuple[UUID, UUID]:
-    async with session_factory() as session, session.begin():
-        task = await session.scalar(
-            select(Task).where(Task.id == task_id).with_for_update()
-        )
-        assert task is not None
-        assert task.status == "waiting_human"
-        commands = list(
-            (
-                await session.scalars(
-                    select(TaskCommand)
-                    .where(TaskCommand.task_id == task_id)
-                    .order_by(TaskCommand.sequence)
-                    .with_for_update()
-                )
-            ).all()
-        )
-        parent_run = await session.scalar(
-            select(Run)
-            .where(Run.task_id == task_id)
-            .order_by(Run.attempt.desc())
-            .limit(1)
-            .with_for_update()
-        )
-        assert parent_run is not None
-        assert parent_run.status == "waiting_human"
+    async with session_factory() as session:
         projection = await session.scalar(
-            select(InterruptProjection)
-            .where(
+            select(InterruptProjection).where(
                 InterruptProjection.task_id == task_id,
                 InterruptProjection.status == "pending",
             )
-            .with_for_update()
         )
         assert projection is not None
-        projection.status = "responding"
-        projection.response = response
-        projection.responded_at = datetime.now(UTC)
-        resumed_run_id = uuid4()
-        session.add(
-            Run(
-                id=resumed_run_id,
-                tenant_id=task.tenant_id,
-                workspace_id=task.workspace_id,
-                owner_user_id=task.owner_user_id,
-                thread_id=task.thread_id,
-                task_id=task.id,
-                attempt=parent_run.attempt + 1,
-                status="queued",
-                input_payload=task.request_payload,
-                resume_of_run_id=parent_run.id,
+        projection_id = projection.id
+        interrupt_id = projection.official_interrupt_id
+        response_version = projection.response_version
+    service = ProductAnalysisService(session_factory=session_factory)
+    accepted = await service.respond_interrupt(
+        actor(),
+        str(task_id),
+        interrupt_id,
+        InterruptResponseSubmission.model_validate(
+            {"response_version": response_version, **response}
+        ),
+        f"respond:{projection_id}",
+    )
+    assert accepted is not None
+    async with session_factory() as session:
+        resumed_run_id = await session.scalar(
+            select(Run.id).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
             )
         )
-        command_payload = {
-            "projection_id": str(projection.id),
-            "interrupt_id": projection.official_interrupt_id,
-            "checkpoint_id": projection.checkpoint_id,
-            "response_version": projection.response_version,
-            "response": response,
-            "expired": False,
-        }
-        session.add(
-            TaskCommand(
-                id=uuid4(),
-                tenant_id=task.tenant_id,
-                workspace_id=task.workspace_id,
-                actor_user_id=task.owner_user_id,
-                task_id=task.id,
-                thread_id=task.thread_id,
-                command_type="respond",
-                payload=command_payload,
-                payload_hash="e" * 64,
-                sequence=max(command.sequence for command in commands) + 1,
-                status="pending",
-                attempt=0,
-                idempotency_key=f"respond:{projection.id}",
-            )
-        )
-        await session.flush()
-        return resumed_run_id, projection.id
+    assert resumed_run_id is not None
+    return resumed_run_id, projection_id
 
 
 def successful_terminal_output() -> dict[str, object]:
@@ -502,7 +597,9 @@ async def persisted_output_counts(
         return {
             model.__tablename__: int(
                 await session.scalar(
-                    select(func.count()).select_from(model).where(model.task_id == task_id)
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.task_id == task_id)
                 )
                 or 0
             )
@@ -741,7 +838,9 @@ async def test_terminal_join_replay_does_not_duplicate_persisted_output(
     assert await persisted_output_counts(session_factory, task_id) == expected_counts
 
     async with session_factory() as session, session.begin():
-        task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
         command = await session.scalar(
             select(TaskCommand)
             .where(TaskCommand.task_id == task_id, TaskCommand.command_type == "submit")
@@ -819,7 +918,9 @@ async def test_conflicting_terminal_replay_is_failed_without_duplicate_output(
     task_id = UUID(str(queued["task_id"]))
     expected_counts = await persisted_output_counts(session_factory, task_id)
     async with session_factory() as session, session.begin():
-        task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
         command = await session.scalar(
             select(TaskCommand)
             .where(TaskCommand.task_id == task_id, TaskCommand.command_type == "submit")
@@ -898,7 +999,9 @@ async def test_higher_command_sequence_fences_stale_terminal_projection(
 
     task_id = UUID(str(queued["task_id"]))
     async with session_factory() as session, session.begin():
-        task = await session.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
         stale_command = await session.scalar(
             select(TaskCommand)
             .where(TaskCommand.id == stale_submit_lease.command_id)
@@ -1121,9 +1224,7 @@ async def test_required_review_resumes_official_run_and_projects_approval(
         )
         assert task is not None
         workspace = await session.scalar(
-            select(Workspace)
-            .where(Workspace.id == task.workspace_id)
-            .with_for_update()
+            select(Workspace).where(Workspace.id == task.workspace_id).with_for_update()
         )
         assert workspace is not None
         workspace.review_policy = "required"
@@ -1160,9 +1261,7 @@ async def test_required_review_resumes_official_run_and_projects_approval(
             )
         )
         projection_id = await session.scalar(
-            select(InterruptProjection.id).where(
-                InterruptProjection.task_id == task_id
-            )
+            select(InterruptProjection.id).where(InterruptProjection.task_id == task_id)
         )
     assert resumed_run_id is not None
     assert projection_id is not None
@@ -1181,10 +1280,14 @@ async def test_required_review_resumes_official_run_and_projects_approval(
         "get",
         "join",
     ]
-    assert runner.resume_requests[0]["checkpoint_id"] == "checkpoint-official-run"
-    assert runner.resume_requests[0]["response"] == {
-        "action": "approve",
-        "comment": "Evidence and risk are acceptable.",
+    checkpoint = runner.resume_requests[0]["checkpoint"]
+    assert isinstance(checkpoint, RemoteCheckpoint)
+    assert checkpoint.checkpoint_id == "checkpoint-official-run"
+    assert runner.resume_requests[0]["responses"] == {
+        "interrupt-official-run": {
+            "action": "approve",
+            "comment": "Evidence and risk are acceptable.",
+        }
     }
     async with session_factory() as session:
         resumed_run = await session.get(Run, resumed_run_id)
@@ -1195,6 +1298,1155 @@ async def test_required_review_resumes_official_run_and_projects_approval(
     assert resumed_run.resume_of_run_id is not None
     assert projection is not None
     assert projection.status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_multi_interrupt_pause_resumes_once_and_resolves_atomically(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="multi-interrupt-dispatch",
+    )
+    runner = MultiInterruptRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="multi-interrupt-worker",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    assert pause_view["status"] == "pending"
+    assert len(pause_view["members"]) == 2
+    assert {member["interrupt_id"] for member in pause_view["members"]} == {
+        "interrupt-official-run",
+        "nested-official-run",
+    }
+    assert all(
+        "namespace" not in member and "checkpoint_id" not in member
+        for member in pause_view["members"]
+    )
+
+    submission = InterruptResponsesSubmission.model_validate(
+        {
+            "pause_id": pause_view["pause_id"],
+            "pause_version": pause_view["pause_version"],
+            "responses": [
+                {
+                    "interrupt_id": member["interrupt_id"],
+                    "response_version": member["response_version"],
+                    "response": {"action": "approve"},
+                }
+                for member in pause_view["members"]
+            ],
+        }
+    )
+    accepted = await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        submission,
+        "multi-interrupt-approve",
+    )
+    assert accepted is not None
+    assert accepted["pending_interrupts"]["status"] == "responding"
+
+    resume_lease = await dispatcher.claim_next()
+    assert resume_lease is not None
+    assert resume_lease.command_type == "respond"
+    resuming = await service.get_task(actor(), str(task_id))
+    assert resuming is not None
+    assert resuming["status"] == "waiting_human"
+    assert resuming["pending_interrupts"]["status"] == "responding"
+
+    runner.remote_status = "success"
+    assert await dispatcher.execute(resume_lease) is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert completed["pending_interrupts"] is None
+
+    assert runner.events.count("resume") == 1
+    assert len(runner.resume_requests) == 1
+    assert set(runner.resume_requests[0]["responses"]) == {
+        "interrupt-official-run",
+        "nested-official-run",
+    }
+    checkpoint = runner.resume_requests[0]["checkpoint"]
+    assert isinstance(checkpoint, RemoteCheckpoint)
+    assert checkpoint.checkpoint_ns == ""
+    assert checkpoint.checkpoint_id == "checkpoint-official-run"
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        resume_run_count = await session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(Run.task_id == task_id, Run.resume_of_run_id.is_not(None))
+        )
+        respond_command_count = await session.scalar(
+            select(func.count())
+            .select_from(TaskCommand)
+            .where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert pause is not None
+    assert pause.status == "resolved"
+    assert {projection.status for projection in projections} == {"resolved"}
+    assert resume_run_count == 1
+    assert respond_command_count == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupt_set_over_public_limit_fails_before_pause_persistence(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="interrupt-set-over-public-limit",
+    )
+    runner = OverLimitInterruptRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="interrupt-set-over-public-limit-worker",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["pending_interrupts"] is None
+    assert failed["errors"][0]["code"] == "interrupt_member_limit_exceeded"
+    async with session_factory() as session:
+        pause_count = await session.scalar(
+            select(func.count())
+            .select_from(InterruptPause)
+            .where(InterruptPause.task_id == task_id)
+        )
+        projection_count = await session.scalar(
+            select(func.count())
+            .select_from(InterruptProjection)
+            .where(InterruptProjection.task_id == task_id)
+        )
+        product_run = await session.scalar(select(Run).where(Run.task_id == task_id))
+        command = await session.scalar(
+            select(TaskCommand).where(TaskCommand.task_id == task_id)
+        )
+    assert pause_count == 0
+    assert projection_count == 0
+    assert product_run is not None
+    assert product_run.status == "failed"
+    assert product_run.failure_code == "interrupt_member_limit_exceeded"
+    assert product_run.finished_at is not None
+    assert command is not None
+    assert command.status == "dispatched"
+    assert command.lease_owner is None
+    assert command.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_multi_interrupt_pause_expires_and_resumes_as_one_batch(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="multi-interrupt-expiry",
+    )
+    clock = MutableClock()
+    runner = MultiReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="multi-interrupt-expiry-worker",
+        clock=clock,
+        interrupt_ttl_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert pause is not None
+    assert pause.status == "expired"
+    assert len(projections) == 2
+    assert {projection.status for projection in projections} == {"expired"}
+    assert command is not None
+    assert command.payload["expired"] is True
+    assert len(command.payload["responses"]) == 2
+
+    runner.remote_status = "success"
+    assert await dispatcher.dispatch_once() is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "blocked"
+    assert len(runner.resume_requests) == 1
+    assert set(runner.resume_requests[0]["responses"]) == {
+        "interrupt-official-run",
+        "nested-official-run",
+    }
+    assert {
+        response["action"]
+        for response in runner.resume_requests[0]["responses"].values()
+    } == {"reject"}
+
+
+@pytest.mark.asyncio
+async def test_expired_multi_resume_failure_retries_same_automatic_rejection(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="expired-multi-resume-retry",
+    )
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    runner = FailingResumeMultiRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="expired-multi-resume-retry-worker",
+        clock=clock,
+        max_attempts=1,
+        reconciliation_interval_seconds=1,
+        interrupt_ttl_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    async with session_factory() as session:
+        original_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert original_command is not None
+    original_payload = deepcopy(original_command.payload)
+    original_hash = original_command.payload_hash
+
+    assert await dispatcher.dispatch_once() is False
+    assert await dispatcher.claim_next() is None
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+        resumed_run = await session.scalar(
+            select(Run).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+    assert pause is not None
+    assert pause.status == "expired"
+    assert {projection.status for projection in projections} == {"expired"}
+    assert command is not None
+    assert command.status == "pending"
+    assert command.attempt == 1
+    assert command.lease_owner is None
+    assert command.lease_expires_at is not None
+    assert command.lease_expires_at > clock.now
+    assert command.payload == original_payload
+    assert command.payload_hash == original_hash
+    assert resumed_run is not None
+    assert resumed_run.status == "queued"
+
+    runner.fail_resume = False
+    runner.remote_status = "success"
+    clock.now += timedelta(seconds=2)
+    assert await dispatcher.dispatch_once() is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "blocked"
+    assert len(runner.resume_requests) == 2
+    assert (
+        runner.resume_requests[0]["responses"] == runner.resume_requests[1]["responses"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_multi_resume_failure_exhausts_bounded_retry_budget(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="expired-multi-resume-exhaustion",
+    )
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    runner = FailingResumeMultiRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="expired-multi-resume-exhaustion-worker",
+        clock=clock,
+        max_attempts=1,
+        max_cancel_attempts=2,
+        reconciliation_interval_seconds=1,
+        interrupt_ttl_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    assert await dispatcher.dispatch_once() is False
+    assert await dispatcher.claim_next() is None
+
+    clock.now += timedelta(seconds=2)
+    assert await dispatcher.dispatch_once() is False
+
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["pending_interrupts"] is None
+    assert failed["errors"][0]["code"] == "agent_resume_failed"
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        resumed_run = await session.scalar(
+            select(Run).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert pause is not None
+    assert pause.status == "resume_failed"
+    assert {projection.status for projection in projections} == {"expired"}
+    assert resumed_run is not None
+    assert resumed_run.status == "failed"
+    assert resumed_run.failure_code == "agent_resume_failed"
+    assert command is not None
+    assert command.status == "failed"
+    assert command.attempt == 2
+    assert command.lease_owner is None
+    assert command.lease_expires_at is None
+    assert len(runner.resume_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_multi_resume_retries_same_command_without_reopening_decisions(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="multi-interrupt-resume-retry",
+    )
+    runner = FailingResumeMultiRunner(session_factory)
+    runner.remote_status = "interrupted"
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="multi-interrupt-resume-retry-worker",
+        clock=clock,
+        max_attempts=2,
+        reconciliation_interval_seconds=1,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    accepted = await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_view["pause_id"],
+                "pause_version": pause_view["pause_version"],
+                "responses": [
+                    {
+                        "interrupt_id": member["interrupt_id"],
+                        "response_version": member["response_version"],
+                        "response": {"action": "approve"},
+                    }
+                    for member in pause_view["members"]
+                ],
+            }
+        ),
+        "multi-interrupt-resume-retry-response",
+    )
+    assert accepted is not None
+
+    assert await dispatcher.dispatch_once() is False
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                )
+            ).all()
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == task_id,
+                        TaskCommand.command_type == "respond",
+                    )
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert pause.status == "responding"
+    assert {projection.status for projection in projections} == {"responding"}
+    assert len(runs) == 2
+    assert len(commands) == 1
+    assert commands[0].status == "pending"
+    assert runs[1].status == "queued"
+
+    runner.fail_resume = False
+    runner.remote_status = "success"
+    clock.now += timedelta(seconds=2)
+    assert await dispatcher.dispatch_once() is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert runner.events.count("resume") == 2
+    async with session_factory() as session:
+        run_count = await session.scalar(
+            select(func.count()).select_from(Run).where(Run.task_id == task_id)
+        )
+        command_count = await session.scalar(
+            select(func.count())
+            .select_from(TaskCommand)
+            .where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert run_count == 2
+    assert command_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_create_intent_survives_worker_restart_without_second_create(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="resume-create-intent-restart",
+    )
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    first_runner = IndeterminateResumeMultiRunner(session_factory)
+    first_runner.remote_status = "interrupted"
+    first_dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=first_runner,
+        worker_id="resume-create-intent-first-worker",
+        clock=clock,
+        reconciliation_interval_seconds=1,
+        max_run_seconds=30,
+    )
+    assert await first_dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_view["pause_id"],
+                "pause_version": pause_view["pause_version"],
+                "responses": [
+                    {
+                        "interrupt_id": member["interrupt_id"],
+                        "response_version": member["response_version"],
+                        "response": {"action": "approve"},
+                    }
+                    for member in pause_view["members"]
+                ],
+            }
+        ),
+        "resume-create-intent-restart-response",
+    )
+
+    assert await first_dispatcher.dispatch_once() is False
+    assert len(first_runner.resume_requests) == 1
+    async with session_factory() as session:
+        resume_run = await session.scalar(
+            select(Run).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+    assert resume_run is not None
+    assert resume_run.failure_code == "agent_resume_indeterminate"
+    assert resume_run.official_run_id is None
+
+    replacement_runner = ReconcileOnlyResumeMultiRunner(
+        session_factory,
+        visible_after=2,
+    )
+    replacement_runner.remote_status = "success"
+    replacement_dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=replacement_runner,
+        worker_id="resume-create-intent-replacement-worker",
+        clock=clock,
+        reconciliation_interval_seconds=1,
+        max_run_seconds=30,
+    )
+    clock.now += timedelta(seconds=2)
+    assert await replacement_dispatcher.dispatch_once() is False
+    clock.now += timedelta(seconds=2)
+    assert await replacement_dispatcher.dispatch_once() is True
+
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert replacement_runner.resume_requests == []
+    assert replacement_runner.find_calls == 2
+    async with session_factory() as session:
+        resume_run = await session.scalar(
+            select(Run).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == task_id,
+                        TaskCommand.command_type == "respond",
+                    )
+                )
+            ).all()
+        )
+    assert resume_run is not None
+    assert resume_run.official_run_id == f"resumed-{resume_run.id}"
+    assert resume_run.failure_code is None
+    assert len(commands) == 1
+    assert commands[0].official_run_id == resume_run.official_run_id
+
+
+@pytest.mark.asyncio
+async def test_user_resume_permanent_failure_closes_accepted_batch_atomically(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="multi-interrupt-resume-exhaustion",
+    )
+    clock = MutableClock()
+    clock.now = datetime.now(UTC)
+    runner = FailingResumeMultiRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="multi-interrupt-resume-exhaustion-worker",
+        clock=clock,
+        max_attempts=2,
+        reconciliation_interval_seconds=1,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    responses = [
+        {
+            "interrupt_id": member["interrupt_id"],
+            "response_version": member["response_version"],
+            "response": {"action": "approve", "comment": "Accepted decision"},
+        }
+        for member in pause_view["members"]
+    ]
+    accepted = await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_view["pause_id"],
+                "pause_version": pause_view["pause_version"],
+                "responses": responses,
+            }
+        ),
+        "multi-interrupt-resume-exhaustion-response",
+    )
+    assert accepted is not None
+
+    assert await dispatcher.dispatch_once() is False
+    clock.now += timedelta(seconds=2)
+    assert await dispatcher.dispatch_once() is False
+
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["pending_interrupts"] is None
+    assert failed["errors"][0]["code"] == "agent_resume_failed"
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                )
+            ).all()
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == task_id,
+                        TaskCommand.command_type == "respond",
+                    )
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert pause.status == "resume_failed"
+    assert {projection.status for projection in projections} == {"responding"}
+    assert {projection.response["action"] for projection in projections} == {"approve"}
+    assert all(projection.responded_at is not None for projection in projections)
+    assert len(runs) == 2
+    assert runs[1].status == "failed"
+    assert runs[1].failure_code == "agent_resume_failed"
+    assert runs[1].finished_at is not None
+    assert len(commands) == 1
+    assert commands[0].status == "failed"
+    assert commands[0].attempt == 2
+    assert commands[0].lease_owner is None
+    assert commands[0].lease_expires_at is None
+    assert len(runner.resume_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelling_multi_interrupt_pause_removes_every_active_member(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="multi-interrupt-cancel",
+    )
+    runner = MultiInterruptRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="multi-interrupt-cancel-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+
+    cancelled = await service.cancel_task(
+        actor(),
+        str(task_id),
+        "cancel-multi-interrupt-pause",
+    )
+    assert cancelled is not None
+    assert await dispatcher.dispatch_once() is True
+
+    task_view = await service.get_task(actor(), str(task_id))
+    assert task_view is not None
+    assert task_view["status"] == "cancelled"
+    assert task_view["pending_interrupts"] is None
+    inbox = await service.list_inbox(
+        actor(),
+        status="active",
+        limit=50,
+        cursor=None,
+    )
+    assert all(item["task_id"] != str(task_id) for item in inbox["items"])
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        resume_run_count = await session.scalar(
+            select(func.count())
+            .select_from(Run)
+            .where(Run.task_id == task_id, Run.resume_of_run_id.is_not(None))
+        )
+    assert pause is not None
+    assert pause.status == "cancelled"
+    assert {projection.status for projection in projections} == {"cancelled"}
+    assert resume_run_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_accepted_response_targets_source_official_run(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="cancel-accepted-response-before-resume",
+    )
+    runner = MultiInterruptRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="cancel-accepted-response-before-resume-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    accepted = await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_view["pause_id"],
+                "pause_version": pause_view["pause_version"],
+                "responses": [
+                    {
+                        "interrupt_id": member["interrupt_id"],
+                        "response_version": member["response_version"],
+                        "response": {"action": "approve"},
+                    }
+                    for member in pause_view["members"]
+                ],
+            }
+        ),
+        "cancel-accepted-response-batch",
+    )
+    assert accepted is not None
+    requested = await service.cancel_task(
+        actor(),
+        str(task_id),
+        "cancel-before-official-resume-created",
+    )
+    assert requested is not None
+
+    assert await dispatcher.dispatch_once() is True
+    cancelled = await service.get_task(actor(), str(task_id))
+    assert cancelled is not None
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["pending_interrupts"] is None
+    assert runner.resume_requests == []
+    assert runner.cancelled == [
+        RemoteRunHandle(
+            assistant_id="official-assistant",
+            thread_id="official-thread",
+            run_id="official-run",
+        )
+    ]
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+        resume_runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(
+                        Run.task_id == task_id,
+                        Run.resume_of_run_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand)
+                    .where(TaskCommand.task_id == task_id)
+                    .order_by(TaskCommand.sequence)
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert pause.status == "cancelled"
+    assert {projection.status for projection in projections} == {"cancelled"}
+    assert len(resume_runs) == 1
+    assert resume_runs[0].status == "cancelled"
+    assert [
+        command.status for command in commands if command.command_type == "respond"
+    ] == ["cancelled"]
+    assert [
+        command.status for command in commands if command.command_type == "cancel_task"
+    ] == ["dispatched"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_winner_resolves_responding_interrupt_lineage(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="cancel-terminal-wins-responding-pause",
+    )
+    runner = TerminalResumeCancelRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="cancel-terminal-wins-responding-pause-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    pause_view = waiting["pending_interrupts"]
+    assert pause_view is not None
+    accepted = await service.respond_interrupts(
+        actor(),
+        str(task_id),
+        InterruptResponsesSubmission.model_validate(
+            {
+                "pause_id": pause_view["pause_id"],
+                "pause_version": pause_view["pause_version"],
+                "responses": [
+                    {
+                        "interrupt_id": member["interrupt_id"],
+                        "response_version": member["response_version"],
+                        "response": {"action": "approve"},
+                    }
+                    for member in pause_view["members"]
+                ],
+            }
+        ),
+        "cancel-terminal-wins-response",
+    )
+    assert accepted is not None
+    await service.cancel_task(
+        actor(),
+        str(task_id),
+        "cancel-terminal-wins-request",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert completed["pending_interrupts"] is None
+    assert runner.resume_requests == []
+    assert runner.cancelled == [
+        RemoteRunHandle(
+            assistant_id="official-assistant",
+            thread_id="official-thread",
+            run_id="official-run",
+        )
+    ]
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert pause.status == "resolved"
+    assert {projection.status for projection in projections} == {"resolved"}
+    assert {projection.response["action"] for projection in projections} == {"approve"}
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_winner_cancels_unanswered_interrupt_lineage(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="cancel-terminal-wins-pending-pause",
+    )
+    runner = TerminalResumeCancelRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="cancel-terminal-wins-pending-pause-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    waiting = await service.get_task(actor(), str(task_id))
+    assert waiting is not None
+    assert waiting["pending_interrupts"] is not None
+
+    await service.cancel_task(
+        actor(),
+        str(task_id),
+        "cancel-terminal-wins-pending-request",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert completed["pending_interrupts"] is None
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert pause.status == "cancelled"
+    assert {projection.status for projection in projections} == {"cancelled"}
+    assert {projection.response for projection in projections} == {None}
+
+
+@pytest.mark.asyncio
+async def test_permanent_cancel_failure_closes_responding_interrupt_lineage(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key="cancel-failure-responding-pause",
+    )
+    runner = SourceCancelFailureRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="cancel-failure-responding-pause-worker",
+        max_cancel_attempts=1,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    await queue_review_response(
+        session_factory,
+        task_id,
+        {"action": "approve", "comment": "Keep this accepted response"},
+    )
+    await service.cancel_task(
+        actor(),
+        str(task_id),
+        "cancel-failure-after-response",
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    failed = await service.get_task(actor(), str(task_id))
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["pending_interrupts"] is None
+    assert failed["errors"][0]["code"] == "agent_cancel_failed"
+    assert runner.cancel_attempts == [
+        RemoteRunHandle(
+            assistant_id="official-assistant",
+            thread_id="official-thread",
+            run_id="official-run",
+        )
+    ]
+    async with session_factory() as session:
+        pause = await session.scalar(
+            select(InterruptPause).where(InterruptPause.task_id == task_id)
+        )
+        projection = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.task_id == task_id)
+        )
+        resumed_run = await session.scalar(
+            select(Run).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+    assert pause is not None
+    assert pause.status == "cancelled"
+    assert projection is not None
+    assert projection.status == "cancelled"
+    assert projection.response == {
+        "action": "approve",
+        "comment": "Keep this accepted response",
+    }
+    assert projection.responded_at is not None
+    assert resumed_run is not None
+    assert resumed_run.status == "failed"
+    assert resumed_run.failure_code == "agent_cancel_failed"
 
 
 @pytest.mark.asyncio
@@ -1235,8 +2487,9 @@ async def test_review_edit_resumes_then_projects_a_new_interrupt(
         projections = list(
             (
                 await session.scalars(
-                    select(InterruptProjection)
-                    .where(InterruptProjection.task_id == task_id)
+                    select(InterruptProjection).where(
+                        InterruptProjection.task_id == task_id
+                    )
                 )
             ).all()
         )
@@ -1284,9 +2537,7 @@ async def test_expired_review_creates_durable_rejection_and_finishes_blocked(
     assert await dispatcher.dispatch_once() is True
     async with session_factory() as session:
         projection = await session.scalar(
-            select(InterruptProjection).where(
-                InterruptProjection.task_id == task_id
-            )
+            select(InterruptProjection).where(InterruptProjection.task_id == task_id)
         )
         respond_command = await session.scalar(
             select(TaskCommand).where(
@@ -1309,7 +2560,9 @@ async def test_expired_review_creates_durable_rejection_and_finishes_blocked(
     assert view is not None
     assert view["status"] == "blocked"
     assert view["artifact"]["status"] == "draft"
-    assert runner.resume_requests[0]["response"] == projection.response
+    assert runner.resume_requests[0]["responses"] == {
+        projection.official_interrupt_id: projection.response
+    }
     async with session_factory() as session:
         persisted_projection = await session.get(InterruptProjection, projection.id)
     assert persisted_projection is not None
@@ -1370,9 +2623,7 @@ async def test_admitted_review_response_survives_write_permission_revocation(
             .limit(1)
         )
         projection = await session.scalar(
-            select(InterruptProjection).where(
-                InterruptProjection.task_id == task_id
-            )
+            select(InterruptProjection).where(InterruptProjection.task_id == task_id)
         )
         respond_command = await session.scalar(
             select(TaskCommand).where(
@@ -1434,9 +2685,7 @@ async def test_expiry_rejection_survives_membership_deactivation(
     async with session_factory() as session:
         task = await session.get(Task, task_id)
         projection = await session.scalar(
-            select(InterruptProjection).where(
-                InterruptProjection.task_id == task_id
-            )
+            select(InterruptProjection).where(InterruptProjection.task_id == task_id)
         )
         respond_command = await session.scalar(
             select(TaskCommand).where(
@@ -1610,9 +2859,7 @@ async def test_queued_task_cancel_is_durable_without_creating_remote_run(
         runs = list(
             (
                 await session.scalars(
-                    select(Run).where(
-                        Run.task_id == UUID(str(queued["task_id"]))
-                    )
+                    select(Run).where(Run.task_id == UUID(str(queued["task_id"])))
                 )
             ).all()
         )
@@ -1620,9 +2867,7 @@ async def test_queued_task_cancel_is_durable_without_creating_remote_run(
             (
                 await session.scalars(
                     select(TaskCommand)
-                    .where(
-                        TaskCommand.task_id == UUID(str(queued["task_id"]))
-                    )
+                    .where(TaskCommand.task_id == UUID(str(queued["task_id"])))
                     .order_by(TaskCommand.sequence)
                 )
             ).all()
@@ -1925,7 +3170,9 @@ async def test_remote_registration_and_product_cancel_share_one_lock_order() -> 
     original_locked_command = dispatcher._locked_command
     pause_once = True
 
-    async def pause_after_locking_command(*args: object, **kwargs: object) -> TaskCommand | None:
+    async def pause_after_locking_command(
+        *args: object, **kwargs: object
+    ) -> TaskCommand | None:
         nonlocal pause_once
         command = await original_locked_command(*args, **kwargs)  # type: ignore[arg-type]
         if pause_once:
@@ -1991,7 +3238,9 @@ async def test_remote_registration_and_product_cancel_share_one_lock_order() -> 
                 break
             if cancellation.done():
                 await cancellation
-                pytest.fail("Product cancellation completed before observing its lock wait")
+                pytest.fail(
+                    "Product cancellation completed before observing its lock wait"
+                )
             await asyncio.sleep(0.02)
         assert blocking_pair is not None
         assert blocking_pair[0] != blocking_pair[1]

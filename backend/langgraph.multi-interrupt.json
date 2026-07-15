@@ -1,0 +1,25 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "source": {
+    "kind": "uv",
+    "root": "."
+  },
+  "dockerfile_lines": [
+    "ENV UV_NO_DEFAULT_GROUPS=1"
+  ],
+  "graphs": {
+    "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph",
+    "multi_interrupt_fixture": "./src/crypto_alert_v2/testing/multi_interrupt_fixture.py:graph"
+  },
+  "auth": {
+    "path": "./src/crypto_alert_v2/auth/agent_server.py:auth",
+    "disable_studio_auth": true
+  },
+  "http": {
+    "app": "./src/crypto_alert_v2/http/app.py:app",
+    "enable_custom_route_auth": true
+  },
+  "api_version": "0.11.0",
+  "env": ".env",
+  "python_version": "3.12"
+}

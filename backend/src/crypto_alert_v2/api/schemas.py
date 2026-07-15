@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
@@ -48,17 +49,46 @@ class AgentStreamBindingView(BaseModel):
     run_id: StrictStr = Field(min_length=1, max_length=255)
 
 
-class PendingInterruptView(BaseModel):
+class PendingInterruptMemberView(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    task_id: StrictStr = Field(min_length=1, max_length=255)
     interrupt_id: StrictStr = Field(min_length=1, max_length=255)
     response_version: int = Field(ge=1)
     status: Literal["pending", "responding"]
     payload: ArtifactReviewPayload
     response: ReviewResponse | None = None
-    expires_at: datetime | None = None
     responded_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_coherent_response_state(self) -> "PendingInterruptMemberView":
+        if self.status == "pending" and (
+            self.response is not None or self.responded_at is not None
+        ):
+            raise ValueError("pending interrupt cannot contain an accepted response")
+        if self.status == "responding" and (
+            self.response is None or self.responded_at is None
+        ):
+            raise ValueError("responding interrupt requires its accepted response")
+        return self
+
+
+class PendingInterruptPauseView(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    pause_id: UUID
+    pause_version: int = Field(ge=1)
+    status: Literal["pending", "responding"]
+    expires_at: datetime | None = None
+    members: list[PendingInterruptMemberView] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def require_atomic_member_state(self) -> "PendingInterruptPauseView":
+        if any(member.status != self.status for member in self.members):
+            raise ValueError("interrupt pause members must share the aggregate status")
+        interrupt_ids = [member.interrupt_id for member in self.members]
+        if len(interrupt_ids) != len(set(interrupt_ids)):
+            raise ValueError("interrupt pause members must be unique")
+        return self
 
 
 InboxQueryStatus = Literal[
@@ -67,6 +97,7 @@ InboxQueryStatus = Literal[
     "responding",
     "resolved",
     "expired",
+    "resume_failed",
     "all",
 ]
 
@@ -75,9 +106,18 @@ class InboxItemView(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     task_id: StrictStr = Field(min_length=1, max_length=255)
-    status: Literal["pending", "responding", "resolved", "expired", "cancelled"]
+    pause_id: UUID
+    pause_version: int = Field(ge=1)
+    status: Literal[
+        "pending",
+        "responding",
+        "resolved",
+        "expired",
+        "resume_failed",
+        "cancelled",
+    ]
+    member_count: int = Field(ge=1, le=64)
     payload: ArtifactReviewPayload
-    response: ReviewResponse | None = None
     expires_at: datetime | None = None
     responded_at: datetime | None = None
     created_at: datetime
@@ -88,16 +128,12 @@ class InboxItemView(BaseModel):
 
     @model_validator(mode="after")
     def require_coherent_response_state(self) -> "InboxItemView":
-        if self.responded_at is not None and self.response is None:
-            raise ValueError("responded inbox item requires its accepted response")
-        if self.status == "pending" and (
-            self.response is not None or self.responded_at is not None
+        if self.status == "pending" and self.responded_at is not None:
+            raise ValueError("pending inbox item cannot have a response timestamp")
+        if self.status in {"responding", "resolved", "resume_failed"} and (
+            self.responded_at is None
         ):
-            raise ValueError("pending inbox item cannot contain a response")
-        if self.status in {"responding", "resolved"} and self.response is None:
-            raise ValueError(f"{self.status} inbox item requires an accepted response")
-        if self.status == "resolved" and self.responded_at is None:
-            raise ValueError("resolved inbox item requires a response timestamp")
+            raise ValueError(f"{self.status} inbox item requires a response timestamp")
         if self.status == "expired" and self.expires_at is None:
             raise ValueError("expired inbox item requires an expiry timestamp")
         if self.payload.artifact.analysis.instrument != self.symbol:
@@ -116,6 +152,32 @@ class InboxView(BaseModel):
 
 class InterruptResponseSubmission(ReviewResponse):
     response_version: int = Field(ge=1)
+
+
+class InterruptResponseItemSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    interrupt_id: StrictStr = Field(min_length=1, max_length=255)
+    response_version: int = Field(ge=1)
+    response: ReviewResponse
+
+
+class InterruptResponsesSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    pause_id: UUID
+    pause_version: int = Field(ge=1)
+    responses: list[InterruptResponseItemSubmission] = Field(
+        min_length=1,
+        max_length=64,
+    )
+
+    @model_validator(mode="after")
+    def require_unique_interrupts(self) -> "InterruptResponsesSubmission":
+        interrupt_ids = [item.interrupt_id for item in self.responses]
+        if len(interrupt_ids) != len(set(interrupt_ids)):
+            raise ValueError("interrupt responses must contain unique interrupt IDs")
+        return self
 
 
 class TaskView(BaseModel):
@@ -140,7 +202,7 @@ class TaskView(BaseModel):
     artifact: Artifact | None = None
     errors: list[ProductErrorView] = Field(default_factory=list)
     agent_stream: AgentStreamBindingView | None = None
-    pending_interrupts: list[PendingInterruptView] = Field(default_factory=list)
+    pending_interrupts: PendingInterruptPauseView | None = None
 
 
 class RunSummaryView(BaseModel):

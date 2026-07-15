@@ -25,6 +25,9 @@ from crypto_alert_v2.graph.request import ArtifactReviewPayload
 from tests.fixtures.golden_cases import valid_market_analysis
 
 
+PAUSE_ID = "33333333-3333-4333-8333-333333333333"
+
+
 def _review_payload() -> dict[str, Any]:
     artifact = Artifact(
         content_version=1,
@@ -138,9 +141,11 @@ class FakeProductService:
             "items": [
                 {
                     "task_id": "22222222-2222-4222-8222-222222222222",
+                    "pause_id": PAUSE_ID,
+                    "pause_version": 1,
                     "status": "responding",
+                    "member_count": 2,
                     "payload": _review_payload(),
-                    "response": {"action": "approve"},
                     "expires_at": datetime(2026, 7, 13, 0, 10, tzinfo=UTC),
                     "responded_at": datetime(2026, 7, 13, 0, 2, tzinfo=UTC),
                     "created_at": datetime(2026, 7, 13, tzinfo=UTC),
@@ -200,9 +205,13 @@ class FakeProductService:
             "completed_at": None,
             "artifact": None,
             "errors": [],
-            "pending_interrupts": [
-                {
-                    "task_id": task_id,
+            "pending_interrupts": {
+                "pause_id": PAUSE_ID,
+                "pause_version": 1,
+                "status": "responding",
+                "expires_at": datetime(2026, 7, 13, 0, 10, tzinfo=UTC),
+                "members": [
+                    {
                     "interrupt_id": interrupt_id,
                     "response_version": submission.response_version,
                     "status": "responding",
@@ -213,8 +222,55 @@ class FakeProductService:
                         exclude_none=True,
                     ),
                     "responded_at": datetime(2026, 7, 13, 0, 1, tzinfo=UTC),
-                }
-            ],
+                    }
+                ],
+            },
+        }
+
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.responded_task_id = task_id
+        self.responded_interrupt_id = None
+        self.interrupt_submission = submission
+        self.interrupt_idempotency_key = idempotency_key
+        if task_id != "task-1" or str(submission.pause_id) != PAUSE_ID:
+            return None
+        responded_at = datetime(2026, 7, 13, 0, 1, tzinfo=UTC)
+        return {
+            "task_id": task_id,
+            "status": "waiting_human",
+            "symbol": "BTC-USDT-SWAP",
+            "horizon": "4h",
+            "created_at": datetime(2026, 7, 13, tzinfo=UTC),
+            "completed_at": None,
+            "artifact": None,
+            "errors": [],
+            "pending_interrupts": {
+                "pause_id": submission.pause_id,
+                "pause_version": submission.pause_version,
+                "status": "responding",
+                "expires_at": datetime(2026, 7, 13, 0, 10, tzinfo=UTC),
+                "members": [
+                    {
+                        "interrupt_id": item.interrupt_id,
+                        "response_version": item.response_version,
+                        "status": "responding",
+                        "payload": _review_payload(),
+                        "response": item.response.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        ),
+                        "responded_at": responded_at,
+                    }
+                    for item in submission.responses
+                ],
+            },
         }
 
     async def dispatch_task(self, actor: ActorContext, task_id: str) -> None:
@@ -275,6 +331,16 @@ class UnprovisionedProductService(FakeProductService):
         del actor, task_id, interrupt_id, submission, idempotency_key
         raise PermissionError("actor membership was not found")
 
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del actor, task_id, submission, idempotency_key
+        raise PermissionError("actor membership was not found")
+
 
 class ConflictingInterruptService(FakeProductService):
     def __init__(self, error: RuntimeError) -> None:
@@ -290,6 +356,16 @@ class ConflictingInterruptService(FakeProductService):
         idempotency_key: str,
     ) -> dict[str, Any] | None:
         del actor, task_id, interrupt_id, submission, idempotency_key
+        raise self.error
+
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del actor, task_id, submission, idempotency_key
         raise self.error
 
 
@@ -449,9 +525,11 @@ async def test_list_inbox_uses_defaults_and_returns_a_strict_typed_projection() 
         "items": [
             {
                 "task_id": "22222222-2222-4222-8222-222222222222",
+                "pause_id": PAUSE_ID,
+                "pause_version": 1,
                 "status": "responding",
+                "member_count": 2,
                 "payload": _review_payload(),
-                "response": {"action": "approve", "edits": None, "comment": None},
                 "expires_at": "2026-07-13T00:10:00Z",
                 "responded_at": "2026-07-13T00:02:00Z",
                 "created_at": "2026-07-13T00:00:00Z",
@@ -607,8 +685,8 @@ async def test_respond_interrupt_forwards_strict_review_and_returns_task_view() 
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "waiting_human"
-    assert body["pending_interrupts"][0]["status"] == "responding"
-    review = body["pending_interrupts"][0]["response"]
+    assert body["pending_interrupts"]["status"] == "responding"
+    review = body["pending_interrupts"]["members"][0]["response"]
     assert review["action"] == "edit"
     assert review["comment"] == "Reduce risk before approval."
     assert review["edits"]["main_action"] == "no_trade"
@@ -622,6 +700,121 @@ async def test_respond_interrupt_forwards_strict_review_and_returns_task_view() 
     assert service.actor.tenant_id == "compose-tenant"
     assert service.actor.workspace_id == "compose-workspace"
     assert service.actor.user_id == "compose-user"
+
+
+@pytest.mark.asyncio
+async def test_respond_all_forwards_one_strict_aggregate_command() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/respond-all",
+            headers={"idempotency-key": "respond-pause-1"},
+            json={
+                "pause_id": PAUSE_ID,
+                "pause_version": 4,
+                "responses": [
+                    {
+                        "interrupt_id": "interrupt-root",
+                        "response_version": 2,
+                        "response": {"action": "approve"},
+                    },
+                    {
+                        "interrupt_id": "interrupt-nested",
+                        "response_version": 7,
+                        "response": {
+                            "action": "reject",
+                            "comment": "Nested evidence is insufficient.",
+                        },
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["pending_interrupts"]["pause_id"] == PAUSE_ID
+    assert body["pending_interrupts"]["pause_version"] == 4
+    assert [
+        member["interrupt_id"]
+        for member in body["pending_interrupts"]["members"]
+    ] == ["interrupt-root", "interrupt-nested"]
+    assert service.responded_task_id == "task-1"
+    assert service.responded_interrupt_id is None
+    assert service.interrupt_idempotency_key == "respond-pause-1"
+    assert [item.interrupt_id for item in service.interrupt_submission.responses] == [
+        "interrupt-root",
+        "interrupt-nested",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "pause_id": PAUSE_ID,
+            "pause_version": 1,
+            "responses": [],
+        },
+        {
+            "pause_id": PAUSE_ID,
+            "pause_version": 1,
+            "responses": [
+                {
+                    "interrupt_id": "duplicate",
+                    "response_version": 1,
+                    "response": {"action": "approve"},
+                },
+                {
+                    "interrupt_id": "duplicate",
+                    "response_version": 1,
+                    "response": {"action": "reject"},
+                },
+            ],
+        },
+        {
+            "pause_id": PAUSE_ID,
+            "pause_version": 1,
+            "responses": [
+                {
+                    "interrupt_id": "nested",
+                    "response_version": 1,
+                    "response": {"action": "edit"},
+                }
+            ],
+        },
+        {
+            "pause_id": PAUSE_ID,
+            "pause_version": 1,
+            "responses": [
+                {
+                    "interrupt_id": "root",
+                    "response_version": 1,
+                    "response": {"action": "approve", "unexpected": True},
+                }
+            ],
+        },
+    ),
+)
+async def test_respond_all_rejects_partial_or_invalid_batch_contract(
+    payload: dict[str, Any],
+) -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/respond-all",
+            headers={"idempotency-key": "respond-invalid-pause"},
+            json=payload,
+        )
+
+    assert response.status_code == 422
+    assert service.actor is None
 
 
 @pytest.mark.asyncio

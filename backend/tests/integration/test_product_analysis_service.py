@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from base64 import b64decode
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 import os
 from typing import AsyncIterator
 from uuid import UUID, uuid4
@@ -23,7 +24,11 @@ from crypto_alert_v2.api.agent_server import (
     RemoteRunHandle,
     RemoteRunState,
 )
-from crypto_alert_v2.api.schemas import AnalysisSubmission, InterruptResponseSubmission
+from crypto_alert_v2.api.schemas import (
+    AnalysisSubmission,
+    InterruptResponseSubmission,
+    InterruptResponsesSubmission,
+)
 from crypto_alert_v2.api.service import ProductAnalysisService
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.commands.dispatcher import CommandDispatcher
@@ -40,6 +45,7 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    InterruptPause,
     InterruptProjection,
     MarketSnapshot,
     Membership,
@@ -138,6 +144,32 @@ async def seed_waiting_interrupt(
         )
         session.add(waiting_run)
         await session.flush()
+        official_interrupt_id = interrupt_id or f"interrupt-{suffix}"
+        checkpoint_id = f"checkpoint-{suffix}"
+        pause_id = projection_id or uuid4()
+        pause_values: dict[str, object] = {
+            "id": pause_id,
+            "tenant_id": task.tenant_id,
+            "workspace_id": task.workspace_id,
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "run_id": waiting_run.id,
+            "pause_version": 1,
+            "root_thread_id": f"official-thread-{suffix}",
+            "root_checkpoint_ns": "",
+            "root_checkpoint_id": checkpoint_id,
+            "root_checkpoint_map": {},
+            "member_set_hash": sha256(official_interrupt_id.encode()).hexdigest(),
+            "status": status,
+            "expires_at": expires_at,
+        }
+        if created_at is not None:
+            pause_values.update(created_at=created_at, updated_at=created_at)
+        pause = InterruptPause(
+            **pause_values,
+        )
+        session.add(pause)
+        await session.flush()
         stored_response = (
             {"action": "approve", "edits": None, "comment": None}
             if status in {"responding", "resolved"}
@@ -150,9 +182,10 @@ async def seed_waiting_interrupt(
             "owner_user_id": task.owner_user_id,
             "task_id": task.id,
             "run_id": waiting_run.id,
-            "official_interrupt_id": interrupt_id or f"interrupt-{suffix}",
+            "pause_id": pause_id,
+            "official_interrupt_id": official_interrupt_id,
             "namespace": "review",
-            "checkpoint_id": f"checkpoint-{suffix}",
+            "checkpoint_id": checkpoint_id,
             "response_version": response_version,
             "status": status,
             "payload": artifact_review_payload(),
@@ -304,15 +337,17 @@ async def test_interrupt_view_and_response_are_actor_scoped(
 
     assert owner_view is not None
     assert owner_view["status"] == "waiting_human"
-    assert owner_view["pending_interrupts"] == [
+    assert owner_view["pending_interrupts"] is not None
+    assert owner_view["pending_interrupts"]["pause_version"] == 1
+    assert owner_view["pending_interrupts"]["status"] == "pending"
+    assert owner_view["pending_interrupts"]["expires_at"] is not None
+    assert owner_view["pending_interrupts"]["members"] == [
         {
-            "task_id": str(queued["task_id"]),
             "interrupt_id": "scoped-interrupt",
             "response_version": 1,
             "status": "pending",
             "payload": artifact_review_payload(),
             "response": None,
-            "expires_at": owner_view["pending_interrupts"][0]["expires_at"],
             "responded_at": None,
         }
     ]
@@ -420,9 +455,11 @@ async def test_inbox_filters_stable_pagination_and_actor_scope(
     pending_task_id, _, _ = seeded["pending"]
     assert pending_item == {
         "task_id": pending_task_id,
+        "pause_id": seeded["pending"][2],
+        "pause_version": 1,
         "status": "pending",
+        "member_count": 1,
         "payload": artifact_review_payload(),
-        "response": None,
         "expires_at": created_at + timedelta(minutes=10),
         "responded_at": None,
         "created_at": created_at,
@@ -494,6 +531,131 @@ async def test_inbox_filters_stable_pagination_and_actor_scope(
                 limit=100,
                 cursor=first_page["next_cursor"],
             )
+
+
+@pytest.mark.asyncio
+async def test_inbox_returns_one_aggregate_item_for_a_multi_member_pause(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="inbox-aggregate-tenant",
+        workspace_id="inbox-aggregate-workspace",
+        user_id="oidc|inbox-aggregate-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, run_id, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="inbox-root-review",
+    )
+
+    async with session_factory() as session, session.begin():
+        first = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.id == projection_id)
+        )
+        assert first is not None
+        pause_id = first.pause_id
+        session.add(
+            InterruptProjection(
+                id=uuid4(),
+                tenant_id=first.tenant_id,
+                workspace_id=first.workspace_id,
+                owner_user_id=first.owner_user_id,
+                task_id=first.task_id,
+                run_id=run_id,
+                pause_id=first.pause_id,
+                official_interrupt_id="inbox-nested-review",
+                namespace="nested:",
+                checkpoint_id="nested-checkpoint",
+                response_version=1,
+                status="pending",
+                payload=artifact_review_payload(),
+                expires_at=first.expires_at,
+            )
+        )
+
+    view = await service.list_inbox(actor, status="active", limit=50)
+
+    assert len(view["items"]) == 1
+    assert view["items"][0]["task_id"] == queued["task_id"]
+    assert view["items"][0]["pause_id"] == pause_id
+    assert view["items"][0]["member_count"] == 2
+    assert view["items"][0]["status"] == "pending"
+    assert view["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_historical_run_view_only_projects_its_own_interrupt_lineage(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="history-pause-tenant",
+        workspace_id="history-pause-workspace",
+        user_id="oidc|history-pause-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, paused_run_id, _ = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="history-pause-review",
+    )
+
+    async with session_factory() as session, session.begin():
+        paused_run = await session.scalar(select(Run).where(Run.id == paused_run_id))
+        assert paused_run is not None
+        unrelated_run_id = uuid4()
+        session.add(
+            Run(
+                id=unrelated_run_id,
+                tenant_id=paused_run.tenant_id,
+                workspace_id=paused_run.workspace_id,
+                owner_user_id=paused_run.owner_user_id,
+                thread_id=paused_run.thread_id,
+                task_id=paused_run.task_id,
+                attempt=2,
+                status="failed",
+                input_payload=paused_run.input_payload,
+                output_payload={
+                    "terminal_status": "failed",
+                    "errors": [{"code": "provider_unavailable", "retryable": True}],
+                },
+            )
+        )
+
+    paused_view = await service.get_task(
+        actor,
+        str(queued["task_id"]),
+        run_id=paused_run_id,
+    )
+    unrelated_view = await service.get_task(
+        actor,
+        str(queued["task_id"]),
+        run_id=unrelated_run_id,
+    )
+
+    assert paused_view is not None
+    assert paused_view["pending_interrupts"] is not None
+    assert unrelated_view is not None
+    assert unrelated_view["status"] == "failed"
+    assert unrelated_view["pending_interrupts"] is None
 
 
 @pytest.mark.asyncio
@@ -630,12 +792,12 @@ async def test_respond_interrupt_persists_lineage_command_and_idempotent_view(
     assert first["status"] == "waiting_human"
     assert replay["status"] == "waiting_human"
     assert replay["pending_interrupts"] == first["pending_interrupts"]
-    assert first["pending_interrupts"][0]["status"] == "responding"
-    assert first["pending_interrupts"][0]["response"] == {
+    assert first["pending_interrupts"]["status"] == "responding"
+    assert first["pending_interrupts"]["members"][0]["response"] == {
         "action": "approve",
         "comment": "Reviewed and approved.",
     }
-    assert first["pending_interrupts"][0]["responded_at"] is not None
+    assert first["pending_interrupts"]["members"][0]["responded_at"] is not None
 
     with pytest.raises(service_module.IdempotencyConflictError):
         await service.respond_interrupt(
@@ -697,11 +859,24 @@ async def test_respond_interrupt_persists_lineage_command_and_idempotent_view(
     ]
     assert [command.sequence for command in commands] == [1, 2]
     assert commands[1].payload == {
-        "projection_id": str(projection_id),
-        "interrupt_id": "successful-interrupt",
-        "checkpoint_id": projection.checkpoint_id,
-        "response_version": 1,
-        "response": projection.response,
+        "pause_id": str(projection.pause_id),
+        "pause_version": 1,
+        "root_checkpoint": {
+            "thread_id": commands[1].payload["root_checkpoint"]["thread_id"],
+            "checkpoint_ns": "",
+            "checkpoint_id": projection.checkpoint_id,
+            "checkpoint_map": {},
+        },
+        "responses": [
+            {
+                "projection_id": str(projection_id),
+                "interrupt_id": "successful-interrupt",
+                "namespace": projection.namespace,
+                "checkpoint_id": projection.checkpoint_id,
+                "response_version": 1,
+                "response": projection.response,
+            }
+        ],
         "expired": False,
     }
 
@@ -712,14 +887,200 @@ async def test_respond_interrupt_persists_lineage_command_and_idempotent_view(
         )
         assert persisted_task is not None
         assert resumed_run is not None
-        persisted_task.status = "running"
         resumed_run.status = "running"
 
-    running_view = await service.get_task(actor, str(task_id))
+    resuming_view = await service.get_task(actor, str(task_id))
 
-    assert running_view is not None
-    assert running_view["status"] == "running"
-    assert running_view["pending_interrupts"][0]["status"] == "responding"
+    assert resuming_view is not None
+    assert resuming_view["status"] == "waiting_human"
+    assert resuming_view["pending_interrupts"]["status"] == "responding"
+
+
+@pytest.mark.asyncio
+async def test_respond_all_requires_exact_pause_and_creates_one_resume_run(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="aggregate-interrupt-tenant",
+        workspace_id="aggregate-interrupt-workspace",
+        user_id="oidc|aggregate-interrupt-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, waiting_run_id, first_projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="root-interrupt",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session, session.begin():
+        first_projection = await session.get(InterruptProjection, first_projection_id)
+        assert first_projection is not None
+        pause = await session.get(InterruptPause, first_projection.pause_id)
+        assert pause is not None
+        second_projection = InterruptProjection(
+            id=uuid4(),
+            tenant_id=first_projection.tenant_id,
+            workspace_id=first_projection.workspace_id,
+            owner_user_id=first_projection.owner_user_id,
+            task_id=first_projection.task_id,
+            run_id=first_projection.run_id,
+            pause_id=first_projection.pause_id,
+            official_interrupt_id="nested-interrupt",
+            namespace="research:child",
+            checkpoint_id="nested-checkpoint",
+            response_version=3,
+            status="pending",
+            payload=artifact_review_payload(),
+            expires_at=pause.expires_at,
+        )
+        session.add(second_projection)
+        pause.member_set_hash = sha256(
+            b"nested-interrupt\0root-interrupt"
+        ).hexdigest()
+        pause_id = pause.id
+
+    with pytest.raises(
+        service_module.InterruptBatchRequiredError,
+        match="requires respond-all",
+    ):
+        await service.respond_interrupt(
+            actor,
+            str(task_id),
+            "root-interrupt",
+            InterruptResponseSubmission(response_version=1, action="approve"),
+            "partial-single-response",
+        )
+
+    missing_member = InterruptResponsesSubmission.model_validate(
+        {
+            "pause_id": pause_id,
+            "pause_version": 1,
+            "responses": [
+                {
+                    "interrupt_id": "root-interrupt",
+                    "response_version": 1,
+                    "response": {"action": "approve"},
+                }
+            ],
+        }
+    )
+    other_actor = actor.model_copy(
+        update={"user_id": "oidc|aggregate-interrupt-other-owner"}
+    )
+    await service.bootstrap_actor(other_actor)
+    assert await service.respond_interrupts(
+        other_actor,
+        str(task_id),
+        missing_member,
+        "cross-owner-pause-response",
+    ) is None
+    with pytest.raises(
+        service_module.InterruptResponseConflictError,
+        match="exactly match",
+    ):
+        await service.respond_interrupts(
+            actor,
+            str(task_id),
+            missing_member,
+            "missing-member",
+        )
+
+    complete = InterruptResponsesSubmission.model_validate(
+        {
+            "pause_id": pause_id,
+            "pause_version": 1,
+            "responses": [
+                {
+                    "interrupt_id": "nested-interrupt",
+                    "response_version": 3,
+                    "response": {
+                        "action": "reject",
+                        "comment": "Nested evidence is insufficient.",
+                    },
+                },
+                {
+                    "interrupt_id": "root-interrupt",
+                    "response_version": 1,
+                    "response": {"action": "approve"},
+                },
+            ],
+        }
+    )
+    first = await service.respond_interrupts(
+        actor,
+        str(task_id),
+        complete,
+        "complete-pause-response",
+    )
+    replay = await service.respond_interrupts(
+        actor,
+        str(task_id),
+        complete,
+        "complete-pause-response",
+    )
+
+    assert first is not None
+    assert replay is not None
+    assert first["pending_interrupts"]["status"] == "responding"
+    assert replay["pending_interrupts"] == first["pending_interrupts"]
+    assert {
+        member["interrupt_id"]
+        for member in first["pending_interrupts"]["members"]
+    } == {"root-interrupt", "nested-interrupt"}
+    assert all(
+        member["status"] == "responding"
+        for member in first["pending_interrupts"]["members"]
+    )
+
+    async with session_factory() as session:
+        runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                )
+            ).all()
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == task_id,
+                        TaskCommand.command_type == "respond",
+                    )
+                )
+            ).all()
+        )
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection).where(
+                        InterruptProjection.pause_id == pause_id
+                    )
+                )
+            ).all()
+        )
+        persisted_pause = await session.get(InterruptPause, pause_id)
+    assert [run.attempt for run in runs] == [1, 2]
+    assert runs[1].resume_of_run_id == waiting_run_id
+    assert len(commands) == 1
+    assert {item["interrupt_id"] for item in commands[0].payload["responses"]} == {
+        "root-interrupt",
+        "nested-interrupt",
+    }
+    assert persisted_pause is not None
+    assert persisted_pause.status == "responding"
+    assert persisted_pause.resume_run_id == runs[1].id
+    assert all(projection.status == "responding" for projection in projections)
 
 
 @pytest.mark.asyncio
@@ -1823,6 +2184,11 @@ async def test_success_persists_stage_records_and_atomic_artifact(
         queued["task_id"],
         run_id=first_run_id,
     )
+    unrelated_run = await service.get_task(
+        actor,
+        queued["task_id"],
+        run_id=uuid4(),
+    )
 
     assert latest_attempt is not None
     assert latest_attempt["status"] == "failed"
@@ -1832,3 +2198,4 @@ async def test_success_persists_stage_records_and_atomic_artifact(
     assert historical_attempt["status"] == "succeeded"
     assert historical_attempt["artifact"]["analysis"]["main_action"] == "open_long"
     assert len(historical_attempt["web_evidence"]) == 1
+    assert unrelated_run is None

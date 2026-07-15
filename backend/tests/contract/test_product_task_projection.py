@@ -126,7 +126,10 @@ class _TaskViewSession(_RunSourceSession):
         return SimpleNamespace(one_or_none=lambda: joined)
 
     async def scalars(self, statement: Any) -> _ScalarRows:
-        if "FROM app.interrupt_inbox" in str(statement):
+        if (
+            "FROM app.interrupt_inbox" in str(statement)
+            or "FROM app.interrupt_pauses" in str(statement)
+        ):
             return _ScalarRows([])
         return await super().scalars(statement)
 

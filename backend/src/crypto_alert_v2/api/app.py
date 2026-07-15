@@ -16,6 +16,7 @@ from crypto_alert_v2.api.schemas import (
     InboxQueryStatus,
     InboxView,
     InterruptResponseSubmission,
+    InterruptResponsesSubmission,
     RunListView,
     TaskView,
 )
@@ -75,6 +76,14 @@ class ProductService(Protocol):
         task_id: str,
         interrupt_id: str,
         submission: InterruptResponseSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: InterruptResponsesSubmission,
         idempotency_key: str,
     ) -> dict[str, Any] | None: ...
 
@@ -148,6 +157,19 @@ class UnavailableProductService:
         idempotency_key: str,
     ) -> dict[str, Any] | None:
         del actor, task_id, interrupt_id, submission, idempotency_key
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Product persistence is not configured",
+        )
+
+    async def respond_interrupts(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: InterruptResponsesSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del actor, task_id, submission, idempotency_key
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Product persistence is not configured",
@@ -340,6 +362,47 @@ def create_app(
             ) from exc
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    @product.post(
+        "/api/v2/tasks/{task_id}/interrupts/respond-all",
+        response_model=TaskView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def respond_interrupts(
+        task_id: str,
+        submission: InterruptResponsesSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+        )
+        try:
+            task = await service.respond_interrupts(
+                actor,
+                task_id,
+                submission,
+                idempotency_key,
+            )
+        except (IdempotencyConflictError, InterruptResponseConflictError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task or pause not found")
         return task
 
     @product.post(

@@ -5,10 +5,18 @@ from types import SimpleNamespace
 from pydantic import SecretStr
 import pytest
 
+from crypto_alert_v2.api.agent_server import (
+    RemoteCheckpoint,
+    RemoteInterrupt,
+    RemoteInterruptSet,
+)
 from crypto_alert_v2.commands.seed_hitl_e2e import (
     ARTIFACT,
+    FIXTURE_ASSISTANTS,
+    FIXTURE_INTERRUPT_COUNTS,
     GRAPH_STATE,
     _authorization,
+    _interrupt_member_set_hash,
     _loopback_url,
     _request_hash,
 )
@@ -85,3 +93,59 @@ def test_seed_state_contains_a_valid_reviewable_artifact() -> None:
     assert GRAPH_STATE["review_policy"] == "required"
     assert GRAPH_STATE["terminal_status"] == "running"
     assert len(_request_hash()) == 64
+
+
+def test_seed_fixture_registry_requires_real_official_interrupt_counts() -> None:
+    assert FIXTURE_ASSISTANTS == {
+        "canonical": "crypto_analysis",
+        "multi_interrupt": "multi_interrupt_fixture",
+    }
+    assert FIXTURE_INTERRUPT_COUNTS == {
+        "canonical": 1,
+        "multi_interrupt": 2,
+    }
+
+
+def test_interrupt_member_set_hash_uses_root_checkpoint_and_sorted_members() -> None:
+    checkpoint = RemoteCheckpoint(
+        thread_id="official-thread",
+        checkpoint_ns="",
+        checkpoint_id="root-checkpoint",
+        checkpoint_map={"child": "nested-checkpoint"},
+    )
+    first = RemoteInterrupt(
+        interrupt_id="interrupt-a",
+        namespace="",
+        checkpoint_id="root-checkpoint",
+        value={"kind": "review"},
+    )
+    second = RemoteInterrupt(
+        interrupt_id="interrupt-b",
+        namespace="child:",
+        checkpoint_id="nested-checkpoint",
+        value={"kind": "review"},
+    )
+    forward = RemoteInterruptSet(checkpoint=checkpoint, interrupts=(first, second))
+    reversed_members = RemoteInterruptSet(
+        checkpoint=checkpoint,
+        interrupts=(second, first),
+    )
+
+    member_set_hash = _interrupt_member_set_hash(forward)
+
+    assert len(member_set_hash) == 64
+    assert member_set_hash == _interrupt_member_set_hash(reversed_members)
+    assert member_set_hash != _interrupt_member_set_hash(
+        RemoteInterruptSet(
+            checkpoint=RemoteCheckpoint(
+                thread_id="official-thread",
+                checkpoint_ns="",
+                checkpoint_id="different-root",
+                checkpoint_map={"child": "nested-checkpoint"},
+            ),
+            interrupts=(first, second),
+        )
+    )
+    assert member_set_hash != _interrupt_member_set_hash(
+        RemoteInterruptSet(checkpoint=checkpoint, interrupts=(first,))
+    )
