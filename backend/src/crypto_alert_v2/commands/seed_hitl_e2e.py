@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+from datetime import UTC, datetime, timedelta
+import hashlib
+import ipaddress
+import json
+from typing import Any
+from urllib.parse import urlparse
+from uuid import uuid4
+
+from langgraph_sdk import get_client
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from crypto_alert_v2.api.agent_server import AgentServerRunner, RemoteRunHandle
+from crypto_alert_v2.api.service import ProductAnalysisService
+from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.config import Settings, get_settings
+from crypto_alert_v2.persistence.models import (
+    InterruptProjection,
+    Run,
+    Task,
+    Tenant,
+    Thread,
+    User,
+    Workspace,
+)
+
+
+ASSISTANT_ID = "crypto_analysis"
+FIXTURE_ACTOR = ActorContext(
+    tenant_id="dev-tenant",
+    workspace_id="dev-workspace",
+    user_id="dev-user",
+    roles=("analyst",),
+    permissions=("analysis:read", "analysis:write"),
+)
+REQUEST = {
+    "symbol": "BTC-USDT-SWAP",
+    "horizon": "4h",
+    "query_text": "审核已持久化的 BTC 风险分析草稿。",
+    "notify": False,
+}
+ANALYSIS = {
+    "regime": "risk_on",
+    "horizon": "4h",
+    "risk_pct": "0.1",
+    "target_1": "66000",
+    "target_2": "67000",
+    "instrument": "BTC-USDT-SWAP",
+    "stop_price": "64500",
+    "main_action": "open_long",
+    "probability": 0.65,
+    "total_score": 2,
+    "invalidation": "Close below 64500.",
+    "max_leverage": 2,
+    "entry_trigger": "65100",
+    "factor_scores": {"macro": 0, "derivatives": 1, "market_structure": 1},
+    "reference_price": "65000.25",
+    "root_cause_chain": [
+        "Price reclaimed resistance",
+        "Liquidity supports continuation",
+    ],
+    "unavailable_data": [],
+    "why_not_opposite": "The bearish invalidation has not triggered.",
+    "expires_in_seconds": 90,
+    "position_size_class": "light",
+    "manual_execution_required": True,
+}
+EVIDENCE_VERDICT = {
+    "warnings": [],
+    "sufficient": True,
+    "confidence_cap": 1.0,
+    "missing_optional": [],
+    "missing_required": [],
+}
+RISK_VERDICT = {
+    "allowed": True,
+    "warnings": [],
+    "confidence_cap": 1.0,
+    "blocked_reasons": [],
+}
+ARTIFACT = {
+    "status": "draft",
+    "analysis": ANALYSIS,
+    "risk_verdict": RISK_VERDICT,
+    "artifact_type": "analysis_report",
+    "schema_version": "1.0",
+    "content_version": 1,
+    "evidence_verdict": EVIDENCE_VERDICT,
+    "source_references": ["https://www.reuters.com/markets/currencies/"],
+}
+GRAPH_STATE = {
+    "request": REQUEST,
+    "analysis": ANALYSIS,
+    "evidence_verdict": EVIDENCE_VERDICT,
+    "risk_verdict": RISK_VERDICT,
+    "artifact": ARTIFACT,
+    "web_evidence": [],
+    "review_policy": "required",
+    "review_iteration": 0,
+    "terminal_status": "running",
+    "errors": [],
+    "lifecycle": "artifact_built",
+}
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Seed canonical official HITL checkpoints for real browser QA."
+    )
+    parser.add_argument("--count", type=int, default=1, choices=range(1, 11))
+    parser.add_argument("--label-prefix", default="browser")
+    parser.add_argument("--ttl-seconds", type=int, default=1800)
+    return parser
+
+
+def _loopback_url(value: str) -> bool:
+    parsed = urlparse(value)
+    hostname = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or hostname is None:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _authorization(settings: Settings) -> str:
+    if not _loopback_url(settings.agent_server_url):
+        raise RuntimeError("HITL E2E seeding is restricted to a loopback Agent Server")
+    if settings.app_environment not in {"development", "local", "test"}:
+        raise RuntimeError("HITL E2E seeding is disabled outside local test environments")
+    token = settings.agent_server_local_token
+    if token is None or not token.get_secret_value().strip():
+        raise RuntimeError("AGENT_SERVER_LOCAL_TOKEN is required")
+    return f"Bearer {token.get_secret_value()}"
+
+
+def _request_hash() -> str:
+    canonical = json.dumps(REQUEST, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def _resolved_actor_ids(
+    session_factory: async_sessionmaker[Any],
+) -> tuple[Any, Any, Any]:
+    async with session_factory() as session, session.begin():
+        tenant = await session.scalar(
+            select(Tenant).where(Tenant.external_id == FIXTURE_ACTOR.tenant_id)
+        )
+        if tenant is None:
+            raise RuntimeError("fixture tenant was not provisioned")
+        user = await session.scalar(
+            select(User).where(
+                User.tenant_id == tenant.id,
+                User.external_subject == FIXTURE_ACTOR.user_id,
+            )
+        )
+        workspace = await session.scalar(
+            select(Workspace).where(
+                Workspace.tenant_id == tenant.id,
+                Workspace.external_id == FIXTURE_ACTOR.workspace_id,
+            )
+        )
+        if user is None or workspace is None:
+            raise RuntimeError("fixture user or workspace was not provisioned")
+        workspace.review_policy = "required"
+        return tenant.id, workspace.id, user.id
+
+
+async def _seed_one(
+    *,
+    client: Any,
+    runner: AgentServerRunner,
+    session_factory: async_sessionmaker[Any],
+    actor_ids: tuple[Any, Any, Any],
+    authorization: str,
+    label: str,
+    ttl_seconds: int,
+) -> dict[str, str]:
+    tenant_id, workspace_id, user_id = actor_ids
+    thread_id = uuid4()
+    task_id = uuid4()
+    product_run_id = uuid4()
+    headers = {"authorization": authorization}
+    metadata = {
+        "tenant_id": FIXTURE_ACTOR.tenant_id,
+        "workspace_id": FIXTURE_ACTOR.workspace_id,
+        "user_id": FIXTURE_ACTOR.user_id,
+        "task_id": str(task_id),
+        "product_run_id": str(product_run_id),
+        "fixture": label,
+    }
+    await client.threads.create(
+        thread_id=str(thread_id),
+        graph_id=ASSISTANT_ID,
+        metadata=metadata,
+        headers=headers,
+    )
+    try:
+        await client.threads.update_state(
+            str(thread_id),
+            GRAPH_STATE,
+            as_node="build_artifact",
+            headers=headers,
+        )
+        raw_run = await client.runs.create(
+            str(thread_id),
+            ASSISTANT_ID,
+            input=None,
+            durability="sync",
+            metadata=metadata,
+            headers=headers,
+        )
+        handle = RemoteRunHandle(
+            assistant_id=str(raw_run["assistant_id"]),
+            thread_id=str(thread_id),
+            run_id=str(raw_run["run_id"]),
+            authorization=authorization,
+        )
+        raw_status = "unknown"
+        normalized_status = "unknown"
+        for _ in range(100):
+            remote = await client.runs.get(
+                str(thread_id), handle.run_id, headers=headers
+            )
+            raw_status = str(remote.get("status"))
+            normalized_status = (await runner.get(handle)).status
+            if normalized_status == "interrupted":
+                break
+            await asyncio.sleep(0.05)
+        if normalized_status != "interrupted":
+            raise RuntimeError(
+                "official fixture did not reach a canonical interrupt "
+                f"(raw={raw_status}, normalized={normalized_status})"
+            )
+        interrupts = await runner.get_interrupts(handle)
+        if len(interrupts) != 1:
+            raise RuntimeError(
+                f"expected one canonical official interrupt, got {len(interrupts)}"
+            )
+        remote_interrupt = interrupts[0]
+        now = datetime.now(UTC)
+        async with session_factory() as session, session.begin():
+            session.add(
+                Thread(
+                    id=thread_id,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    owner_user_id=user_id,
+                    official_thread_id=str(thread_id),
+                    title=f"BTC-USDT-SWAP 4h {label} review",
+                    context={"fixture": "official-hitl-e2e"},
+                )
+            )
+            await session.flush()
+            session.add(
+                Task(
+                    id=task_id,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    owner_user_id=user_id,
+                    thread_id=thread_id,
+                    task_type="market_analysis",
+                    status="waiting_human",
+                    idempotency_key=f"hitl-{label}-{uuid4()}",
+                    request_payload_hash=_request_hash(),
+                    request_payload=REQUEST,
+                    completed_at=None,
+                )
+            )
+            await session.flush()
+            session.add(
+                Run(
+                    id=product_run_id,
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    owner_user_id=user_id,
+                    thread_id=thread_id,
+                    task_id=task_id,
+                    attempt=1,
+                    status="waiting_human",
+                    official_assistant_id=handle.assistant_id,
+                    official_run_id=handle.run_id,
+                    checkpoint_id=remote_interrupt.checkpoint_id,
+                    input_payload=REQUEST,
+                    output_payload=None,
+                    failure_code=None,
+                    failure_message=None,
+                    started_at=now,
+                    finished_at=None,
+                    last_heartbeat_at=now,
+                    reconciliation_deadline_at=None,
+                    projection_fence=0,
+                    terminal_output_hash=None,
+                    cancel_requested_at=None,
+                    observed_terminal_status=None,
+                    resume_of_run_id=None,
+                )
+            )
+            await session.flush()
+            session.add(
+                InterruptProjection(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    owner_user_id=user_id,
+                    task_id=task_id,
+                    run_id=product_run_id,
+                    official_interrupt_id=remote_interrupt.interrupt_id,
+                    namespace=remote_interrupt.namespace,
+                    checkpoint_id=remote_interrupt.checkpoint_id,
+                    response_version=1,
+                    status="pending",
+                    payload=remote_interrupt.value,
+                    expires_at=now + timedelta(seconds=ttl_seconds),
+                    responded_at=None,
+                )
+            )
+        return {
+            "label": label,
+            "task_id": str(task_id),
+            "official_raw_status": raw_status,
+            "normalized_status": normalized_status,
+            "product_status": "waiting_human",
+        }
+    except BaseException:
+        await client.threads.delete(str(thread_id), headers=headers)
+        raise
+
+
+async def _run(args: argparse.Namespace) -> None:
+    if args.ttl_seconds < 60 or args.ttl_seconds > 86_400:
+        raise RuntimeError("--ttl-seconds must be between 60 and 86400")
+    settings = get_settings()
+    authorization = _authorization(settings)
+    engine = create_async_engine(settings.product_database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    service = ProductAnalysisService(session_factory=session_factory)
+    client = get_client(url=settings.agent_server_url)
+    runner = AgentServerRunner(client=client, assistant_id=ASSISTANT_ID)
+    try:
+        await service.bootstrap_actor(FIXTURE_ACTOR)
+        actor_ids = await _resolved_actor_ids(session_factory)
+        results = []
+        for index in range(args.count):
+            results.append(
+                await _seed_one(
+                    client=client,
+                    runner=runner,
+                    session_factory=session_factory,
+                    actor_ids=actor_ids,
+                    authorization=authorization,
+                    label=f"{args.label_prefix}-{index + 1}",
+                    ttl_seconds=args.ttl_seconds,
+                )
+            )
+        print(json.dumps(results, sort_keys=True))
+    finally:
+        await engine.dispose()
+
+
+def main() -> None:
+    args = _parser().parse_args()
+    asyncio.run(_run(args))
+
+
+if __name__ == "__main__":
+    main()
