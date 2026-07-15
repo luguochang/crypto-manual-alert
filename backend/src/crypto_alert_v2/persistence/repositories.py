@@ -29,6 +29,8 @@ class ActorContext(Protocol):
     tenant_id: str
     workspace_id: str
     user_id: str
+    identity_issuer: str
+    context_id: UUID | None
 
 
 class ScopedResourceNotFound(LookupError):
@@ -94,6 +96,7 @@ class ActorScopedRepository(Generic[ModelT]):
                 and_(
                     Membership.user_id == User.id,
                     User.tenant_id == Tenant.id,
+                    User.identity_issuer == self.actor.identity_issuer,
                 ),
             )
             .where(
@@ -101,6 +104,11 @@ class ActorScopedRepository(Generic[ModelT]):
                 Tenant.external_id == self.actor.tenant_id,
                 Workspace.external_id == self.actor.workspace_id,
                 User.external_subject == self.actor.user_id,
+                *(
+                    (Membership.id == self.actor.context_id,)
+                    if self.actor.context_id is not None
+                    else ()
+                ),
             )
         )
 
@@ -315,10 +323,18 @@ async def resolve_actor(session: AsyncSession, actor: ActorContext) -> ResolvedA
             and_(
                 Membership.user_id == User.id,
                 User.tenant_id == Tenant.id,
+                User.identity_issuer == actor.identity_issuer,
                 User.external_subject == actor.user_id,
             ),
         )
-        .where(Tenant.external_id == actor.tenant_id)
+        .where(
+            Tenant.external_id == actor.tenant_id,
+            *(
+                (Membership.id == actor.context_id,)
+                if actor.context_id is not None
+                else ()
+            ),
+        )
     )
     row = (await session.execute(statement)).one_or_none()
     if row is None:

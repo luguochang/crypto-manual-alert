@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from typing import Protocol
 from uuid import uuid4
 
@@ -13,6 +14,9 @@ from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.auth.internal_token import InternalTokenIssuer
 from crypto_alert_v2.commands.dispatcher import CommandDispatcher
 from crypto_alert_v2.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class Dispatcher(Protocol):
@@ -30,7 +34,13 @@ async def run_worker(
         raise ValueError("poll_interval cannot be negative")
     stop = stop_event or asyncio.Event()
     while not stop.is_set():
-        handled = await dispatcher.dispatch_once()
+        try:
+            handled = await dispatcher.dispatch_once()
+        except Exception:
+            if once:
+                raise
+            logger.exception("Command dispatcher iteration failed")
+            handled = False
         if once:
             return
         if handled:
@@ -93,6 +103,9 @@ def _authorization_provider(settings: object):
             workspace_id=actor.workspace_id,
             roles=actor.roles,
             permissions=actor.permissions,
+            token_use="worker",
+            identity_issuer=actor.identity_issuer,
+            context_id=actor.context_id,
         )
         return f"Bearer {token}"
 

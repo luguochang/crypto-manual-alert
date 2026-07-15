@@ -261,7 +261,7 @@ describe("Agent BFF proxy", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("accepts the deployment-controlled development local-proof Agent identity", async () => {
+  it("rejects a non-loopback development Agent URL even with bootstrap fields", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     process.env.APP_ENVIRONMENT = "development";
     process.env.AGENT_SERVER_URL = "http://agent-server:8123";
@@ -289,20 +289,7 @@ describe("Agent BFF proxy", () => {
       fetcher,
     );
 
-    expect(response.status).toBe(200);
-    const authorization = new Headers(fetcher.mock.calls[0]?.[1]?.headers)
-      .get("authorization") ?? "";
-    expect(decodePayload(authorization)).toMatchObject({
-      aud: "crypto-alert-agent-server",
-      sub: "compose-user",
-      tenant_id: "compose-tenant",
-      workspace_id: "compose-workspace",
-    });
+    expect(response.status).toBe(502);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });
-
-function decodePayload(authorization: string): Record<string, unknown> {
-  const encoded = authorization.replace(/^Bearer /, "").split(".")[1];
-  if (!encoded) throw new Error("Missing JWT payload");
-  return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
-}

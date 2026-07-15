@@ -17,6 +17,7 @@ from sqlalchemy.orm import aliased
 from crypto_alert_v2.api.agent_server import (
     RemoteCancelResult,
     RemoteCheckpoint,
+    RemoteForkIndeterminateError,
     RemoteInterruptSet,
     RemoteResumeIndeterminateError,
     RemoteRunHandle,
@@ -68,6 +69,16 @@ class RemoteRunner(Protocol):
         product_thread_id: str,
         product_run_id: str,
     ) -> RemoteRunHandle | None: ...
+
+    async def fork(
+        self,
+        *,
+        actor: ActorContext,
+        handle: RemoteRunHandle,
+        task_id: str,
+        product_run_id: str,
+        checkpoint_id: str,
+    ) -> RemoteRunHandle: ...
 
     async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult: ...
 
@@ -132,6 +143,20 @@ class RespondCommandPayload(BaseModel):
         return self
 
 
+class ForkCommandPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_run_id: UUID
+    fork_run_id: UUID
+    checkpoint_id: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def require_distinct_runs(self) -> "ForkCommandPayload":
+        if self.source_run_id == self.fork_run_id:
+            raise ValueError("fork source and destination Runs must differ")
+        return self
+
+
 @dataclass(frozen=True, slots=True)
 class CommandLease:
     command_id: UUID
@@ -147,9 +172,12 @@ class CommandLease:
     remote_handle: RemoteRunHandle | None = None
     resume_handle: RemoteRunHandle | None = None
     respond_payload: RespondCommandPayload | None = None
+    fork_source_handle: RemoteRunHandle | None = None
+    fork_payload: ForkCommandPayload | None = None
     review_policy: ReviewPolicy = "bypass"
     observed_terminal_status: ObservedTerminalStatus | None = None
     resume_reconcile_only: bool = False
+    fork_reconcile_only: bool = False
 
 
 def _task_accepts_active_run(task: Task, lease: CommandLease) -> bool:
@@ -401,6 +429,8 @@ class CommandDispatcher:
                         Workspace.external_id,
                         Workspace.review_policy,
                         User.external_subject,
+                        User.identity_issuer,
+                        Membership.id,
                         Membership.role,
                         Membership.permissions,
                     )
@@ -419,7 +449,7 @@ class CommandDispatcher:
                     )
                     .where(
                         TaskCommand.command_type.in_(
-                            ("submit", "respond", "cancel_task")
+                            ("submit", "respond", "fork", "cancel_task")
                         ),
                         Task.status.in_(("queued", "running", "waiting_human")),
                         or_(
@@ -454,12 +484,14 @@ class CommandDispatcher:
             )
             if command is None:
                 return None
-            admitted_permissions = tuple(row[8] or ())
+            admitted_permissions = tuple(row[10] or ())
             actor = ActorContext(
                 tenant_id=row[3],
                 workspace_id=row[4],
                 user_id=row[6],
-                roles=(row[7] or "member",),
+                identity_issuer=row[7],
+                context_id=row[8],
+                roles=(row[9] or "member",),
                 permissions=tuple(
                     dict.fromkeys(
                         (*admitted_permissions, "analysis:read", "analysis:write")
@@ -479,6 +511,7 @@ class CommandDispatcher:
                 .with_for_update()
             )
             respond_payload = None
+            fork_payload = None
             if command.command_type == "respond":
                 try:
                     respond_payload = RespondCommandPayload.model_validate(
@@ -496,6 +529,70 @@ class CommandDispatcher:
                         product_run.failure_message = str(exc)
                         product_run.finished_at = now
                     return None
+            if command.command_type == "fork":
+                try:
+                    fork_payload = ForkCommandPayload.model_validate(command.payload)
+                except ValidationError as exc:
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    task.status = "failed"
+                    task.completed_at = now
+                    if product_run is not None:
+                        product_run.status = "failed"
+                        product_run.failure_code = "invalid_fork_command"
+                        product_run.failure_message = str(exc)
+                        product_run.finished_at = now
+                    return None
+
+                product_run = await session.scalar(
+                    select(Run)
+                    .where(
+                        Run.id == fork_payload.fork_run_id,
+                        Run.task_id == task.id,
+                        Run.thread_id == task.thread_id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                    )
+                    .with_for_update()
+                )
+                fork_source_run = await session.scalar(
+                    select(Run)
+                    .where(
+                        Run.id == fork_payload.source_run_id,
+                        Run.task_id == task.id,
+                        Run.thread_id == task.thread_id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                        Run.checkpoint_id == fork_payload.checkpoint_id,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    product_run is None
+                    or product_run.checkpoint_id != fork_payload.checkpoint_id
+                    or product_run.forked_from_run_id != fork_payload.source_run_id
+                    or product_run.forked_from_checkpoint_id
+                    != fork_payload.checkpoint_id
+                    or fork_source_run is None
+                ):
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    task.status = "failed"
+                    task.completed_at = now
+                    if product_run is not None:
+                        product_run.status = "failed"
+                        product_run.failure_code = "invalid_fork_lineage"
+                        product_run.failure_message = (
+                            "Fork command does not match its Product Run lineage."
+                        )
+                        product_run.finished_at = now
+                    return None
+            else:
+                fork_source_run = None
             if command.command_type == "submit" and product_run is None:
                 previous_attempt = await session.scalar(
                     select(func.coalesce(func.max(Run.attempt), 0)).where(
@@ -544,16 +641,17 @@ class CommandDispatcher:
             command.lease_owner = self._worker_id
             command.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
             command.attempt += 1
-            if command.command_type in {"submit", "respond"}:
-                if (
-                    command.command_type == "submit"
-                    or (respond_payload is not None and respond_payload.expired)
+            if command.command_type in {"submit", "respond", "fork"}:
+                if command.command_type in {"submit", "fork"} or (
+                    respond_payload is not None and respond_payload.expired
                 ):
                     task.status = "running"
                 else:
                     task.status = "waiting_human"
                 assert product_run is not None
                 product_run.status = "running"
+                if product_run.started_at is None:
+                    product_run.started_at = now
                 product_run.last_heartbeat_at = now
                 if product_run.reconciliation_deadline_at is None:
                     product_run.reconciliation_deadline_at = now + timedelta(
@@ -575,6 +673,24 @@ class CommandDispatcher:
                     product_run.failure_message = (
                         "Official resume create intent is durable; a replacement "
                         "worker must reconcile metadata before any second create."
+                    )
+
+            fork_reconcile_only = False
+            if (
+                command.command_type == "fork"
+                and product_run is not None
+                and product_run.official_run_id is None
+            ):
+                fork_reconcile_only = product_run.failure_code in {
+                    "agent_fork_create_intent",
+                    "agent_fork_indeterminate",
+                }
+                if not fork_reconcile_only:
+                    product_run.failure_code = "agent_fork_create_intent"
+                    product_run.failure_message = (
+                        "Official checkpoint fork create intent is durable; a "
+                        "replacement worker must reconcile metadata before any "
+                        "second create."
                     )
 
             remote_handle = None
@@ -633,6 +749,19 @@ class CommandDispatcher:
                         thread_id=thread.official_thread_id,
                         run_id=resume_run.official_run_id,
                     )
+            fork_source_handle = None
+            if (
+                command.command_type == "fork"
+                and fork_source_run is not None
+                and fork_source_run.official_assistant_id
+                and thread.official_thread_id
+                and fork_source_run.official_run_id
+            ):
+                fork_source_handle = RemoteRunHandle(
+                    assistant_id=fork_source_run.official_assistant_id,
+                    thread_id=thread.official_thread_id,
+                    run_id=fork_source_run.official_run_id,
+                )
             return CommandLease(
                 command_id=command.id,
                 task_id=task.id,
@@ -651,6 +780,8 @@ class CommandDispatcher:
                 remote_handle=remote_handle,
                 resume_handle=resume_handle,
                 respond_payload=respond_payload,
+                fork_source_handle=fork_source_handle,
+                fork_payload=fork_payload,
                 review_policy=cast(ReviewPolicy, row[5]),
                 observed_terminal_status=(
                     cast(
@@ -661,6 +792,7 @@ class CommandDispatcher:
                     else None
                 ),
                 resume_reconcile_only=resume_reconcile_only,
+                fork_reconcile_only=fork_reconcile_only,
             )
 
     async def execute(self, lease: CommandLease) -> bool:
@@ -674,6 +806,8 @@ class CommandDispatcher:
         if lease.command_type == "submit" and lease.submission is None:
             return False
         if lease.command_type == "respond" and lease.respond_payload is None:
+            return False
+        if lease.command_type == "fork" and lease.fork_payload is None:
             return False
 
         handle = lease.remote_handle
@@ -728,6 +862,36 @@ class CommandDispatcher:
                                     lease.respond_payload.root_checkpoint.checkpoint_map
                                 ),
                             ),
+                        )
+                elif lease.command_type == "fork":
+                    if lease.fork_source_handle is None or lease.fork_payload is None:
+                        raise RuntimeError(
+                            "Fork command has no registered source Run lineage"
+                        )
+                    source_handle = lease.fork_source_handle
+                    authorize = getattr(self._runner, "authorize", None)
+                    if authorize is not None:
+                        source_handle = authorize(source_handle, lease.actor)
+                    if lease.fork_reconcile_only:
+                        handle = await self._runner.find(
+                            actor=lease.actor,
+                            task_id=str(lease.task_id),
+                            product_thread_id=source_handle.thread_id,
+                            product_run_id=str(lease.product_run_id),
+                        )
+                        if handle is None:
+                            raise RemoteForkIndeterminateError(
+                                "Durable checkpoint fork create intent has no visible "
+                                "official Run; refusing a duplicate create"
+                            )
+                    else:
+                        handle = await self._fork_with_heartbeat(
+                            lease,
+                            actor=lease.actor,
+                            handle=source_handle,
+                            task_id=str(lease.task_id),
+                            product_run_id=str(lease.product_run_id),
+                            checkpoint_id=lease.fork_payload.checkpoint_id,
                         )
                 else:
                     assert lease.submission is not None
@@ -1294,6 +1458,31 @@ class CommandDispatcher:
                 await asyncio.gather(resume_task, return_exceptions=True)
                 return None
 
+    async def _fork_with_heartbeat(
+        self,
+        lease: CommandLease,
+        **kwargs: object,
+    ) -> RemoteRunHandle | None:
+        fork_task = asyncio.create_task(self._runner.fork(**kwargs))
+        interval = max(1.0, self._lease_seconds / 3)
+        try:
+            async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                while True:
+                    done, _ = await asyncio.wait({fork_task}, timeout=interval)
+                    if fork_task in done:
+                        return await fork_task
+                    if not await self._renew_lease(lease):
+                        return None
+        except TimeoutError as exc:
+            raise RemoteForkIndeterminateError(
+                "Official checkpoint fork exceeded the remote operation deadline; "
+                "only metadata reconciliation is allowed"
+            ) from exc
+        finally:
+            if not fork_task.done():
+                fork_task.cancel()
+                await asyncio.gather(fork_task, return_exceptions=True)
+
     async def _renew_lease(self, lease: CommandLease) -> bool:
         now = self._clock()
         async with self._session_factory() as session, session.begin():
@@ -1837,6 +2026,76 @@ class CommandDispatcher:
                 product_run.failure_message = (
                     "Official Run resume failed after the configured attempt limit."
                 )
+                product_run.finished_at = now
+                product_run.projection_fence = lease.command_sequence
+                product_run.terminal_output_hash = output_hash
+                task.status = "failed"
+                task.completed_at = now
+                command.status = "failed"
+                command.lease_owner = None
+                command.lease_expires_at = None
+                return
+            if lease.command_type == "fork" and lease.fork_payload is not None:
+                task = await session.scalar(
+                    select(Task).where(Task.id == lease.task_id).with_for_update()
+                )
+                if task is None:
+                    raise RuntimeError("Failed fork command has no Task authority")
+                if (
+                    isinstance(exc, RemoteForkIndeterminateError)
+                    and product_run.reconciliation_deadline_at is not None
+                    and product_run.reconciliation_deadline_at > now
+                ):
+                    task.status = "queued"
+                    product_run.status = "queued"
+                    product_run.failure_code = "agent_fork_indeterminate"
+                    product_run.failure_message = (
+                        "Official checkpoint fork may have succeeded; only metadata "
+                        "reconciliation is allowed until the recovery deadline."
+                    )
+                    command.status = "pending"
+                    command.lease_owner = None
+                    command.lease_expires_at = now + timedelta(
+                        seconds=self._reconciliation_interval_seconds
+                    )
+                    return
+                if command.attempt < self._max_attempts:
+                    task.status = "queued"
+                    product_run.status = "queued"
+                    product_run.failure_code = "agent_server_unavailable"
+                    product_run.failure_message = (
+                        "Agent Server is temporarily unavailable; the admitted "
+                        "checkpoint fork is awaiting dispatch."
+                    )
+                    command.status = "pending"
+                    command.lease_owner = None
+                    command.lease_expires_at = now + timedelta(
+                        seconds=self._reconciliation_interval_seconds
+                    )
+                    return
+
+                output = {
+                    "terminal_status": "failed",
+                    "errors": [
+                        {
+                            "code": "agent_fork_failed",
+                            "error_type": type(exc).__name__,
+                            "retryable": False,
+                            "attempt": max(1, min(command.attempt, 100)),
+                        }
+                    ],
+                }
+                output_hash = sha256(
+                    json.dumps(
+                        output,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                product_run.status = "failed"
+                product_run.output_payload = output
+                product_run.failure_code = "agent_fork_failed"
+                product_run.failure_message = "Official checkpoint fork failed after the configured attempt limit."
                 product_run.finished_at = now
                 product_run.projection_fence = lease.command_sequence
                 product_run.terminal_output_hash = output_hash

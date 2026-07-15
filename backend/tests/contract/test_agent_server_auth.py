@@ -8,6 +8,7 @@ import pytest
 from crypto_alert_v2.auth.agent_server import (
     authenticate,
     deny_unhandled,
+    scope_store,
     scope_thread_access,
     scope_thread_create,
 )
@@ -139,6 +140,150 @@ async def test_thread_access_is_filtered_to_actor_scope() -> None:
         "workspace_id": "workspace-1",
         "user_id": "oidc|user-1",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "value", "logical_namespace"),
+    (
+        (
+            "put",
+            {
+                "namespace": ("preferences",),
+                "key": "theme",
+                "value": {"mode": "dark"},
+                "index": None,
+            },
+            ("preferences",),
+        ),
+        ("get", {"namespace": ("preferences",), "key": "theme"}, ("preferences",)),
+        (
+            "search",
+            {
+                "namespace": ("memories",),
+                "filter": None,
+                "limit": 10,
+                "offset": 0,
+                "query": None,
+            },
+            ("memories",),
+        ),
+        ("delete", {"namespace": ("preferences",), "key": "theme"}, ("preferences",)),
+        (
+            "list_namespaces",
+            {
+                "namespace": None,
+                "suffix": None,
+                "max_depth": None,
+                "limit": 10,
+                "offset": 0,
+            },
+            (),
+        ),
+    ),
+)
+async def test_store_operations_use_server_owned_private_namespace(
+    action: str,
+    value: dict[str, object],
+    logical_namespace: tuple[str, ...],
+) -> None:
+    context = SimpleNamespace(resource="store", action=action, user=User())
+
+    result = await scope_store(context, value)
+
+    assert result is None
+    assert value["namespace"] == (
+        "tenant",
+        "tenant-1",
+        "workspace",
+        "workspace-1",
+        "scope",
+        "private",
+        "principal",
+        "oidc|user-1",
+        "agent-memory",
+        *logical_namespace,
+    )
+
+
+@pytest.mark.asyncio
+async def test_store_namespace_separates_users_in_the_same_workspace() -> None:
+    first_value = {"namespace": ("preferences",), "key": "theme"}
+    second_value = {"namespace": ("preferences",), "key": "theme"}
+    peer = SimpleNamespace(
+        identity="oidc|user-2",
+        permissions=User.permissions,
+    )
+
+    await scope_store(SimpleNamespace(user=User()), first_value)
+    await scope_store(SimpleNamespace(user=peer), second_value)
+
+    assert first_value["namespace"] != second_value["namespace"]
+    assert first_value["namespace"][7] == "oidc|user-1"
+    assert second_value["namespace"][7] == "oidc|user-2"
+
+
+@pytest.mark.asyncio
+async def test_store_namespace_separates_same_subject_across_identity_issuers() -> None:
+    first_value = {"namespace": ("preferences",), "key": "theme"}
+    second_value = {"namespace": ("preferences",), "key": "theme"}
+    base_permissions = (
+        "analysis:read",
+        "tenant:tenant-1",
+        "workspace:workspace-1",
+        "trusted-service",
+    )
+    first = SimpleNamespace(
+        identity="shared-subject",
+        permissions=(*base_permissions, "identity-issuer:https://idp-a.example"),
+    )
+    second = SimpleNamespace(
+        identity="shared-subject",
+        permissions=(*base_permissions, "identity-issuer:https://idp-b.example"),
+    )
+
+    await scope_store(SimpleNamespace(user=first), first_value)
+    await scope_store(SimpleNamespace(user=second), second_value)
+
+    first_principal = first_value["namespace"][7]
+    second_principal = second_value["namespace"][7]
+    assert first_principal != second_principal
+    assert first_principal.startswith("identity-sha256:")
+    assert second_principal.startswith("identity-sha256:")
+    assert "shared-subject" not in first_value["namespace"]
+    assert "shared-subject" not in second_value["namespace"]
+
+
+@pytest.mark.asyncio
+async def test_store_denies_client_owned_authority_components() -> None:
+    untrusted_namespace = (
+        "scope",
+        "workspace",
+        "principal",
+        "oidc|user-2",
+        "purpose",
+        "preferences",
+    )
+    value = {"namespace": untrusted_namespace}
+
+    with pytest.raises(Exception) as error:
+        await scope_store(SimpleNamespace(user=User()), value)
+
+    assert getattr(error.value, "status_code", None) == 403
+    assert value["namespace"] == untrusted_namespace
+
+
+@pytest.mark.asyncio
+async def test_store_denies_an_actor_without_complete_server_scope() -> None:
+    user = SimpleNamespace(
+        identity="oidc|user-1",
+        permissions=("analysis:read", "tenant:tenant-1"),
+    )
+
+    with pytest.raises(Exception) as error:
+        await scope_store(SimpleNamespace(user=user), {"namespace": ()})
+
+    assert getattr(error.value, "status_code", None) == 403
 
 
 @pytest.mark.asyncio

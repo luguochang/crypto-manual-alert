@@ -11,13 +11,14 @@ from uuid import UUID, uuid4
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    ForkSubmission,
     InboxQueryStatus,
     InterruptResponseSubmission,
     InterruptResponsesSubmission,
@@ -51,6 +52,10 @@ class IdempotencyConflictError(RuntimeError):
 
 
 class TaskNotCancellableError(RuntimeError):
+    pass
+
+
+class ForkConflictError(RuntimeError):
     pass
 
 
@@ -217,20 +222,82 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     return sha256(encoded).hexdigest()
 
 
-def _require_analysis_write(actor: ActorContext, resolved: ResolvedActor) -> None:
-    if (
-        "analysis:write" not in actor.permissions
-        or "analysis:write" not in resolved.permissions
-    ):
+def _require_analysis_write(resolved: ResolvedActor) -> None:
+    if "analysis:write" not in resolved.permissions:
         raise PermissionError("analysis:write permission is required")
 
 
-def _require_analysis_read(actor: ActorContext, resolved: ResolvedActor) -> None:
-    if (
-        "analysis:read" not in actor.permissions
-        or "analysis:read" not in resolved.permissions
-    ):
+def _require_analysis_read(resolved: ResolvedActor) -> None:
+    if "analysis:read" not in resolved.permissions:
         raise PermissionError("analysis:read permission is required")
+
+
+async def _cancel_pending_pause_for_fork(
+    session: AsyncSession,
+    resolved: ResolvedActor,
+    task: Task,
+) -> None:
+    pauses = list(
+        (
+            await session.scalars(
+                select(InterruptPause)
+                .where(
+                    InterruptPause.task_id == task.id,
+                    InterruptPause.tenant_id == resolved.tenant_id,
+                    InterruptPause.workspace_id == resolved.workspace_id,
+                    InterruptPause.owner_user_id == resolved.user_id,
+                    InterruptPause.status.in_(("pending", "responding")),
+                )
+                .order_by(InterruptPause.pause_version)
+                .with_for_update()
+            )
+        ).all()
+    )
+    if not pauses:
+        return
+    if len(pauses) != 1:
+        raise RuntimeError("Task has more than one active interrupt pause")
+    pause = pauses[0]
+    if pause.status == "responding":
+        raise ForkConflictError(
+            "Task has an accepted review decision that is still resuming."
+        )
+    projections = list(
+        (
+            await session.scalars(
+                select(InterruptProjection)
+                .where(
+                    InterruptProjection.pause_id == pause.id,
+                    InterruptProjection.task_id == task.id,
+                    InterruptProjection.tenant_id == resolved.tenant_id,
+                    InterruptProjection.workspace_id == resolved.workspace_id,
+                    InterruptProjection.owner_user_id == resolved.user_id,
+                )
+                .order_by(InterruptProjection.id)
+                .with_for_update()
+            )
+        ).all()
+    )
+    if not projections or any(item.status != "pending" for item in projections):
+        raise RuntimeError("Pending interrupt pause member state is inconsistent")
+    paused_run = await session.scalar(
+        select(Run)
+        .where(
+            Run.id == pause.run_id,
+            Run.task_id == task.id,
+            Run.tenant_id == resolved.tenant_id,
+            Run.workspace_id == resolved.workspace_id,
+            Run.owner_user_id == resolved.user_id,
+        )
+        .with_for_update()
+    )
+    if paused_run is None or paused_run.status != "waiting_human":
+        raise RuntimeError("Pending interrupt pause Run state is inconsistent")
+    pause.status = "cancelled"
+    for projection in projections:
+        projection.status = "cancelled"
+    paused_run.status = "cancelled"
+    paused_run.finished_at = paused_run.finished_at or datetime.now(UTC)
 
 
 def _run_main_action(run: Run) -> str | None:
@@ -322,6 +389,7 @@ def _public_error(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         "agent_resume_failed": (
             "人工审核决定已保存，但官方 Agent 未能在恢复期限内继续运行。"
         ),
+        "agent_fork_failed": "无法从所选历史节点创建新的分析运行。",
         "interrupt_member_limit_exceeded": (
             "官方执行返回的并行审核项超过产品上限，当前任务已安全终止。"
         ),
@@ -609,6 +677,7 @@ class ProductAnalysisService:
             user = await session.scalar(
                 select(User).where(
                     User.tenant_id == tenant.id,
+                    User.identity_issuer == actor.identity_issuer,
                     User.external_subject == actor.user_id,
                 )
             )
@@ -616,6 +685,7 @@ class ProductAnalysisService:
                 user = User(
                     id=uuid4(),
                     tenant_id=tenant.id,
+                    identity_issuer=actor.identity_issuer,
                     external_subject=actor.user_id,
                     display_name=user_display_name,
                 )
@@ -676,7 +746,7 @@ class ProductAnalysisService:
         try:
             async with self._session_factory() as session, session.begin():
                 resolved = await resolve_actor(session, actor)
-                _require_analysis_write(actor, resolved)
+                _require_analysis_write(resolved)
                 existing = await _find_admission_task(
                     session, resolved, idempotency_key
                 )
@@ -729,7 +799,7 @@ class ProductAnalysisService:
         except IntegrityError as error:
             async with self._session_factory() as session:
                 resolved = await resolve_actor(session, actor)
-                _require_analysis_write(actor, resolved)
+                _require_analysis_write(resolved)
                 existing = await _find_admission_task(
                     session, resolved, idempotency_key
                 )
@@ -751,7 +821,7 @@ class ProductAnalysisService:
             return None
         async with self._session_factory() as session:
             resolved = await resolve_actor(session, actor)
-            _require_analysis_read(actor, resolved)
+            _require_analysis_read(resolved)
             task = await session.scalar(
                 select(Task).where(
                     Task.id == task_uuid,
@@ -798,7 +868,7 @@ class ProductAnalysisService:
         payload_hash = _payload_hash(payload)
         async with self._session_factory() as session, session.begin():
             resolved = await resolve_actor(session, actor)
-            _require_analysis_write(actor, resolved)
+            _require_analysis_write(resolved)
             task = await session.scalar(
                 select(Task)
                 .where(
@@ -895,6 +965,193 @@ class ProductAnalysisService:
             await session.flush()
             return await _task_view(session, resolved, task)
 
+    async def fork_task(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: ForkSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        try:
+            task_uuid = UUID(task_id)
+        except ValueError:
+            return None
+        command_idempotency_key = (
+            f"fork:{task_uuid}:{sha256(idempotency_key.encode()).hexdigest()}"
+        )
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            task = await session.scalar(
+                select(Task)
+                .where(
+                    Task.id == task_uuid,
+                    Task.tenant_id == resolved.tenant_id,
+                    Task.workspace_id == resolved.workspace_id,
+                    Task.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if task is None:
+                return None
+
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(
+                            TaskCommand.task_id == task.id,
+                            TaskCommand.tenant_id == resolved.tenant_id,
+                            TaskCommand.workspace_id == resolved.workspace_id,
+                            TaskCommand.actor_user_id == resolved.user_id,
+                        )
+                        .order_by(TaskCommand.sequence)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            replay = next(
+                (
+                    command
+                    for command in commands
+                    if command.idempotency_key == command_idempotency_key
+                ),
+                None,
+            )
+            if replay is not None:
+                replay_source_run_id = replay.payload.get("source_run_id")
+                replay_checkpoint_id = replay.payload.get("checkpoint_id")
+                same_checkpoint = (
+                    submission.checkpoint_id is None
+                    or (
+                        isinstance(replay_checkpoint_id, str)
+                        and hmac.compare_digest(
+                            replay_checkpoint_id,
+                            submission.checkpoint_id,
+                        )
+                    )
+                )
+                if (
+                    replay_source_run_id != str(submission.source_run_id)
+                    or not same_checkpoint
+                ):
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used with a different fork payload."
+                    )
+                fork_run_id = replay.payload.get("fork_run_id")
+                selected_run_id = (
+                    UUID(fork_run_id) if isinstance(fork_run_id, str) else None
+                )
+                return await _task_view(
+                    session,
+                    resolved,
+                    task,
+                    selected_run_id=selected_run_id,
+                )
+
+            if task.status == "cancelled":
+                raise ForkConflictError("Cancelled tasks cannot be forked.")
+
+            source_run = await session.scalar(
+                select(Run)
+                .where(
+                    Run.id == submission.source_run_id,
+                    Run.task_id == task.id,
+                    Run.thread_id == task.thread_id,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if source_run is None:
+                return None
+            source_checkpoint_id = source_run.checkpoint_id
+            if source_checkpoint_id is None:
+                raise ForkConflictError("Source Run has no forkable checkpoint.")
+            if submission.checkpoint_id is not None and not hmac.compare_digest(
+                source_checkpoint_id,
+                submission.checkpoint_id,
+            ):
+                raise ForkConflictError(
+                    "Checkpoint does not match the owner-scoped source Run."
+                )
+            if any(
+                command.status in {"pending", "dispatching"}
+                for command in commands
+            ):
+                raise ForkConflictError(
+                    "Task already has a command awaiting dispatch or reconciliation."
+                )
+            await _cancel_pending_pause_for_fork(session, resolved, task)
+            request_hash = _payload_hash(
+                {
+                    "task_id": str(task.id),
+                    "source_run_id": str(source_run.id),
+                    "checkpoint_id": source_checkpoint_id,
+                }
+            )
+
+            latest_attempt = await session.scalar(
+                select(func.coalesce(func.max(Run.attempt), 0)).where(
+                    Run.task_id == task.id,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                )
+            )
+            fork_run = Run(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=int(latest_attempt or 0) + 1,
+                status="queued",
+                checkpoint_id=source_checkpoint_id,
+                input_payload=source_run.input_payload,
+                forked_from_run_id=source_run.id,
+                forked_from_checkpoint_id=source_checkpoint_id,
+            )
+            command_payload = {
+                "source_run_id": str(source_run.id),
+                "fork_run_id": str(fork_run.id),
+                "checkpoint_id": source_checkpoint_id,
+            }
+            session.add(fork_run)
+            await session.flush()
+            session.add(
+                TaskCommand(
+                    id=uuid4(),
+                    tenant_id=resolved.tenant_id,
+                    workspace_id=resolved.workspace_id,
+                    actor_user_id=resolved.user_id,
+                    task_id=task.id,
+                    thread_id=task.thread_id,
+                    command_type="fork",
+                    payload=command_payload,
+                    payload_hash=request_hash,
+                    sequence=max(
+                        (command.sequence for command in commands),
+                        default=0,
+                    )
+                    + 1,
+                    status="pending",
+                    attempt=0,
+                    idempotency_key=command_idempotency_key,
+                )
+            )
+            task.status = "queued"
+            task.completed_at = None
+            await session.flush()
+            return await _task_view(
+                session,
+                resolved,
+                task,
+                selected_run_id=fork_run.id,
+            )
+
     async def respond_interrupt(
         self,
         actor: ActorContext,
@@ -909,7 +1166,7 @@ class ProductAnalysisService:
             return None
         async with self._session_factory() as session:
             resolved = await resolve_actor(session, actor)
-            _require_analysis_write(actor, resolved)
+            _require_analysis_write(resolved)
             task = await session.scalar(
                 select(Task)
                 .where(
@@ -1009,7 +1266,7 @@ class ProductAnalysisService:
 
         async with self._session_factory() as session, session.begin():
             resolved = await resolve_actor(session, actor)
-            _require_analysis_write(actor, resolved)
+            _require_analysis_write(resolved)
             task = await session.scalar(
                 select(Task)
                 .where(
@@ -1244,7 +1501,7 @@ class ProductAnalysisService:
     ) -> dict[str, Any]:
         async with self._session_factory() as session:
             resolved = await resolve_actor(session, actor)
-            _require_analysis_read(actor, resolved)
+            _require_analysis_read(resolved)
             rows = (
                 await session.execute(
                     select(Run, Task)
@@ -1302,7 +1559,7 @@ class ProductAnalysisService:
 
         async with self._session_factory() as session:
             resolved = await resolve_actor(session, actor)
-            _require_analysis_read(actor, resolved)
+            _require_analysis_read(resolved)
             scope = _inbox_scope(resolved)
             parsed_cursor = (
                 _parse_inbox_cursor(

@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleAlert, CircleX, RefreshCw, Send } from "lucide-react";
+import { CircleAlert, CircleCheck, CircleX, RefreshCw, Send } from "lucide-react";
 import {
   FormEvent,
   useCallback,
@@ -17,6 +17,13 @@ import {
   isServerExpiredReviewConflict,
   type ReviewSubmissionPhase,
 } from "@/features/work/human-review-panel";
+import {
+  forkContextKey,
+  resolveForkAcceptedTransition,
+  shouldOfferForkControl,
+  type ForkContext,
+} from "@/features/work/fork-control";
+import { TaskForkPanel } from "@/features/work/task-fork-panel";
 import {
   cancelTask,
   createAnalysis,
@@ -268,6 +275,8 @@ export function WorkSurface() {
   const [recoverableTaskId, setRecoverableTaskId] = useState<string | null>(null);
   const [streamBinding, setStreamBinding] = useState<AgentStreamBinding | null>(null);
   const [historicalRunSelection, setHistoricalRunSelection] = useState(false);
+  const [selectedProductRunId, setSelectedProductRunId] = useState<string | null>(null);
+  const [forkNoticeTaskId, setForkNoticeTaskId] = useState<string | null>(null);
   const [reviewBatch, setReviewBatch] = useState<ReviewBatchCoordinatorState>(
     createEmptyReviewBatchState,
   );
@@ -374,6 +383,7 @@ export function WorkSurface() {
     setRequestError(null);
     setRecoverableTaskId(null);
     selectedRunIdRef.current = selectedRunId;
+    setSelectedProductRunId(selectedRunId);
     setHistoricalRunSelection(selectedRunId !== null);
 
     try {
@@ -571,6 +581,7 @@ export function WorkSurface() {
     cancelRequest.current = null;
     taskRef.current = null;
     selectedRunIdRef.current = selection?.runId ?? null;
+    setSelectedProductRunId(selection?.runId ?? null);
     const emptyReviewBatch = createEmptyReviewBatchState();
     reviewBatchRef.current = emptyReviewBatch;
     setReviewBatch(emptyReviewBatch);
@@ -581,6 +592,7 @@ export function WorkSurface() {
     setSubmitting(false);
     setPolling(false);
     setCancelling(false);
+    setForkNoticeTaskId(null);
     setHistoricalRunSelection(selection?.runId !== null && selection !== null);
     if (selection !== null) void recoverTask(selection.taskId, selection.runId);
   }, [recoverTask]);
@@ -660,7 +672,9 @@ export function WorkSurface() {
     setReviewBatch(emptyReviewBatch);
     setTask(null);
     selectedRunIdRef.current = null;
+    setSelectedProductRunId(null);
     setHistoricalRunSelection(false);
+    setForkNoticeTaskId(null);
 
     try {
       const createdTask = await createAnalysis({
@@ -736,6 +750,56 @@ export function WorkSurface() {
     }
   }, [historicalRunSelection, startPolling]);
 
+  const handleForkAccepted = useCallback((
+    requestedContext: ForkContext,
+    forkedTask: ProductTask,
+  ) => {
+    const currentTask = taskRef.current;
+    if (currentTask === null) return;
+    const transition = resolveForkAcceptedTransition(
+      requestedContext,
+      {
+        taskId: currentTask.task_id,
+        selectedRunId: selectedRunIdRef.current,
+      },
+      forkedTask,
+    );
+    if (transition === null) return;
+
+    const version = pollVersion.current + 1;
+    pollVersion.current = version;
+    pollingLock.current = false;
+    reviewSubmissionLock.current = false;
+    cancelLock.current = false;
+    cancelRequest.current = null;
+    const emptyReviewBatch = createEmptyReviewBatchState();
+    reviewBatchRef.current = emptyReviewBatch;
+    setReviewBatch(emptyReviewBatch);
+    taskRef.current = transition.task;
+    setTask(transition.task);
+    setStreamBinding(null);
+    setRequestError(null);
+    setRecoverableTaskId(null);
+    setPolling(false);
+    setCancelling(false);
+    selectedRunIdRef.current = null;
+    setSelectedProductRunId(null);
+    setHistoricalRunSelection(false);
+    setForkNoticeTaskId(transition.task.task_id);
+    persistTaskId(transition.task.task_id);
+    if (transition.shouldPoll) startPolling(transition.task, version, null);
+  }, [startPolling]);
+
+  const refreshForkContext = useCallback((requestedContext: ForkContext) => {
+    const currentTask = taskRef.current;
+    if (
+      currentTask === null
+      || requestedContext.taskId !== currentTask.task_id
+      || requestedContext.selectedRunId !== selectedRunIdRef.current
+    ) return;
+    void recoverTask(requestedContext.taskId, requestedContext.selectedRunId);
+  }, [recoverTask]);
+
   function submitAnalysis(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void createProductTask();
@@ -761,6 +825,9 @@ export function WorkSurface() {
   const reviewBatchDisplayState: ReviewBatchDisplayState = pendingPause?.status === "responding"
     ? "responding"
     : renderedReviewBatch.phase;
+  const forkControlDisabled = cancelling
+    || cancellationPending
+    || renderedReviewBatch.phase === "submitting";
 
   return (
     <div className="work-page">
@@ -789,6 +856,16 @@ export function WorkSurface() {
               恢复读取
             </button>
           ) : null}
+        </section>
+      ) : null}
+
+      {forkNoticeTaskId !== null && forkNoticeTaskId === task?.task_id ? (
+        <section className="fork-success-notice" role="status">
+          <CircleCheck size={20} aria-hidden="true" />
+          <div>
+            <h2>分支已排队</h2>
+            <p>已切换到新的运行，Product 状态将继续更新。</p>
+          </div>
         </section>
       ) : null}
 
@@ -900,6 +977,21 @@ export function WorkSurface() {
           task={task}
           onRetry={!active && query.trim().length >= 4 ? createProductTask : undefined}
           retrying={submitting}
+        />
+      ) : null}
+
+
+      {task && shouldOfferForkControl(selectedProductRunId) ? (
+        <TaskForkPanel
+          key={forkContextKey({
+            taskId: task.task_id,
+            selectedRunId: selectedProductRunId,
+          })}
+          task={task}
+          selectedRunId={selectedProductRunId}
+          disabled={forkControlDisabled}
+          onAccepted={handleForkAccepted}
+          onRefreshContext={refreshForkContext}
         />
       ) : null}
 

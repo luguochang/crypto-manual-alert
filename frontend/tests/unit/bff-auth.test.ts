@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { resolveInternalAuthorization } from "../../src/lib/auth/bff-auth";
+import {
+  resolveIdentityAuthorization,
+  resolveInternalAuthorization,
+} from "../../src/lib/auth/bff-auth";
 
 
 describe("BFF session boundary", () => {
@@ -51,10 +54,16 @@ describe("BFF session boundary", () => {
     const session = {
       expires: "2026-07-13T16:00:00Z",
       user: { id: "oidc|user-1", name: "User", email: "user@example.com" },
+      identityIssuer: "https://identity.example.com",
+      contextId: "11111111-1111-4111-8111-111111111111",
+      contextVersion: "v1",
       tenantId: "tenant-1",
+      tenantName: "Tenant 1",
       workspaceId: "workspace-1",
+      workspaceName: "Workspace 1",
       roles: ["member"],
       permissions: ["analysis:read", "analysis:write"],
+      authContextError: "",
     } satisfies Session;
 
     const authorization = await resolveInternalAuthorization(
@@ -66,10 +75,14 @@ describe("BFF session boundary", () => {
 
     expect(authorization).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
     const payload = decodePayload(authorization ?? "");
-    expect(payload.tenant_id).toBe("tenant-1");
-    expect(payload.workspace_id).toBe("workspace-1");
     expect(payload.sub).toBe("oidc|user-1");
-    expect(payload.tenant_id).not.toBe("attacker");
+    expect(payload.identity_issuer).toBe("https://identity.example.com");
+    expect(payload.context_id).toBe("11111111-1111-4111-8111-111111111111");
+    expect(payload.token_use).toBe("user");
+    expect(payload).not.toHaveProperty("tenant_id");
+    expect(payload).not.toHaveProperty("workspace_id");
+    expect(payload).not.toHaveProperty("roles");
+    expect(payload).not.toHaveProperty("permissions");
   });
 
   it("signs a short-lived Agent token for a specified audience", async () => {
@@ -83,10 +96,16 @@ describe("BFF session boundary", () => {
     const session = {
       expires: "2026-07-13T16:00:00Z",
       user: { id: "oidc|agent-user" },
+      identityIssuer: "https://identity.example.com",
+      contextId: "22222222-2222-4222-8222-222222222222",
+      contextVersion: "v2",
       tenantId: "tenant-agent",
+      tenantName: "Agent Tenant",
       workspaceId: "workspace-agent",
+      workspaceName: "Agent Workspace",
       roles: ["member"],
       permissions: ["analysis:read"],
+      authContextError: "",
     } satisfies Session;
 
     const authorization = await resolveInternalAuthorization(
@@ -103,8 +122,9 @@ describe("BFF session boundary", () => {
     expect(Number(payload.exp) - Number(payload.iat)).toBe(60);
     expect(payload).toMatchObject({
       sub: "oidc|agent-user",
-      tenant_id: "tenant-agent",
-      workspace_id: "workspace-agent",
+      identity_issuer: "https://identity.example.com",
+      context_id: "22222222-2222-4222-8222-222222222222",
+      token_use: "user",
     });
   });
 
@@ -123,10 +143,16 @@ describe("BFF session boundary", () => {
     const session = {
       expires: "2026-07-13T16:00:00Z",
       user: { id: "compose-user" },
+      identityIssuer: "https://identity.example.com",
+      contextId: "33333333-3333-4333-8333-333333333333",
+      contextVersion: "v3",
       tenantId: "compose-tenant",
+      tenantName: "Compose Tenant",
       workspaceId: "compose-workspace",
+      workspaceName: "Compose Workspace",
       roles: ["member"],
       permissions: ["analysis:read", "analysis:write"],
+      authContextError: "",
     } satisfies Session;
 
     const authorization = await resolveInternalAuthorization(
@@ -138,7 +164,7 @@ describe("BFF session boundary", () => {
     expect(decodePayload(authorization ?? "").sub).toBe("compose-user");
   });
 
-  it("uses an explicitly enabled deployment-controlled development identity", async () => {
+  it("never mints a user token from deployment bootstrap authority fields", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     process.env.APP_ENVIRONMENT = "development";
     process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
@@ -154,9 +180,7 @@ describe("BFF session boundary", () => {
     process.env.DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID = "compose-workspace";
     process.env.DEVELOPMENT_BOOTSTRAP_ROLES = '["member"]';
     process.env.DEVELOPMENT_BOOTSTRAP_PERMISSIONS = '["analysis:read","analysis:write"]';
-    const resolveSession = vi.fn(async () => {
-      throw new Error("OIDC is not configured in local Compose");
-    });
+    const resolveSession = vi.fn(async () => null);
 
     const authorization = await resolveInternalAuthorization(
       new Request("http://0.0.0.0:3001/api/product/api/v2/analysis"),
@@ -164,15 +188,44 @@ describe("BFF session boundary", () => {
       { audience: "crypto-alert-agent-server" },
     );
 
-    expect(resolveSession).not.toHaveBeenCalled();
-    expect(decodePayload(authorization ?? "")).toMatchObject({
-      sub: "compose-user",
-      tenant_id: "compose-tenant",
-      workspace_id: "compose-workspace",
-      roles: ["member"],
-      permissions: ["analysis:read", "analysis:write"],
-      aud: "crypto-alert-agent-server",
+    expect(resolveSession).toHaveBeenCalledOnce();
+    expect(authorization).toBeNull();
+  });
+
+  it("issues an identity-only token before a workspace is selected", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    process.env.INTERNAL_JWT_KID = "identity-key";
+    process.env.INTERNAL_JWT_ISSUER = "https://product.example.com";
+    const session = {
+      expires: "2026-07-13T16:00:00Z",
+      user: { id: "oidc|new-user" },
+      identityIssuer: "https://identity.example.com",
+      contextId: "",
+      contextVersion: "",
+      tenantId: "",
+      tenantName: "",
+      workspaceId: "",
+      workspaceName: "",
+      roles: [],
+      permissions: [],
+      authContextError: "",
+    } satisfies Session;
+
+    const authorization = await resolveIdentityAuthorization(
+      new Request("https://product.example.com/api/product/api/v2/auth/contexts"),
+      async () => session,
+    );
+    const payload = decodePayload(authorization ?? "");
+    expect(payload).toMatchObject({
+      sub: "oidc|new-user",
+      identity_issuer: "https://identity.example.com",
+      token_use: "identity_discovery",
+      aud: "crypto-alert-identity-discovery",
     });
+    expect(payload).not.toHaveProperty("context_id");
   });
 
   it.each(["staging", "production"])(

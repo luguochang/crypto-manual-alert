@@ -37,9 +37,7 @@ export async function proxyAgentRequest(
   try {
     const authenticatedRuntime = requiresAuthenticatedRuntime();
     const audience = agentAudience();
-    const developmentBootstrap = !authenticatedRuntime
-      && await isDevelopmentBootstrapRuntime();
-    const internalAuthorization = authenticatedRuntime || developmentBootstrap;
+    const internalAuthorization = authenticatedRuntime;
     const baseUrl = agentServerBaseUrl(internalAuthorization);
     const authorization = internalAuthorization
       ? await resolveAuthorization(request, audience)
@@ -69,11 +67,6 @@ export async function proxyAgentRequest(
       { status: 502 },
     );
   }
-}
-
-async function isDevelopmentBootstrapRuntime(): Promise<boolean> {
-  const auth = await import("@/lib/auth/bff-auth");
-  return auth.isDevelopmentBootstrapRuntime();
 }
 
 function matchAgentRoute(pathSegments: string[]): AgentRoute | null {

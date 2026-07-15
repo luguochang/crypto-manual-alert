@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   analysisSubmissionSchema,
+  forkSubmissionSchema,
   inboxItemSchema,
   inboxQueryStatusSchema,
   interruptResponseSchema,
@@ -72,6 +73,26 @@ describe("Product API schemas", () => {
         query_text: "Assess DOGE.",
       }),
     ).toThrow();
+  });
+
+  it("parses the strict fork admission contract without requiring runtime coordinates", () => {
+    const sourceRunId = "11111111-1111-4111-8111-111111111111";
+
+    expect(forkSubmissionSchema.parse({ source_run_id: sourceRunId })).toEqual({
+      source_run_id: sourceRunId,
+    });
+    expect(forkSubmissionSchema.parse({
+      source_run_id: sourceRunId,
+      checkpoint_id: " checkpoint-owner-scoped-1 ",
+    })).toEqual({
+      source_run_id: sourceRunId,
+      checkpoint_id: "checkpoint-owner-scoped-1",
+    });
+    expect(() => forkSubmissionSchema.parse({
+      source_run_id: sourceRunId,
+      checkpoint_id: "checkpoint-owner-scoped-1",
+      namespace: "runtime/private",
+    })).toThrow();
   });
 
   it.each(allStatuses)("accepts the %s Product status", (status) => {

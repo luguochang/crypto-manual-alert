@@ -1,5 +1,6 @@
 import {
   analysisSubmissionSchema,
+  forkSubmissionSchema,
   inboxCursorSchema,
   inboxQueryStatusSchema,
   inboxViewSchema,
@@ -7,6 +8,7 @@ import {
   productTaskSchema,
   respondAllInterruptsSchema,
   type AnalysisSubmission,
+  type ForkSubmission,
   type InboxQueryStatus,
   type InboxView,
   type ProductRunList,
@@ -85,6 +87,28 @@ export async function cancelTask(
         accept: "application/json",
         "idempotency-key": idempotencyKey,
       },
+    },
+    fetcher,
+  );
+}
+
+export async function forkTask(
+  taskId: string,
+  input: ForkSubmission,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<ProductTask> {
+  const submission = forkSubmissionSchema.parse(input);
+  return requestTask(
+    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}/fork`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(submission),
     },
     fetcher,
   );

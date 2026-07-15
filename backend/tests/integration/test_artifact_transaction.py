@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.schema import CreateSchema
 
+from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.persistence.base import Base, PRODUCT_SCHEMA
 from crypto_alert_v2.persistence.models import (
     Artifact,
@@ -78,16 +78,9 @@ async def database_connection() -> AsyncIterator[AsyncConnection]:
         await engine.dispose()
 
 
-@dataclass(frozen=True, slots=True)
-class _Actor:
-    tenant_id: str
-    workspace_id: str
-    user_id: str
-
-
 async def _seed_artifact_lineage(
     session_factory: async_sessionmaker[AsyncSession],
-    actor: _Actor,
+    actor: ActorContext,
 ) -> tuple[Artifact, Artifact, UUID]:
     tenant = Tenant(id=uuid4(), external_id=actor.tenant_id, name="Integration Tenant")
     user = User(
@@ -200,10 +193,12 @@ async def test_artifact_version_and_decision_commit_atomically(
         expire_on_commit=False,
         join_transaction_mode="create_savepoint",
     )
-    actor = _Actor(
+    actor = ActorContext(
         tenant_id=f"tenant-{os.urandom(8).hex()}",
         workspace_id=f"workspace-{os.urandom(8).hex()}",
         user_id=f"oidc|{os.urandom(8).hex()}",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
     )
     committed_artifact, rolled_back_artifact, run_id = await _seed_artifact_lineage(
         session_factory, actor

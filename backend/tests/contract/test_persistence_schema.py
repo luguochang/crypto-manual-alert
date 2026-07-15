@@ -177,7 +177,10 @@ def test_tenant_and_workspace_ownership_is_backed_by_foreign_keys() -> None:
             continue
 
         assert "tenant_id" in table.c
-        tenant_targets = {foreign_key.target_fullname for foreign_key in table.c.tenant_id.foreign_keys}
+        tenant_targets = {
+            foreign_key.target_fullname
+            for foreign_key in table.c.tenant_id.foreign_keys
+        }
         assert f"{PRODUCT_SCHEMA}.tenants.id" in tenant_targets
 
         if table.name not in WORKSPACE_SCOPED_TABLES:
@@ -185,20 +188,19 @@ def test_tenant_and_workspace_ownership_is_backed_by_foreign_keys() -> None:
 
         assert "workspace_id" in table.c
         workspace_targets = {
-            foreign_key.target_fullname for foreign_key in table.c.workspace_id.foreign_keys
+            foreign_key.target_fullname
+            for foreign_key in table.c.workspace_id.foreign_keys
         }
         assert f"{PRODUCT_SCHEMA}.workspaces.id" in workspace_targets
 
 
 def test_actor_external_identifiers_and_lineage_keys_are_unique() -> None:
     assert frozenset({"external_id"}) in _unique_column_sets("tenants")
-    assert frozenset({"tenant_id", "external_id"}) in _unique_column_sets(
-        "workspaces"
-    )
+    assert frozenset({"tenant_id", "external_id"}) in _unique_column_sets("workspaces")
     assert frozenset({"external_id"}) not in _unique_column_sets("workspaces")
-    assert frozenset({"tenant_id", "external_subject"}) in _unique_column_sets(
-        "users"
-    )
+    assert frozenset(
+        {"tenant_id", "identity_issuer", "external_subject"}
+    ) in _unique_column_sets("users")
     assert frozenset({"external_subject"}) not in _unique_column_sets("users")
     assert frozenset({"workspace_id", "user_id"}) in _unique_column_sets("memberships")
     assert frozenset({"task_id", "attempt"}) in _unique_column_sets("runs")
@@ -285,6 +287,11 @@ def test_run_persists_reconciliation_deadline_and_projection_fence() -> None:
         "workspace_id",
         "resume_of_run_id",
     )
+    assert indexes["ix_runs_tenant_workspace_fork_source"] == (
+        "tenant_id",
+        "workspace_id",
+        "forked_from_run_id",
+    )
 
 
 def test_workspace_review_policy_is_server_owned_and_constrained() -> None:
@@ -311,7 +318,7 @@ def test_workspace_review_policy_is_server_owned_and_constrained() -> None:
     assert "review_policy" not in AnalysisSubmission.model_fields
 
 
-def test_run_resume_lineage_is_actor_task_scoped_and_terminal_observation_is_typed() -> None:
+def test_run_resume_and_fork_lineage_is_actor_task_scoped() -> None:
     table = Run.__table__
     constraints = {constraint.name: constraint for constraint in table.constraints}
 
@@ -337,13 +344,50 @@ def test_run_resume_lineage_is_actor_task_scoped_and_terminal_observation_is_typ
     assert isinstance(no_self, CheckConstraint)
     assert "resume_of_run_id <> id" in str(no_self.sqltext)
 
+    fork_fk = constraints["fk_runs_fork_source_scope"]
+    assert isinstance(fork_fk, ForeignKeyConstraint)
+    assert tuple(column.name for column in fork_fk.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "forked_from_run_id",
+        "forked_from_checkpoint_id",
+    )
+    assert tuple(element.target_fullname for element in fork_fk.elements) == (
+        "app.runs.tenant_id",
+        "app.runs.workspace_id",
+        "app.runs.owner_user_id",
+        "app.runs.task_id",
+        "app.runs.id",
+        "app.runs.checkpoint_id",
+    )
+    assert fork_fk.ondelete == "RESTRICT"
+    fork_unique = constraints["uq_runs_fork_checkpoint_scope"]
+    assert isinstance(fork_unique, UniqueConstraint)
+    assert tuple(column.name for column in fork_unique.columns) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "id",
+        "checkpoint_id",
+    )
+    assert table.c.forked_from_run_id.nullable is True
+    assert table.c.forked_from_checkpoint_id.nullable is True
+    assert table.c.forked_from_checkpoint_id.type.length == 255
+    assert "forked_from_run_id <> id" in str(
+        constraints["ck_runs_fork_not_self"].sqltext
+    )
+    complete_lineage_sql = str(constraints["ck_runs_fork_lineage_complete"].sqltext)
+    assert "forked_from_run_id IS NULL" in complete_lineage_sql
+    assert "forked_from_checkpoint_id IS NULL" in complete_lineage_sql
+
     observed = constraints["ck_runs_observed_terminal_status"]
     assert isinstance(observed, CheckConstraint)
     observed_sql = str(observed.sqltext)
     assert {
-        value
-        for value in OBSERVED_TERMINAL_STATUSES
-        if f"'{value}'" in observed_sql
+        value for value in OBSERVED_TERMINAL_STATUSES if f"'{value}'" in observed_sql
     } == set(OBSERVED_TERMINAL_STATUSES)
     assert "interrupted" not in observed_sql
     assert "running" not in observed_sql
@@ -398,9 +442,9 @@ def test_interrupt_projection_has_formal_state_scope_and_query_contracts() -> No
     status_constraint = constraints["ck_interrupt_inbox_status"]
     assert isinstance(status_constraint, CheckConstraint)
     status_sql = str(status_constraint.sqltext)
-    assert {
-        value for value in INTERRUPT_STATUSES if f"'{value}'" in status_sql
-    } == set(INTERRUPT_STATUSES)
+    assert {value for value in INTERRUPT_STATUSES if f"'{value}'" in status_sql} == set(
+        INTERRUPT_STATUSES
+    )
 
     indexes = _index_column_sets("interrupt_inbox")
     assert (
@@ -603,21 +647,22 @@ def test_task_view_exposes_only_typed_pending_interrupts() -> None:
             PendingInterruptMemberView.model_validate(
                 {**interrupt, internal_field: "must-not-leak"}
             )
-    assert TaskView.model_validate(
-        {
-            "task_id": "task-2",
-            "status": "queued",
-            "symbol": "ETH-USDT-SWAP",
-            "horizon": "4h",
-            "created_at": now,
-        }
-    ).pending_interrupts is None
+    assert (
+        TaskView.model_validate(
+            {
+                "task_id": "task-2",
+                "status": "queued",
+                "symbol": "ETH-USDT-SWAP",
+                "horizon": "4h",
+                "created_at": now,
+            }
+        ).pending_interrupts
+        is None
+    )
     with pytest.raises(ValidationError):
         PendingInterruptMemberView.model_validate({**interrupt, "status": "resolved"})
     with pytest.raises(ValidationError):
-        PendingInterruptMemberView.model_validate(
-            {**interrupt, "response_version": 0}
-        )
+        PendingInterruptMemberView.model_validate({**interrupt, "response_version": 0})
 
 
 def test_workspace_access_paths_have_composite_indexes() -> None:
@@ -645,7 +690,8 @@ def test_run_status_check_constraint_contains_exactly_the_supported_states() -> 
     constraints = [
         constraint
         for constraint in Run.__table__.constraints
-        if isinstance(constraint, CheckConstraint) and constraint.name == "ck_runs_status"
+        if isinstance(constraint, CheckConstraint)
+        and constraint.name == "ck_runs_status"
     ]
 
     assert len(constraints) == 1
@@ -659,6 +705,8 @@ class _Actor:
     tenant_id: str = "tenant-external"
     workspace_id: str = "workspace-external"
     user_id: str = "oidc|subject"
+    identity_issuer: str = "https://identity.example.com"
+    context_id: UUID | None = None
 
 
 class _RecordingSession:
@@ -693,6 +741,7 @@ async def test_repository_reads_resolve_actor_scope_inside_the_resource_query(
     assert "tenants.external_id = 'tenant-external'" in sql
     assert "workspaces.external_id = 'workspace-external'" in sql
     assert "users.external_subject = 'oidc|subject'" in sql
+    assert "users.identity_issuer = 'https://identity.example.com'" in sql
     assert "memberships.is_active IS true" in sql
     assert "app.memberships.tenant_id = app.tenants.id" in sql
     assert "app.memberships.workspace_id = app.workspaces.id" in sql
@@ -705,11 +754,11 @@ class _MigrationOperations:
         self.dropped_tables: list[tuple[str, str | None]] = []
         self.added_columns: list[tuple[str, str, str | None]] = []
         self.altered_columns: list[tuple[str, str, bool | None, str | None]] = []
-        self.created_constraints: list[tuple[str, str, tuple[str, ...], str | None]] = []
-        self.dropped_constraints: list[tuple[str, str, str | None]] = []
-        self.created_indexes: list[
+        self.created_constraints: list[
             tuple[str, str, tuple[str, ...], str | None]
         ] = []
+        self.dropped_constraints: list[tuple[str, str, str | None]] = []
+        self.created_indexes: list[tuple[str, str, tuple[str, ...], str | None]] = []
         self.dropped_indexes: list[tuple[str, str | None, str | None]] = []
         self.dropped_columns: list[tuple[str, str, str | None]] = []
         self.executed: list[str] = []
@@ -717,7 +766,9 @@ class _MigrationOperations:
     def execute(self, statement: Any) -> None:
         self.executed.append(str(statement))
 
-    def create_table(self, name: str, *elements: Any, schema: str | None = None) -> None:
+    def create_table(
+        self, name: str, *elements: Any, schema: str | None = None
+    ) -> None:
         self.created_tables.append((name, schema))
 
     def create_index(
@@ -796,7 +847,9 @@ class _MigrationOperations:
 
 def _load_initial_revision() -> Any:
     revision_path = BACKEND_ROOT / "alembic" / "versions" / "0001_initial.py"
-    spec = importlib.util.spec_from_file_location("product_initial_revision", revision_path)
+    spec = importlib.util.spec_from_file_location(
+        "product_initial_revision", revision_path
+    )
     assert spec is not None and spec.loader is not None
     revision = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(revision)
@@ -805,10 +858,7 @@ def _load_initial_revision() -> Any:
 
 def _load_admission_revision() -> Any:
     revision_path = (
-        BACKEND_ROOT
-        / "alembic"
-        / "versions"
-        / "0002_analysis_admission_idempotency.py"
+        BACKEND_ROOT / "alembic" / "versions" / "0002_analysis_admission_idempotency.py"
     )
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
@@ -822,10 +872,7 @@ def _load_admission_revision() -> Any:
 
 def _load_tenant_actor_revision() -> Any:
     revision_path = (
-        BACKEND_ROOT
-        / "alembic"
-        / "versions"
-        / "0003_tenant_scoped_actor_ids.py"
+        BACKEND_ROOT / "alembic" / "versions" / "0003_tenant_scoped_actor_ids.py"
     )
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
@@ -839,10 +886,7 @@ def _load_tenant_actor_revision() -> Any:
 
 def _load_official_assistant_revision() -> Any:
     revision_path = (
-        BACKEND_ROOT
-        / "alembic"
-        / "versions"
-        / "0004_official_assistant_id.py"
+        BACKEND_ROOT / "alembic" / "versions" / "0004_official_assistant_id.py"
     )
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
@@ -855,9 +899,7 @@ def _load_official_assistant_revision() -> Any:
 
 
 def _load_run_recovery_revision() -> Any:
-    revision_path = (
-        BACKEND_ROOT / "alembic" / "versions" / "0005_run_recovery_state.py"
-    )
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0005_run_recovery_state.py"
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
         "product_run_recovery_revision", revision_path
@@ -875,6 +917,18 @@ def _load_interrupt_projection_revision() -> Any:
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
         "product_interrupt_projection_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_run_fork_revision() -> Any:
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0009_run_fork_lineage.py"
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_run_fork_revision", revision_path
     )
     assert spec is not None and spec.loader is not None
     revision = importlib.util.module_from_spec(spec)
@@ -1073,15 +1127,13 @@ def test_run_recovery_revision_upgrade_and_downgrade_compile_for_postgresql() ->
         "TIMESTAMP WITH TIME ZONE;"
     ) in upgrade_sql
     assert (
-        "ALTER TABLE app.runs ADD COLUMN projection_fence "
-        "INTEGER DEFAULT 0 NOT NULL;"
+        "ALTER TABLE app.runs ADD COLUMN projection_fence INTEGER DEFAULT 0 NOT NULL;"
     ) in upgrade_sql
     assert (
         "ALTER TABLE app.runs ADD COLUMN terminal_output_hash VARCHAR(64);"
     ) in upgrade_sql
     assert (
-        "ALTER TABLE app.runs ADD COLUMN cancel_requested_at "
-        "TIMESTAMP WITH TIME ZONE;"
+        "ALTER TABLE app.runs ADD COLUMN cancel_requested_at TIMESTAMP WITH TIME ZONE;"
     ) in upgrade_sql
     assert (
         "CREATE INDEX ix_runs_status_reconcile_deadline "
@@ -1099,6 +1151,48 @@ def test_run_recovery_revision_upgrade_and_downgrade_compile_for_postgresql() ->
     assert positions == sorted(positions)
 
 
+def _render_run_fork_sql(method_name: str) -> str:
+    revision = _load_run_fork_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_run_fork_revision_compiles_auditable_scoped_lineage() -> None:
+    revision = _load_run_fork_revision()
+    assert revision.revision == "0009_run_fork_lineage"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0008_oidc_identity_issuer"
+
+    upgrade_sql = _render_run_fork_sql("upgrade")
+    downgrade_sql = _render_run_fork_sql("downgrade")
+    assert "ALTER TABLE app.runs ADD COLUMN forked_from_run_id UUID;" in upgrade_sql
+    assert (
+        "ALTER TABLE app.runs ADD COLUMN forked_from_checkpoint_id VARCHAR(255);"
+        in upgrade_sql
+    )
+    assert "CONSTRAINT fk_runs_fork_source_scope" in upgrade_sql
+    assert "CONSTRAINT uq_runs_fork_checkpoint_scope UNIQUE" in upgrade_sql
+    assert (
+        "FOREIGN KEY(tenant_id, workspace_id, owner_user_id, task_id, " in upgrade_sql
+    )
+    assert "forked_from_run_id, forked_from_checkpoint_id)" in upgrade_sql
+    assert (
+        "REFERENCES app.runs (tenant_id, workspace_id, owner_user_id, task_id, "
+        "id, checkpoint_id)" in upgrade_sql
+    )
+    assert "ON DELETE RESTRICT" in upgrade_sql
+    assert "ck_runs_fork_lineage_complete" in upgrade_sql
+    assert "ix_runs_tenant_workspace_fork_source" in upgrade_sql
+    assert "DROP COLUMN forked_from_checkpoint_id" in downgrade_sql
+    assert "DROP COLUMN forked_from_run_id" in downgrade_sql
+
+
 def _render_interrupt_projection_sql(method_name: str) -> str:
     revision = _load_interrupt_projection_revision()
     output = StringIO()
@@ -1111,7 +1205,9 @@ def _render_interrupt_projection_sql(method_name: str) -> str:
     return output.getvalue()
 
 
-def test_interrupt_projection_revision_compiles_complete_upgrade_and_downgrade() -> None:
+def test_interrupt_projection_revision_compiles_complete_upgrade_and_downgrade() -> (
+    None
+):
     revision = _load_interrupt_projection_revision()
 
     assert revision.revision == "0006_interrupt_projection"

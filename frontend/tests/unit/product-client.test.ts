@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   cancelTask,
   createAnalysis,
+  forkTask,
   getTask,
   listRuns,
   respondAllInterrupts,
@@ -112,6 +113,50 @@ describe("Product API client", () => {
     );
     const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
     expect(headers.get("idempotency-key")).toBe("cancel-network-retry-1");
+  });
+
+  it("admits a fork with only the owner-scoped Product Run capability", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json(taskProjection("queued"), { status: 202 });
+    });
+    const taskId = "22222222-2222-4222-8222-222222222222";
+    const sourceRunId = "11111111-1111-4111-8111-111111111111";
+
+    const task = await forkTask(
+      taskId,
+      { source_run_id: sourceRunId },
+      fetcher,
+      "fork-network-retry-1",
+    );
+
+    expect(task.status).toBe("queued");
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/product/api/v2/tasks/${taskId}/fork`,
+      expect.objectContaining({ method: "POST" }),
+    );
+    const init = fetcher.mock.calls[0]?.[1];
+    const headers = new Headers(init?.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("idempotency-key")).toBe("fork-network-retry-1");
+    expect(JSON.parse(String(init?.body))).toEqual({ source_run_id: sourceRunId });
+  });
+
+  it("rejects browser-owned fork coordinates before issuing a request", async () => {
+    const fetcher = vi.fn();
+
+    await expect(forkTask(
+      "22222222-2222-4222-8222-222222222222",
+      {
+        source_run_id: "11111111-1111-4111-8111-111111111111",
+        checkpoint_id: "checkpoint-1",
+        checkpoint_namespace: "runtime/private",
+      } as never,
+      fetcher,
+      "fork-1",
+    )).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("submits two pause members in exactly one strict respond-all request", async () => {

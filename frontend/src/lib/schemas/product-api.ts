@@ -23,6 +23,11 @@ export const analysisSubmissionSchema = z.strictObject({
   notify: z.boolean().default(false),
 });
 
+export const forkSubmissionSchema = z.strictObject({
+  source_run_id: z.string().uuid(),
+  checkpoint_id: z.string().trim().min(1).max(255).nullable().optional(),
+});
+
 const finiteNumberSchema = z
   .union([
     z.number(),
@@ -657,6 +662,7 @@ export const productTaskSchema = z
 export type AnalysisSubmission = z.infer<typeof analysisSubmissionSchema>;
 export type AgentStreamBinding = z.infer<typeof agentStreamBindingSchema>;
 export type ArtifactReviewEdits = z.infer<typeof artifactReviewEditsSchema>;
+export type ForkSubmission = z.infer<typeof forkSubmissionSchema>;
 export type InboxItem = z.infer<typeof inboxItemSchema>;
 export type InboxItemStatus = z.infer<typeof inboxItemStatusSchema>;
 export type InboxQueryStatus = z.infer<typeof inboxQueryStatusSchema>;

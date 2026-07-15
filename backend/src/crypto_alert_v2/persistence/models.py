@@ -102,16 +102,25 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "tenant_id",
+            "identity_issuer",
             "external_subject",
-            name="uq_users_tenant_external_subject",
+            name="uq_users_tenant_issuer_subject",
         ),
-        Index("ix_users_tenant_subject", "tenant_id", "external_subject"),
+        Index(
+            "ix_users_tenant_issuer_subject",
+            "tenant_id",
+            "identity_issuer",
+            "external_subject",
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    identity_issuer: Mapped[str] = mapped_column(
+        String(512), nullable=False, default="legacy", server_default=text("'legacy'")
     )
     external_subject: Mapped[str] = mapped_column(String(512), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(255))
@@ -150,7 +159,9 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class Membership(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "memberships"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "user_id", name="uq_memberships_workspace_user"),
+        UniqueConstraint(
+            "workspace_id", "user_id", name="uq_memberships_workspace_user"
+        ),
         Index(
             "ix_memberships_tenant_workspace_user",
             "tenant_id",
@@ -197,8 +208,18 @@ class Thread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "official_thread_id",
             name="uq_threads_workspace_official_thread",
         ),
-        Index("ix_threads_tenant_workspace_created", "tenant_id", "workspace_id", "created_at"),
-        Index("ix_threads_tenant_workspace_owner", "tenant_id", "workspace_id", "owner_user_id"),
+        Index(
+            "ix_threads_tenant_workspace_created",
+            "tenant_id",
+            "workspace_id",
+            "created_at",
+        ),
+        Index(
+            "ix_threads_tenant_workspace_owner",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -236,8 +257,12 @@ class Task(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "idempotency_key",
             name="uq_tasks_actor_workspace_idempotency",
         ),
-        Index("ix_tasks_tenant_workspace_status", "tenant_id", "workspace_id", "status"),
-        Index("ix_tasks_tenant_workspace_thread", "tenant_id", "workspace_id", "thread_id"),
+        Index(
+            "ix_tasks_tenant_workspace_status", "tenant_id", "workspace_id", "status"
+        ),
+        Index(
+            "ix_tasks_tenant_workspace_thread", "tenant_id", "workspace_id", "thread_id"
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -290,6 +315,15 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "id",
             name="uq_runs_projection_scope",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "task_id",
+            "id",
+            "checkpoint_id",
+            name="uq_runs_fork_checkpoint_scope",
+        ),
         UniqueConstraint("resume_of_run_id", name="uq_runs_resume_of_run"),
         ForeignKeyConstraint(
             [
@@ -309,9 +343,37 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_runs_resume_scope",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "workspace_id",
+                "owner_user_id",
+                "task_id",
+                "forked_from_run_id",
+                "forked_from_checkpoint_id",
+            ],
+            [
+                f"{PRODUCT_SCHEMA}.runs.tenant_id",
+                f"{PRODUCT_SCHEMA}.runs.workspace_id",
+                f"{PRODUCT_SCHEMA}.runs.owner_user_id",
+                f"{PRODUCT_SCHEMA}.runs.task_id",
+                f"{PRODUCT_SCHEMA}.runs.id",
+                f"{PRODUCT_SCHEMA}.runs.checkpoint_id",
+            ],
+            name="fk_runs_fork_source_scope",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "resume_of_run_id IS NULL OR resume_of_run_id <> id",
             name="ck_runs_resume_not_self",
+        ),
+        CheckConstraint(
+            "forked_from_run_id IS NULL OR forked_from_run_id <> id",
+            name="ck_runs_fork_not_self",
+        ),
+        CheckConstraint(
+            "(forked_from_run_id IS NULL) = (forked_from_checkpoint_id IS NULL)",
+            name="ck_runs_fork_lineage_complete",
         ),
         Index("ix_runs_tenant_workspace_status", "tenant_id", "workspace_id", "status"),
         Index("ix_runs_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"),
@@ -321,7 +383,15 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "workspace_id",
             "resume_of_run_id",
         ),
-        Index("ix_runs_status_reconcile_deadline", "status", "reconciliation_deadline_at"),
+        Index(
+            "ix_runs_tenant_workspace_fork_source",
+            "tenant_id",
+            "workspace_id",
+            "forked_from_run_id",
+        ),
+        Index(
+            "ix_runs_status_reconcile_deadline", "status", "reconciliation_deadline_at"
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -371,11 +441,15 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("0"),
     )
     terminal_output_hash: Mapped[str | None] = mapped_column(String(64))
-    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     observed_terminal_status: Mapped[str | None] = mapped_column(String(32))
-    resume_of_run_id: Mapped[UUID | None] = mapped_column(
+    resume_of_run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
+    forked_from_run_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True)
     )
+    forked_from_checkpoint_id: Mapped[str | None] = mapped_column(String(255))
 
 
 class InterruptPause(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -493,9 +567,7 @@ class InterruptPause(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="CASCADE"),
         nullable=False,
     )
-    run_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
-    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     pause_version: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -519,9 +591,7 @@ class InterruptPause(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("'pending'"),
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    resume_run_id: Mapped[UUID | None] = mapped_column(
-        PostgreSQLUUID(as_uuid=True)
-    )
+    resume_run_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     accepted_payload_hash: Mapped[str | None] = mapped_column(String(64))
 
     projections: Mapped[list["InterruptProjection"]] = relationship(
@@ -655,12 +725,8 @@ class InterruptProjection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="CASCADE"),
         nullable=False,
     )
-    run_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
-    )
-    pause_id: Mapped[UUID] = mapped_column(
-        PostgreSQLUUID(as_uuid=True), nullable=False
-    )
+    run_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
+    pause_id: Mapped[UUID] = mapped_column(PostgreSQLUUID(as_uuid=True), nullable=False)
     official_interrupt_id: Mapped[str] = mapped_column(String(255), nullable=False)
     namespace: Mapped[str] = mapped_column(Text, nullable=False)
     checkpoint_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -727,7 +793,9 @@ class MarketSnapshot(UUIDPrimaryKeyMixin, Base):
     )
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -772,7 +840,9 @@ class WebEvidence(UUIDPrimaryKeyMixin, Base):
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -783,7 +853,9 @@ class Artifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "artifacts"
     __table_args__ = (
         UniqueConstraint("task_id", "artifact_type", name="uq_artifacts_task_type"),
-        Index("ix_artifacts_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"),
+        Index(
+            "ix_artifacts_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -879,7 +951,9 @@ class Decision(UUIDPrimaryKeyMixin, Base):
             "decision_version",
             name="uq_decisions_artifact_decision_version",
         ),
-        Index("ix_decisions_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"),
+        Index(
+            "ix_decisions_tenant_workspace_task", "tenant_id", "workspace_id", "task_id"
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -937,7 +1011,9 @@ class TaskCommand(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             f"status IN ({_sql_values(TASK_COMMAND_STATUSES)})",
             name="ck_task_commands_status",
         ),
-        UniqueConstraint("thread_id", "sequence", name="uq_task_commands_thread_sequence"),
+        UniqueConstraint(
+            "thread_id", "sequence", name="uq_task_commands_thread_sequence"
+        ),
         UniqueConstraint(
             "workspace_id",
             "idempotency_key",
@@ -949,7 +1025,9 @@ class TaskCommand(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "workspace_id",
             "status",
         ),
-        Index("ix_task_commands_thread_status_sequence", "thread_id", "status", "sequence"),
+        Index(
+            "ix_task_commands_thread_status_sequence", "thread_id", "status", "sequence"
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -994,7 +1072,9 @@ class TaskCommand(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     lease_owner: Mapped[str | None] = mapped_column(String(255))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     official_run_id: Mapped[str | None] = mapped_column(String(255))
     official_command_id: Mapped[str | None] = mapped_column(String(255))

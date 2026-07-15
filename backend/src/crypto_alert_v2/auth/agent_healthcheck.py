@@ -97,6 +97,7 @@ async def check_agent_server(
         workspace_id=actor.workspace_id,
         roles=actor.roles,
         permissions=actor.permissions,
+        token_use="healthcheck",
     )
     headers = {"authorization": f"Bearer {token}"}
     client = client_factory(

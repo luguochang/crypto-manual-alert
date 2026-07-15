@@ -7,6 +7,7 @@ from pydantic import ValidationError
 import pytest
 
 from crypto_alert_v2.auth.internal_token import (
+    IDENTITY_DISCOVERY_AUDIENCE,
     InternalTokenIssuer,
     InternalTokenVerifier,
 )
@@ -41,10 +42,12 @@ def claims(now: datetime) -> dict[str, object]:
         "iss": ISSUER,
         "aud": AUDIENCE,
         "sub": "oidc|user-1",
+        "token_use": "worker",
         "tenant_id": "tenant-1",
         "workspace_id": "workspace-1",
         "roles": ["member"],
         "permissions": ["analysis:read", "analysis:write"],
+        "identity_issuer": "https://identity.example.com",
         "jti": "request-1",
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=60)).timestamp()),
@@ -70,6 +73,7 @@ def test_verifies_short_lived_server_owned_claims(key_pair: tuple[str, str]) -> 
     assert verified["sub"] == "oidc|user-1"
     assert verified["tenant_id"] == "tenant-1"
     assert verified["workspace_id"] == "workspace-1"
+    assert verified["token_use"] == "worker"
 
 
 def test_issuer_and_verifier_share_the_production_contract(
@@ -101,6 +105,58 @@ def test_issuer_and_verifier_share_the_production_contract(
     verified = verifier.verify(token)
     assert verified["sub"] == "oidc|user-1"
     assert verified["roles"] == ["member"]
+    assert verified["token_use"] == "worker"
+
+
+def test_identity_and_scoped_tokens_never_carry_authority_claims(
+    key_pair: tuple[str, str],
+) -> None:
+    private_key, public_key = key_pair
+    identity_issuer = InternalTokenIssuer(
+        private_key=private_key,
+        key_id="key-1",
+        issuer=ISSUER,
+        audience=IDENTITY_DISCOVERY_AUDIENCE,
+    )
+    identity_verifier = InternalTokenVerifier(
+        public_keys={"key-1": public_key},
+        issuer=ISSUER,
+        audience=IDENTITY_DISCOVERY_AUDIENCE,
+    )
+    scoped_issuer = InternalTokenIssuer(
+        private_key=private_key,
+        key_id="key-1",
+        issuer=ISSUER,
+        audience=AUDIENCE,
+    )
+    scoped_verifier = InternalTokenVerifier(
+        public_keys={"key-1": public_key},
+        issuer=ISSUER,
+        audience=AUDIENCE,
+    )
+
+    identity_claims = identity_verifier.verify(
+        identity_issuer.issue_identity(
+            issuer="https://identity.example.com",
+            subject="oidc|user-1",
+        )
+    )
+    scoped_claims = scoped_verifier.verify(
+        scoped_issuer.issue_scoped(
+            issuer="https://identity.example.com",
+            subject="oidc|user-1",
+            context_id="11111111-1111-4111-8111-111111111111",
+        )
+    )
+
+    for verified in (identity_claims, scoped_claims):
+        assert not {"tenant_id", "workspace_id", "roles", "permissions"}.intersection(
+            verified
+        )
+    assert identity_claims["token_use"] == "identity_discovery"
+    assert "context_id" not in identity_claims
+    assert scoped_claims["token_use"] == "user"
+    assert scoped_claims["context_id"] == "11111111-1111-4111-8111-111111111111"
 
 
 def test_issuer_rejects_61_second_lifetime(key_pair: tuple[str, str]) -> None:
@@ -202,7 +258,16 @@ def test_rejects_token_with_excessive_lifetime(key_pair: tuple[str, str]) -> Non
 
 
 @pytest.mark.parametrize(
-    "missing", ["sub", "tenant_id", "workspace_id", "jti", "iat", "exp"]
+    "missing",
+    [
+        "sub",
+        "token_use",
+        "tenant_id",
+        "workspace_id",
+        "jti",
+        "iat",
+        "exp",
+    ],
 )
 def test_rejects_missing_required_claim(
     key_pair: tuple[str, str], missing: str

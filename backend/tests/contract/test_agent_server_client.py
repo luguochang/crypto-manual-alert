@@ -1,12 +1,18 @@
 from typing import Any
 
 import httpx
-from langgraph_sdk.errors import APITimeoutError, ConflictError, NotFoundError
+from langgraph_sdk.errors import (
+    APIConnectionError,
+    APITimeoutError,
+    ConflictError,
+    NotFoundError,
+)
 import pytest
 
 from crypto_alert_v2.api.agent_server import (
     AgentServerRunner,
     RemoteCheckpoint,
+    RemoteForkIndeterminateError,
     RemoteInterruptSet,
     RemoteResumeIndeterminateError,
     RemoteRunHandle,
@@ -247,6 +253,7 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
             "tenant_id": "tenant-1",
             "workspace_id": "workspace-1",
             "user_id": "user-1",
+            "identity_issuer": "legacy",
             "task_id": "task-1",
             "product_run_id": "task-1",
         },
@@ -263,6 +270,7 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
             "tenant_id": "tenant-1",
             "workspace_id": "workspace-1",
             "user_id": "user-1",
+            "identity_issuer": "legacy",
             "task_id": "task-1",
             "product_run_id": "task-1",
         },
@@ -312,6 +320,7 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
             "tenant_id": "tenant-1",
             "workspace_id": "workspace-1",
             "user_id": "user-1",
+            "identity_issuer": "legacy",
             "task_id": "task-1",
             "product_run_id": "product-run-1",
         },
@@ -356,6 +365,177 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
         "headers": {"authorization": "Bearer token-for-user-1"},
     }
     assert client.runs.events == ["list", "create", "get", "join", "cancel", "get"]
+
+
+@pytest.mark.asyncio
+async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
+    client = RecordingClient()
+    client.threads.state_result["checkpoint"]["checkpoint_id"] = (
+        "checkpoint-fork-source"
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        authorization_provider=lambda _: "Bearer fork-token",
+    )
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    forked = await runner.fork(
+        actor=actor,
+        handle=_remote_handle(),
+        task_id="task-1",
+        product_run_id="product-fork-run-2",
+        checkpoint_id="checkpoint-fork-source",
+    )
+
+    assert client.runs.create_args == (
+        "thread-1",
+        "11111111-1111-4111-8111-111111111111",
+    )
+    assert client.runs.create_kwargs is not None
+    create_kwargs = dict(client.runs.create_kwargs)
+    assert callable(create_kwargs.pop("on_run_created"))
+    assert create_kwargs == {
+        "input": None,
+        "checkpoint_id": "checkpoint-fork-source",
+        "durability": "sync",
+        "metadata": {
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "identity_issuer": "legacy",
+            "task_id": "task-1",
+            "product_run_id": "product-fork-run-2",
+            "forked_from_official_run_id": "run-1",
+            "forked_from_checkpoint_id": "checkpoint-fork-source",
+        },
+        "headers": {"authorization": "Bearer fork-token"},
+    }
+    assert "config" not in create_kwargs
+    assert client.threads.get_state_args == ("thread-1",)
+    assert client.threads.get_state_kwargs == {
+        "checkpoint_id": "checkpoint-fork-source",
+        "headers": {"authorization": "Bearer fork-token"},
+    }
+    assert forked == RemoteRunHandle(
+        assistant_id="11111111-1111-4111-8111-111111111111",
+        thread_id="thread-1",
+        run_id="run-1",
+    )
+    assert forked.authorization == "Bearer fork-token"
+
+
+@pytest.mark.asyncio
+async def test_runner_never_recreates_an_indeterminate_checkpoint_fork() -> None:
+    client = RecordingClient()
+    client.threads.state_result["checkpoint"]["checkpoint_id"] = (
+        "checkpoint-fork-indeterminate"
+    )
+    client.runs.create_error = APITimeoutError(
+        request=httpx.Request("POST", "http://agent.invalid/threads/thread-1/runs")
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        resume_reconciliation_delays=(0, 0),
+    )
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    fork_kwargs = {
+        "actor": actor,
+        "handle": _remote_handle(),
+        "task_id": "task-1",
+        "product_run_id": "product-fork-indeterminate",
+        "checkpoint_id": "checkpoint-fork-indeterminate",
+    }
+
+    with pytest.raises(RemoteForkIndeterminateError, match="indeterminate"):
+        await runner.fork(**fork_kwargs)
+    with pytest.raises(RemoteForkIndeterminateError, match="indeterminate"):
+        await runner.fork(**fork_kwargs)
+
+    assert len(client.runs.create_calls) == 1
+    assert client.runs.events.count("create") == 1
+    assert client.runs.create_kwargs is not None
+    assert client.runs.create_kwargs["checkpoint_id"] == (
+        "checkpoint-fork-indeterminate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_never_recreates_a_fork_after_a_connection_reset() -> None:
+    client = RecordingClient()
+    client.threads.state_result["checkpoint"]["checkpoint_id"] = (
+        "checkpoint-fork-connection-reset"
+    )
+    client.runs.create_error = APIConnectionError(
+        request=httpx.Request("POST", "http://agent.invalid/threads/thread-1/runs")
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        resume_reconciliation_delays=(0, 0),
+    )
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    fork_kwargs = {
+        "actor": actor,
+        "handle": _remote_handle(),
+        "task_id": "task-1",
+        "product_run_id": "product-fork-connection-reset",
+        "checkpoint_id": "checkpoint-fork-connection-reset",
+    }
+
+    with pytest.raises(RemoteForkIndeterminateError, match="indeterminate"):
+        await runner.fork(**fork_kwargs)
+    with pytest.raises(RemoteForkIndeterminateError, match="indeterminate"):
+        await runner.fork(**fork_kwargs)
+
+    assert len(client.runs.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_fork_checkpoint_from_another_official_source_run() -> (
+    None
+):
+    client = RecordingClient()
+    client.threads.state_result["checkpoint"]["checkpoint_id"] = (
+        "checkpoint-wrong-source"
+    )
+    client.threads.state_result["metadata"]["run_id"] = "another-official-run"
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    with pytest.raises(RuntimeError, match="selected source Run"):
+        await runner.fork(
+            actor=ActorContext(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                user_id="user-1",
+                roles=("member",),
+                permissions=("analysis:read", "analysis:write"),
+            ),
+            handle=_remote_handle(),
+            task_id="task-1",
+            product_run_id="product-fork-wrong-source",
+            checkpoint_id="checkpoint-wrong-source",
+        )
+
+    assert client.runs.create_calls == []
 
 
 @pytest.mark.asyncio
@@ -881,6 +1061,7 @@ async def test_runner_recovers_an_existing_product_run_without_creating_another(
                 "tenant_id": "tenant-1",
                 "workspace_id": "workspace-1",
                 "user_id": "user-1",
+                "identity_issuer": "legacy",
                 "task_id": "task-1",
                 "product_run_id": "product-run-1",
             },
@@ -961,6 +1142,7 @@ async def test_runner_finds_an_unregistered_run_by_product_metadata() -> None:
                 "tenant_id": "tenant-1",
                 "workspace_id": "workspace-1",
                 "user_id": "user-1",
+                "identity_issuer": "legacy",
                 "task_id": "task-1",
                 "product_run_id": "product-run-1",
             },

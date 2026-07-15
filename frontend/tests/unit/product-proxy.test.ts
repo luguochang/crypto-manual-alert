@@ -1,4 +1,3 @@
-import { generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -91,25 +90,9 @@ describe("Product BFF proxy", () => {
     expect(headers.get("idempotency-key")).toBe("analysis-admission-1");
   });
 
-  it.each([
-    ["default", undefined, "crypto-alert-agent-server"],
-    ["configured", "agent-server-override", "agent-server-override"],
-  ] as const)("signs Product requests for the %s Agent Server audience", async (
-    _case,
-    configuredAudience,
-    expectedAudience,
-  ) => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  it("uses the local server token instead of bootstrap authority fields", async () => {
     process.env.APP_ENVIRONMENT = "development";
-    process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
-      .export({ type: "pkcs8", format: "pem" })
-      .toString();
-    process.env.INTERNAL_JWT_KID = "compose-product-key";
-    process.env.INTERNAL_JWT_ISSUER = "compose-local";
-    process.env.INTERNAL_JWT_AUDIENCE = "browser-authority";
-    if (configuredAudience) {
-      process.env.AGENT_SERVER_INTERNAL_JWT_AUDIENCE = configuredAudience;
-    }
+    process.env.AGENT_SERVER_LOCAL_TOKEN = "local-product-token";
     process.env.DEVELOPMENT_BOOTSTRAP_ENABLED = "true";
     process.env.DEVELOPMENT_BOOTSTRAP_PROFILE = "local-proof";
     process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT = "compose-user";
@@ -135,12 +118,7 @@ describe("Product BFF proxy", () => {
     expect(response.status).toBe(202);
     const authorization = new Headers(fetcher.mock.calls[0]?.[1]?.headers)
       .get("authorization") ?? "";
-    expect(authorization).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
-    const payloadSegment = authorization.replace(/^Bearer /, "").split(".")[1] ?? "";
-    const payload = JSON.parse(
-      Buffer.from(payloadSegment, "base64url").toString("utf8"),
-    ) as { aud?: string };
-    expect(payload.aud).toBe(expectedAudience);
+    expect(authorization).toBe("Bearer local-product-token");
   });
 
   it.each([
@@ -246,6 +224,63 @@ describe("Product BFF proxy", () => {
       fetcher,
     );
     expect(rejected.status).toBe(404);
+  });
+
+  it("forwards only the exact fork route, JSON body, and idempotency key", async () => {
+    const taskId = "22222222-2222-4222-8222-222222222222";
+    const body = JSON.stringify({
+      source_run_id: "11111111-1111-4111-8111-111111111111",
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json(taskProjection("queued"), { status: 202 });
+    });
+
+    const response = await proxyProductRequest(
+      new Request(`http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/fork`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "fork-network-retry-1",
+          authorization: "Bearer browser-forgery",
+        },
+        body,
+      }),
+      ["api", "v2", "tasks", taskId, "fork"],
+      fetcher,
+    );
+
+    expect(response.status).toBe(202);
+    const [upstreamUrl, upstreamInit] = fetcher.mock.calls[0] ?? [];
+    expect(upstreamUrl).toBe(
+      `http://127.0.0.1:8123/app/api/v2/tasks/${taskId}/fork`,
+    );
+    const headers = new Headers(upstreamInit?.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("idempotency-key")).toBe("fork-network-retry-1");
+    expect(headers.get("authorization")).toBeNull();
+    expect(new TextDecoder().decode(upstreamInit?.body as ArrayBuffer)).toBe(body);
+  });
+
+  it.each([
+    ["GET", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "fork"]],
+    ["POST", ["api", "v2", "tasks", "not-a-task", "fork"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "fork", "extra"]],
+    ["POST", ["api", "v2", "runs", "22222222-2222-4222-8222-222222222222", "fork"]],
+  ])("rejects a fork lookalike route (%s %j)", async (method, path) => {
+    const fetcher = vi.fn();
+    const response = await proxyProductRequest(
+      new Request(`http://127.0.0.1:3101/api/product/${path.join("/")}`, {
+        method,
+        body: method === "POST" ? "{}" : undefined,
+      }),
+      path,
+      fetcher,
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("forwards only the exact respond-all route, JSON body, and idempotency key", async () => {

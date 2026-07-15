@@ -72,10 +72,13 @@ function isLoopbackHostname(hostname: string): boolean {
 function isAllowedProductRoute(method: string, pathSegments: string[]): boolean {
   const path = pathSegments.join("/");
   if (method === "GET" && path === "api/v2/health") return true;
+  if (method === "GET" && path === "api/v2/auth/contexts") return true;
+  if (method === "POST" && path === "api/v2/auth/context/select") return true;
   if (method === "GET" && path === "api/v2/runs") return true;
   if (method === "GET" && path === "api/v2/inbox") return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
   if (method === "POST" && isTaskCancelRoute(pathSegments)) return true;
+  if (method === "POST" && isTaskForkRoute(pathSegments)) return true;
   if (method === "POST" && isInterruptRespondAllRoute(pathSegments)) return true;
   return method === "GET" && isTaskReadRoute(pathSegments);
 }
@@ -94,6 +97,12 @@ function isTaskCancelRoute(pathSegments: string[]): boolean {
     && pathSegments[4] === "cancel";
 }
 
+function isTaskForkRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 5
+    && isTaskReadRoute(pathSegments.slice(0, 4))
+    && pathSegments[4] === "fork";
+}
+
 function isInterruptRespondAllRoute(pathSegments: string[]): boolean {
   return pathSegments.length === 6
     && pathSegments[0] === "api"
@@ -107,12 +116,20 @@ function isInterruptRespondAllRoute(pathSegments: string[]): boolean {
 async function defaultAuthorizationResolver(request: Request): Promise<string | null> {
   const {
     isDevelopmentBootstrapRuntime,
+    resolveIdentityAuthorization,
     resolveInternalAuthorization,
   } = await import("@/lib/auth/bff-auth");
   if (
     !requiresAuthenticatedRuntime()
     && !isDevelopmentBootstrapRuntime()
   ) return null;
+  const path = new URL(request.url).pathname;
+  if (
+    path.endsWith("/api/v2/auth/contexts")
+    || path.endsWith("/api/v2/auth/context/select")
+  ) {
+    return resolveIdentityAuthorization(request);
+  }
   return resolveInternalAuthorization(request, undefined, {
     audience: agentServerAudience(),
   });
@@ -163,6 +180,7 @@ function buildServerOwnedHeaders(
     && (
       path === "api/v2/analysis"
       || isTaskCancelRoute(pathSegments)
+      || isTaskForkRoute(pathSegments)
       || isInterruptRespondAllRoute(pathSegments)
     )
   ) {

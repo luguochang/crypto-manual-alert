@@ -3,7 +3,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from langgraph_sdk.errors import APITimeoutError, ConflictError, NotFoundError
+from langgraph_sdk.errors import (
+    APIConnectionError,
+    APITimeoutError,
+    ConflictError,
+    NotFoundError,
+)
 
 from crypto_alert_v2.api.schemas import AnalysisSubmission
 from crypto_alert_v2.auth.context import ActorContext
@@ -83,6 +88,10 @@ class RemoteResumeIndeterminateError(RuntimeError):
     """A resume create may have succeeded and must only be reconciled."""
 
 
+class RemoteForkIndeterminateError(RuntimeError):
+    """A checkpoint fork may have succeeded and must only be reconciled."""
+
+
 class AgentServerRunner:
     def __init__(
         self,
@@ -99,7 +108,9 @@ class AgentServerRunner:
         self._authorization_provider = authorization_provider
         self._resume_reconciliation_delays = tuple(resume_reconciliation_delays)
         self._indeterminate_resumes: set[tuple[str, str, str, str, str]] = set()
+        self._indeterminate_forks: set[tuple[str, str, str, str, str]] = set()
         self._resume_lock = asyncio.Lock()
+        self._fork_lock = asyncio.Lock()
 
     async def run(
         self,
@@ -136,6 +147,12 @@ class AgentServerRunner:
             "tenant_id": actor.tenant_id,
             "workspace_id": actor.workspace_id,
             "user_id": actor.user_id,
+            "identity_issuer": actor.identity_issuer,
+            **(
+                {"context_id": str(actor.context_id)}
+                if actor.context_id is not None
+                else {}
+            ),
             "task_id": task_id,
             "product_run_id": product_run_id,
         }
@@ -190,6 +207,158 @@ class AgentServerRunner:
             run_id=run_id,
             authorization=authorization,
         )
+
+    async def fork(
+        self,
+        *,
+        actor: ActorContext,
+        handle: RemoteRunHandle,
+        task_id: str,
+        product_run_id: str,
+        checkpoint_id: str,
+    ) -> RemoteRunHandle:
+        async with self._fork_lock:
+            authorization = handle.authorization or (
+                self._authorization_provider(actor)
+                if self._authorization_provider is not None
+                else None
+            )
+            fork_key = (
+                actor.tenant_id,
+                actor.workspace_id,
+                actor.user_id,
+                handle.thread_id,
+                product_run_id,
+            )
+            existing = await self._find_existing_run(
+                actor=actor,
+                task_id=task_id,
+                product_run_id=product_run_id,
+                thread_id=handle.thread_id,
+                authorization=authorization,
+            )
+            if existing is not None:
+                self._indeterminate_forks.discard(fork_key)
+                return existing
+            if fork_key in self._indeterminate_forks:
+                existing = await self._reconcile_existing_run(
+                    actor=actor,
+                    task_id=task_id,
+                    product_run_id=product_run_id,
+                    thread_id=handle.thread_id,
+                    authorization=authorization,
+                )
+                if existing is not None:
+                    self._indeterminate_forks.discard(fork_key)
+                    return existing
+                raise RemoteForkIndeterminateError(
+                    "Agent Server checkpoint fork remains indeterminate; "
+                    "refusing a duplicate create"
+                )
+
+            await self._validate_fork_checkpoint(
+                handle=replace(handle, authorization=authorization),
+                checkpoint_id=checkpoint_id,
+            )
+
+            metadata = {
+                "tenant_id": actor.tenant_id,
+                "workspace_id": actor.workspace_id,
+                "user_id": actor.user_id,
+                "identity_issuer": actor.identity_issuer,
+                **(
+                    {"context_id": str(actor.context_id)}
+                    if actor.context_id is not None
+                    else {}
+                ),
+                "task_id": task_id,
+                "product_run_id": product_run_id,
+                "forked_from_official_run_id": handle.run_id,
+                "forked_from_checkpoint_id": checkpoint_id,
+            }
+            options: dict[str, Any] = {
+                "input": None,
+                "checkpoint_id": checkpoint_id,
+                "durability": "sync",
+                "metadata": metadata,
+            }
+            created_run: dict[str, str] = {}
+
+            def remember_created_run(created: Mapping[str, Any]) -> None:
+                run_id = created.get("run_id")
+                thread_id = created.get("thread_id")
+                if (
+                    isinstance(run_id, str)
+                    and run_id.strip()
+                    and (thread_id is None or thread_id == handle.thread_id)
+                ):
+                    created_run["run_id"] = run_id.strip()
+
+            options["on_run_created"] = remember_created_run
+            if authorization:
+                options["headers"] = {"authorization": authorization}
+            try:
+                run = await self._client.runs.create(
+                    handle.thread_id,
+                    handle.assistant_id,
+                    **options,
+                )
+            except (APIConnectionError, APITimeoutError) as exc:
+                if accepted_run_id := created_run.get("run_id"):
+                    return RemoteRunHandle(
+                        assistant_id=handle.assistant_id,
+                        thread_id=handle.thread_id,
+                        run_id=accepted_run_id,
+                        authorization=authorization,
+                    )
+                self._indeterminate_forks.add(fork_key)
+                existing = await self._reconcile_existing_run(
+                    actor=actor,
+                    task_id=task_id,
+                    product_run_id=product_run_id,
+                    thread_id=handle.thread_id,
+                    authorization=authorization,
+                )
+                if existing is not None:
+                    self._indeterminate_forks.discard(fork_key)
+                    return existing
+                raise RemoteForkIndeterminateError(
+                    "Agent Server checkpoint fork is indeterminate after bounded "
+                    "reconciliation; refusing a duplicate create"
+                ) from exc
+            self._indeterminate_forks.discard(fork_key)
+            return RemoteRunHandle(
+                assistant_id=_required_remote_id(run, "assistant_id"),
+                thread_id=handle.thread_id,
+                run_id=_required_remote_id(run, "run_id"),
+                authorization=authorization,
+            )
+
+    async def _validate_fork_checkpoint(
+        self,
+        *,
+        handle: RemoteRunHandle,
+        checkpoint_id: str,
+    ) -> None:
+        state = await self._client.threads.get_state(
+            handle.thread_id,
+            checkpoint_id=checkpoint_id,
+            **_authorization_options(handle),
+        )
+        if not isinstance(state, dict):
+            raise RuntimeError("Agent Server returned an invalid fork checkpoint")
+        checkpoint = state.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            raise RuntimeError("Agent Server fork checkpoint is missing")
+        if (
+            _checkpoint_value(checkpoint, "thread_id") != handle.thread_id
+            or _checkpoint_value(checkpoint, "checkpoint_id") != checkpoint_id
+        ):
+            raise RuntimeError("Agent Server returned a different fork checkpoint")
+        if _state_checkpoint_run_id(state) != handle.run_id:
+            raise RuntimeError(
+                "Fork checkpoint does not belong to the selected source Run"
+            )
 
     async def find(
         self,

@@ -113,7 +113,10 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
     kwargs = {} if token_audience is None else {"token_audience": token_audience}
     module.create_default_app(**kwargs)
 
-    assert captured_audiences == [expected_audience]
+    assert captured_audiences == [
+        expected_audience,
+        "crypto-alert-identity-discovery",
+    ]
 
 
 def test_production_inbox_cursor_key_is_independent_and_required() -> None:
@@ -314,6 +317,8 @@ def test_explicit_development_bootstrap_builds_server_owned_actor() -> None:
         "tenant_id": "compose-tenant",
         "workspace_id": "compose-workspace",
         "user_id": "compose-user",
+        "identity_issuer": "legacy",
+        "context_id": None,
         "roles": ("member",),
         "permissions": ("analysis:read", "analysis:write"),
     }
@@ -369,9 +374,11 @@ async def test_default_app_seeds_complete_local_proof_identity(
     assert [actor.model_dump() for actor in seeded_actors] == [
         {
             "tenant_id": "compose-tenant",
-            "workspace_id": "compose-workspace",
-            "user_id": "compose-user",
-            "roles": ("member",),
+                "workspace_id": "compose-workspace",
+                "user_id": "compose-user",
+                "identity_issuer": "legacy",
+                "context_id": None,
+                "roles": ("member",),
             "permissions": ("analysis:read",),
         }
     ]

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
 from crypto_alert_v2.api.agent_server import (
     RemoteCancelResult,
     RemoteCheckpoint,
+    RemoteForkIndeterminateError,
     RemoteInterrupt,
     RemoteInterruptSet,
     RemoteResumeIndeterminateError,
@@ -28,6 +29,7 @@ from crypto_alert_v2.api.agent_server import (
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    ForkSubmission,
     InterruptResponseSubmission,
     InterruptResponsesSubmission,
     TerminalGraphOutput,
@@ -97,6 +99,8 @@ class InspectingRunner:
         self.remote_status = "success"
         self.start_requests: list[dict[str, object]] = []
         self.resume_requests: list[dict[str, object]] = []
+        self.fork_requests: list[dict[str, object]] = []
+        self.find_requests: list[dict[str, object]] = []
 
     async def start(self, **kwargs: object) -> RemoteRunHandle:
         self.events.append("start")
@@ -187,6 +191,22 @@ class InspectingRunner:
             thread_id=handle.thread_id,
             run_id=f"resumed-{kwargs['product_run_id']}",
         )
+
+    async def fork(self, **kwargs: object) -> RemoteRunHandle:
+        self.events.append("fork")
+        self.fork_requests.append(dict(kwargs))
+        handle = kwargs["handle"]
+        assert isinstance(handle, RemoteRunHandle)
+        self.task_id = UUID(str(kwargs["task_id"]))
+        return RemoteRunHandle(
+            assistant_id=handle.assistant_id,
+            thread_id=handle.thread_id,
+            run_id=f"forked-{kwargs['product_run_id']}",
+        )
+
+    async def find(self, **kwargs: object) -> RemoteRunHandle | None:
+        self.find_requests.append(dict(kwargs))
+        return None
 
 
 class LeaseExpiringRunner(InspectingRunner):
@@ -316,6 +336,39 @@ class IndeterminateResumeMultiRunner(MultiReviewAwareRunner):
         self.events.append("resume")
         self.resume_requests.append(dict(kwargs))
         raise RemoteResumeIndeterminateError("resume acceptance is unknown")
+
+
+class IndeterminateForkRunner(SuccessfulJoinRunner):
+    async def fork(self, **kwargs: object) -> RemoteRunHandle:
+        self.events.append("fork")
+        self.fork_requests.append(dict(kwargs))
+        raise RemoteForkIndeterminateError("fork acceptance is unknown")
+
+
+class HangingForkRunner(SuccessfulJoinRunner):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__(session_factory)
+        self.cancelled = False
+
+    async def fork(self, **kwargs: object) -> RemoteRunHandle:
+        self.events.append("fork")
+        self.fork_requests.append(dict(kwargs))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+
+class ReconcileOnlyForkRunner(SuccessfulJoinRunner):
+    async def find(self, **kwargs: object) -> RemoteRunHandle | None:
+        self.find_requests.append(dict(kwargs))
+        return RemoteRunHandle(
+            assistant_id="official-assistant",
+            thread_id=str(kwargs["product_thread_id"]),
+            run_id=f"forked-{kwargs['product_run_id']}",
+        )
 
 
 class ReconcileOnlyResumeMultiRunner(MultiReviewAwareRunner):
@@ -506,6 +559,76 @@ async def queue_task(
         idempotency_key=idempotency_key,
     )
     return service, queued
+
+
+async def queue_checkpoint_fork(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    idempotency_key: str,
+) -> tuple[ProductAnalysisService, UUID, UUID, UUID, str]:
+    service, queued = await queue_task(
+        session_factory,
+        idempotency_key=f"{idempotency_key}-source-task",
+    )
+    task_id = UUID(str(queued["task_id"]))
+    source_run_id = uuid4()
+    checkpoint_id = f"checkpoint-{idempotency_key}"
+    async with session_factory() as session, session.begin():
+        task = await session.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        thread = await session.scalar(select(Thread).where(Thread.id == task.thread_id))
+        assert thread is not None
+        submit_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task.id,
+                TaskCommand.command_type == "submit",
+            )
+        )
+        assert submit_command is not None
+        submit_command.status = "dispatched"
+        task.status = "succeeded"
+        task.completed_at = datetime.now(UTC)
+        thread.official_thread_id = "official-fork-thread"
+        session.add(
+            Run(
+                id=source_run_id,
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                owner_user_id=task.owner_user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=1,
+                status="succeeded",
+                official_assistant_id="official-assistant",
+                official_run_id="official-fork-source-run",
+                checkpoint_id=checkpoint_id,
+                input_payload=task.request_payload,
+                finished_at=datetime.now(UTC),
+            )
+        )
+
+    accepted = await service.fork_task(
+        actor(),
+        str(task_id),
+        ForkSubmission(source_run_id=source_run_id),
+        idempotency_key,
+    )
+    assert accepted is not None
+    async with session_factory() as session:
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "fork",
+            )
+        )
+    assert command is not None
+    return (
+        service,
+        task_id,
+        source_run_id,
+        UUID(str(command.payload["fork_run_id"])),
+        checkpoint_id,
+    )
 
 
 async def queue_review_response(
@@ -1206,6 +1329,184 @@ async def test_interrupted_remote_projects_waiting_human_without_join(
     assert projection.checkpoint_id == "checkpoint-official-run"
     assert projection.payload["kind"] == "artifact_review"
     assert projection.expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_claims_checkpoint_fork_and_projects_terminal_run(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    (
+        service,
+        task_id,
+        source_run_id,
+        fork_run_id,
+        checkpoint_id,
+    ) = await queue_checkpoint_fork(
+        session_factory,
+        idempotency_key="dispatcher-fork",
+    )
+    runner = SuccessfulJoinRunner(session_factory)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="fork-worker",
+    )
+
+    lease = await dispatcher.claim_next()
+    assert lease is not None
+    assert lease.command_type == "fork"
+    assert lease.product_run_id == fork_run_id
+    assert lease.fork_payload is not None
+    assert lease.fork_payload.source_run_id == source_run_id
+    assert lease.fork_payload.checkpoint_id == checkpoint_id
+    assert lease.fork_source_handle == RemoteRunHandle(
+        assistant_id="official-assistant",
+        thread_id="official-fork-thread",
+        run_id="official-fork-source-run",
+    )
+    assert await dispatcher.execute(lease) is True
+
+    assert len(runner.fork_requests) == 1
+    fork_request = runner.fork_requests[0]
+    assert fork_request["product_run_id"] == str(fork_run_id)
+    assert fork_request["checkpoint_id"] == checkpoint_id
+    assert fork_request["handle"] == lease.fork_source_handle
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "succeeded"
+    async with session_factory() as session:
+        source_run = await session.get(Run, source_run_id)
+        fork_run = await session.get(Run, fork_run_id)
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "fork",
+            )
+        )
+    assert source_run is not None and fork_run is not None and command is not None
+    assert fork_run.task_id == source_run.task_id == task_id
+    assert fork_run.thread_id == source_run.thread_id
+    assert fork_run.attempt == source_run.attempt + 1
+    assert fork_run.forked_from_run_id == source_run.id
+    assert fork_run.forked_from_checkpoint_id == checkpoint_id
+    assert fork_run.official_run_id == f"forked-{fork_run_id}"
+    assert fork_run.status == "succeeded"
+    assert command.status == "dispatched"
+    assert command.official_run_id == fork_run.official_run_id
+
+
+@pytest.mark.asyncio
+async def test_fork_replacement_worker_reconciles_without_duplicate_create(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, task_id, _, fork_run_id, _ = await queue_checkpoint_fork(
+        session_factory,
+        idempotency_key="dispatcher-fork-reconcile",
+    )
+    clock = MutableClock()
+    first_runner = IndeterminateForkRunner(session_factory)
+    first_dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=first_runner,
+        worker_id="fork-indeterminate-worker",
+        clock=clock,
+        reconciliation_interval_seconds=1,
+    )
+
+    assert await first_dispatcher.dispatch_once() is False
+    assert len(first_runner.fork_requests) == 1
+    async with session_factory() as session:
+        pending_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "fork",
+            )
+        )
+        pending_run = await session.get(Run, fork_run_id)
+    assert pending_command is not None and pending_run is not None
+    assert pending_command.status == "pending"
+    assert pending_run.status == "queued"
+    assert pending_run.failure_code == "agent_fork_indeterminate"
+
+    clock.now += timedelta(seconds=2)
+    replacement_runner = ReconcileOnlyForkRunner(session_factory)
+    replacement_dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=replacement_runner,
+        worker_id="fork-reconciliation-worker",
+        clock=clock,
+        reconciliation_interval_seconds=1,
+    )
+    assert await replacement_dispatcher.dispatch_once() is True
+
+    completed = await service.get_task(actor(), str(task_id))
+    assert completed is not None
+    assert completed["status"] == "succeeded"
+    assert replacement_runner.fork_requests == []
+    assert len(replacement_runner.find_requests) == 1
+    assert replacement_runner.find_requests[0]["product_run_id"] == str(fork_run_id)
+    async with session_factory() as session:
+        fork_run = await session.get(Run, fork_run_id)
+        command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "fork",
+            )
+        )
+    assert fork_run is not None and command is not None
+    assert fork_run.official_run_id == f"forked-{fork_run_id}"
+    assert fork_run.failure_code is None
+    assert command.status == "dispatched"
+    assert command.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_fork_operation_deadline_enters_reconcile_only_recovery(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    _, task_id, _, fork_run_id, _ = await queue_checkpoint_fork(
+        session_factory,
+        idempotency_key="dispatcher-fork-operation-timeout",
+    )
+    runner = HangingForkRunner(session_factory)
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="fork-timeout-worker",
+        remote_operation_timeout_seconds=0.05,
+        reconciliation_interval_seconds=1,
+    )
+
+    assert await asyncio.wait_for(dispatcher.dispatch_once(), timeout=2) is False
+    assert len(runner.fork_requests) == 1
+    assert runner.cancelled is True
+    async with session_factory() as session:
+        pending_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "fork",
+            )
+        )
+        pending_run = await session.get(Run, fork_run_id)
+    assert pending_command is not None and pending_run is not None
+    assert pending_command.status == "pending"
+    assert pending_run.status == "queued"
+    assert pending_run.failure_code == "agent_fork_indeterminate"
 
 
 @pytest.mark.asyncio

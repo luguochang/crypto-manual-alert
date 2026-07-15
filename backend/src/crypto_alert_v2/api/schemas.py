@@ -21,6 +21,38 @@ class AnalysisSubmission(BaseModel):
     notify: bool = False
 
 
+class ForkSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_run_id: UUID
+    checkpoint_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+
+
+class AuthContextSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context_id: UUID
+
+
+class AuthContextView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context_id: UUID
+    tenant_id: StrictStr = Field(min_length=1, max_length=255)
+    tenant_name: StrictStr = Field(min_length=1, max_length=255)
+    workspace_id: StrictStr = Field(min_length=1, max_length=255)
+    workspace_name: StrictStr = Field(min_length=1, max_length=255)
+    role: StrictStr = Field(min_length=1, max_length=64)
+    permissions: list[StrictStr]
+    version: StrictStr = Field(min_length=1, max_length=64)
+
+
+class AuthContextListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AuthContextView]
+
+
 class ProductErrorView(BaseModel):
     code: str
     message: str

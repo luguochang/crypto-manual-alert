@@ -26,6 +26,7 @@ from tests.fixtures.golden_cases import valid_market_analysis
 
 
 PAUSE_ID = "33333333-3333-4333-8333-333333333333"
+AUTH_CONTEXT_ID = UUID("11111111-1111-4111-8111-111111111111")
 
 
 def _review_payload() -> dict[str, Any]:
@@ -51,6 +52,9 @@ class FakeProductService:
         self.selected_run_id: UUID | None = None
         self.cancelled_task_id: str | None = None
         self.cancel_idempotency_key: str | None = None
+        self.forked_task_id: str | None = None
+        self.fork_submission: Any = None
+        self.fork_idempotency_key: str | None = None
         self.responded_task_id: str | None = None
         self.responded_interrupt_id: str | None = None
         self.interrupt_submission: Any = None
@@ -181,6 +185,30 @@ class FakeProductService:
             "errors": [],
         }
 
+    async def fork_task(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.forked_task_id = task_id
+        self.fork_submission = submission
+        self.fork_idempotency_key = idempotency_key
+        if task_id != "task-1":
+            return None
+        return {
+            "task_id": task_id,
+            "status": "queued",
+            "symbol": "BTC-USDT-SWAP",
+            "horizon": "4h",
+            "created_at": datetime(2026, 7, 13, tzinfo=UTC),
+            "completed_at": None,
+            "artifact": None,
+            "errors": [],
+        }
+
     async def respond_interrupt(
         self,
         actor: ActorContext,
@@ -282,11 +310,10 @@ class AcceptingTokenVerifier:
     def verify_authorization(self, authorization: str | None) -> dict[str, object]:
         assert authorization == "Bearer signed-internal-token"
         return {
-            "tenant_id": "tenant-1",
-            "workspace_id": "workspace-1",
             "sub": "oidc|user-1",
-            "roles": ["member"],
-            "permissions": ["analysis:read", "analysis:write"],
+            "token_use": "user",
+            "identity_issuer": "https://identity.example.com",
+            "context_id": str(AUTH_CONTEXT_ID),
         }
 
 
@@ -295,6 +322,45 @@ class RejectingMissingAuthorizationVerifier:
         if authorization is None:
             raise PermissionError("Authorization header is required")
         raise AssertionError("this verifier only exercises missing Authorization")
+
+
+class AcceptingMembershipAuthority:
+    async def authorize(self, identity: Any, context_id: UUID) -> ActorContext:
+        assert identity.issuer == "https://identity.example.com"
+        assert identity.subject == "oidc|user-1"
+        assert context_id == AUTH_CONTEXT_ID
+        return ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="oidc|user-1",
+            identity_issuer=identity.issuer,
+            context_id=context_id,
+            roles=("member",),
+            permissions=("analysis:read", "analysis:write"),
+        )
+
+    async def discover(self, identity: Any) -> tuple[object, ...]:
+        del identity
+        return ()
+
+    async def select(self, identity: Any, context_id: UUID) -> tuple[object, object]:
+        del identity, context_id
+        raise AssertionError("context selection is not exercised by this fixture")
+
+
+def _production_app(
+    service: FakeProductService,
+    token_verifier: object,
+    *,
+    mode: str = "production",
+) -> object:
+    return create_app(
+        service=service,
+        mode=mode,
+        token_verifier=token_verifier,
+        identity_token_verifier=token_verifier,
+        membership_authority=AcceptingMembershipAuthority(),
+    )
 
 
 class ConflictingProductService(FakeProductService):
@@ -662,6 +728,53 @@ async def test_cancel_task_persists_a_server_owned_product_command() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fork_task_derives_checkpoint_from_owner_scoped_source_run() -> None:
+    service = FakeProductService()
+    source_run_id = "11111111-1111-4111-8111-111111111111"
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8011",
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/fork",
+            headers={"idempotency-key": "fork-task-1"},
+            json={"source_run_id": source_run_id},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    assert service.forked_task_id == "task-1"
+    assert service.fork_submission.source_run_id == UUID(source_run_id)
+    assert service.fork_submission.checkpoint_id is None
+    assert service.fork_idempotency_key == "fork-task-1"
+    assert service.actor is not None
+    assert service.actor.tenant_id == "compose-tenant"
+
+
+@pytest.mark.asyncio
+async def test_fork_task_rejects_unrecognized_runtime_coordinates() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8011",
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/fork",
+            headers={"idempotency-key": "fork-task-invalid"},
+            json={
+                "source_run_id": "11111111-1111-4111-8111-111111111111",
+                "checkpoint_id": "checkpoint-1",
+                "checkpoint_ns": "browser-controlled",
+            },
+        )
+
+    assert response.status_code == 422
+    assert service.forked_task_id is None
+
+
+@pytest.mark.asyncio
 async def test_respond_interrupt_forwards_strict_review_and_returns_task_view() -> None:
     service = FakeProductService()
     transport = httpx.ASGITransport(app=_development_app(service))
@@ -966,7 +1079,12 @@ async def test_respond_interrupt_returns_403_for_an_unprovisioned_actor() -> Non
         )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Actor is not provisioned for this workspace."}
+    assert response.json() == {
+        "detail": {
+            "code": "permission_required",
+            "message": "The requested operation is not permitted.",
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -1048,10 +1166,9 @@ async def test_create_analysis_returns_explicit_409_for_payload_conflict() -> No
 @pytest.mark.asyncio
 async def test_production_missing_auth_returns_401_not_500() -> None:
     transport = httpx.ASGITransport(
-        app=create_app(
-            service=FakeProductService(),
-            mode="production",
-            token_verifier=RejectingMissingAuthorizationVerifier(),
+        app=_production_app(
+            FakeProductService(),
+            RejectingMissingAuthorizationVerifier(),
         )
     )
     async with httpx.AsyncClient(
@@ -1234,10 +1351,10 @@ async def test_loopback_request_metadata_does_not_override_remote_peer() -> None
 async def test_hosted_runtime_requires_jwt(environment: str) -> None:
     service = FakeProductService()
     transport = httpx.ASGITransport(
-        app=create_app(
-            service=service,
+        app=_production_app(
+            service,
+            RejectingMissingAuthorizationVerifier(),
             mode=environment,
-            token_verifier=RejectingMissingAuthorizationVerifier(),
         )
     )
     async with httpx.AsyncClient(
@@ -1262,11 +1379,7 @@ async def test_hosted_runtime_requires_jwt(environment: str) -> None:
 async def test_production_uses_verified_internal_token_claims() -> None:
     service = FakeProductService()
     transport = httpx.ASGITransport(
-        app=create_app(
-            service=service,
-            mode="production",
-            token_verifier=AcceptingTokenVerifier(),
-        )
+        app=_production_app(service, AcceptingTokenVerifier())
     )
     async with httpx.AsyncClient(
         transport=transport, base_url="https://product.example.com"
@@ -1297,10 +1410,9 @@ async def test_production_uses_verified_internal_token_claims() -> None:
 @pytest.mark.asyncio
 async def test_unprovisioned_production_actor_returns_403_not_500() -> None:
     transport = httpx.ASGITransport(
-        app=create_app(
-            service=UnprovisionedProductService(),
-            mode="production",
-            token_verifier=AcceptingTokenVerifier(),
+        app=_production_app(
+            UnprovisionedProductService(),
+            AcceptingTokenVerifier(),
         )
     )
     async with httpx.AsyncClient(
@@ -1321,7 +1433,12 @@ async def test_unprovisioned_production_actor_returns_403_not_500() -> None:
         )
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Actor is not provisioned for this workspace."}
+    assert response.json() == {
+        "detail": {
+            "code": "permission_required",
+            "message": "The requested operation is not permitted.",
+        }
+    }
 
 
 @pytest.mark.asyncio

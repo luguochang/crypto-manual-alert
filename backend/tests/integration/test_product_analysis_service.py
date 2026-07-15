@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.exc import IntegrityError
 
 import crypto_alert_v2.api.service as service_module
 from crypto_alert_v2.api.agent_server import (
@@ -26,6 +27,7 @@ from crypto_alert_v2.api.agent_server import (
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    ForkSubmission,
     InterruptResponseSubmission,
     InterruptResponsesSubmission,
 )
@@ -476,17 +478,15 @@ async def test_inbox_filters_stable_pagination_and_actor_scope(
     ]
     assert first_page["next_cursor"] is not None
     decoded_cursor = b64decode(
-        first_page["next_cursor"]
-        + ("=" * (-len(first_page["next_cursor"]) % 4)),
+        first_page["next_cursor"] + ("=" * (-len(first_page["next_cursor"]) % 4)),
         altchars=b"-_",
         validate=True,
     )
     for _, _, projection_id in seeded.values():
         assert str(projection_id).encode() not in decoded_cursor
     tampered_cursor = (
-        ("A" if first_page["next_cursor"][0] != "A" else "B")
-        + first_page["next_cursor"][1:]
-    )
+        "A" if first_page["next_cursor"][0] != "A" else "B"
+    ) + first_page["next_cursor"][1:]
     with pytest.raises(service_module.InvalidInboxCursorError):
         await service.list_inbox(
             owner,
@@ -705,10 +705,10 @@ async def test_inbox_rejects_invalid_cursor_limit_and_inactive_read_membership(
     for invalid_limit in (0, 101):
         with pytest.raises(ValueError, match="limit must be between 1 and 100"):
             await service.list_inbox(actor, limit=invalid_limit)
-    with pytest.raises(PermissionError, match="analysis:read"):
-        await service.list_inbox(
-            actor.model_copy(update={"permissions": ("analysis:write",)})
-        )
+    caller_downgraded_view = await service.list_inbox(
+        actor.model_copy(update={"permissions": ("analysis:write",)})
+    )
+    assert caller_downgraded_view["items"]
 
     async with session_factory() as session, session.begin():
         projection = await session.scalar(
@@ -944,9 +944,7 @@ async def test_respond_all_requires_exact_pause_and_creates_one_resume_run(
             expires_at=pause.expires_at,
         )
         session.add(second_projection)
-        pause.member_set_hash = sha256(
-            b"nested-interrupt\0root-interrupt"
-        ).hexdigest()
+        pause.member_set_hash = sha256(b"nested-interrupt\0root-interrupt").hexdigest()
         pause_id = pause.id
 
     with pytest.raises(
@@ -978,12 +976,15 @@ async def test_respond_all_requires_exact_pause_and_creates_one_resume_run(
         update={"user_id": "oidc|aggregate-interrupt-other-owner"}
     )
     await service.bootstrap_actor(other_actor)
-    assert await service.respond_interrupts(
-        other_actor,
-        str(task_id),
-        missing_member,
-        "cross-owner-pause-response",
-    ) is None
+    assert (
+        await service.respond_interrupts(
+            other_actor,
+            str(task_id),
+            missing_member,
+            "cross-owner-pause-response",
+        )
+        is None
+    )
     with pytest.raises(
         service_module.InterruptResponseConflictError,
         match="exactly match",
@@ -1034,8 +1035,7 @@ async def test_respond_all_requires_exact_pause_and_creates_one_resume_run(
     assert first["pending_interrupts"]["status"] == "responding"
     assert replay["pending_interrupts"] == first["pending_interrupts"]
     assert {
-        member["interrupt_id"]
-        for member in first["pending_interrupts"]["members"]
+        member["interrupt_id"] for member in first["pending_interrupts"]["members"]
     } == {"root-interrupt", "nested-interrupt"}
     assert all(
         member["status"] == "responding"
@@ -1365,11 +1365,14 @@ async def test_cancel_task_does_not_cross_tenant_workspace_or_owner_scope(
         idempotency_key="cross-tenant-cancel-owner",
     )
 
-    assert await service.cancel_task(
-        other,
-        str(queued["task_id"]),
-        "cross-tenant-cancel-attempt",
-    ) is None
+    assert (
+        await service.cancel_task(
+            other,
+            str(queued["task_id"]),
+            "cross-tenant-cancel-attempt",
+        )
+        is None
+    )
     owner_view = await service.get_task(owner, str(queued["task_id"]))
     assert owner_view is not None
     assert owner_view["status"] == "queued"
@@ -1387,6 +1390,248 @@ async def test_cancel_task_does_not_cross_tenant_workspace_or_owner_scope(
     assert [(command.command_type, command.status) for command in commands] == [
         ("submit", "pending")
     ]
+
+
+@pytest.mark.asyncio
+async def test_fork_derives_owner_checkpoint_and_is_idempotent(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="fork-service-tenant",
+        workspace_id="fork-service-workspace",
+        user_id="oidc|fork-service-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    queued = await service.create_analysis(
+        owner,
+        submission(query_text="Fork service source."),
+        idempotency_key="fork-service-source",
+    )
+    task_id = UUID(str(queued["task_id"]))
+    source_run_id = uuid4()
+    checkpoint_id = f"fork-service-checkpoint-{uuid4().hex}"
+    async with session_factory() as session, session.begin():
+        task = await session.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        submit_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task.id,
+                TaskCommand.command_type == "submit",
+            )
+        )
+        assert submit_command is not None
+        submit_command.status = "dispatched"
+        task.status = "succeeded"
+        task.completed_at = datetime.now(UTC)
+        session.add(
+            Run(
+                id=source_run_id,
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                owner_user_id=task.owner_user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=1,
+                status="succeeded",
+                checkpoint_id=checkpoint_id,
+                input_payload=task.request_payload,
+                finished_at=datetime.now(UTC),
+            )
+        )
+
+    first = await service.fork_task(
+        owner,
+        str(task_id),
+        ForkSubmission(source_run_id=source_run_id),
+        "fork-service-request",
+    )
+    replay = await service.fork_task(
+        owner,
+        str(task_id),
+        ForkSubmission(
+            source_run_id=source_run_id,
+            checkpoint_id=checkpoint_id,
+        ),
+        "fork-service-request",
+    )
+
+    assert first is not None and replay is not None
+    assert first["status"] == replay["status"] == "queued"
+    with pytest.raises(service_module.IdempotencyConflictError):
+        await service.fork_task(
+            owner,
+            str(task_id),
+            ForkSubmission(
+                source_run_id=source_run_id,
+                checkpoint_id="forged-replay-checkpoint",
+            ),
+            "fork-service-request",
+        )
+    with pytest.raises(service_module.ForkConflictError, match="does not match"):
+        await service.fork_task(
+            owner,
+            str(task_id),
+            ForkSubmission(
+                source_run_id=source_run_id,
+                checkpoint_id="forged-new-checkpoint",
+            ),
+            "fork-service-forged",
+        )
+
+    async with session_factory() as session:
+        runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                )
+            ).all()
+        )
+        fork_commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand).where(
+                        TaskCommand.task_id == task_id,
+                        TaskCommand.command_type == "fork",
+                    )
+                )
+            ).all()
+        )
+    assert [run.attempt for run in runs] == [1, 2]
+    assert runs[1].task_id == runs[0].task_id
+    assert runs[1].thread_id == runs[0].thread_id
+    assert runs[1].checkpoint_id == checkpoint_id
+    assert runs[1].forked_from_run_id == source_run_id
+    assert runs[1].forked_from_checkpoint_id == checkpoint_id
+    assert len(fork_commands) == 1
+    assert fork_commands[0].payload == {
+        "source_run_id": str(source_run_id),
+        "fork_run_id": str(runs[1].id),
+        "checkpoint_id": checkpoint_id,
+    }
+
+    with pytest.raises(IntegrityError):
+        async with session_factory() as session, session.begin():
+            session.add(
+                Run(
+                    id=uuid4(),
+                    tenant_id=runs[0].tenant_id,
+                    workspace_id=runs[0].workspace_id,
+                    owner_user_id=runs[0].owner_user_id,
+                    thread_id=runs[0].thread_id,
+                    task_id=runs[0].task_id,
+                    attempt=3,
+                    status="queued",
+                    checkpoint_id="forged-fork-checkpoint",
+                    input_payload=runs[0].input_payload,
+                    forked_from_run_id=source_run_id,
+                    forked_from_checkpoint_id="forged-fork-checkpoint",
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_fork_cancels_the_pending_pause_before_admitting_a_new_run(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="fork-pause-tenant",
+        workspace_id="fork-pause-workspace",
+        user_id="oidc|fork-pause-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    queued, source_run_id, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        owner,
+        interrupt_id="fork-source-pending-review",
+    )
+    task_id = UUID(str(queued["task_id"]))
+
+    accepted = await service.fork_task(
+        owner,
+        str(task_id),
+        ForkSubmission(source_run_id=source_run_id),
+        "fork-pending-pause",
+    )
+
+    assert accepted is not None
+    assert accepted["status"] == "queued"
+    async with session_factory() as session:
+        projection = await session.get(InterruptProjection, projection_id)
+        assert projection is not None
+        pause = await session.get(InterruptPause, projection.pause_id)
+        source_run = await session.get(Run, source_run_id)
+        fork_runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(
+                        Run.task_id == task_id,
+                        Run.forked_from_run_id == source_run_id,
+                    )
+                )
+            ).all()
+        )
+    assert pause is not None
+    assert source_run is not None
+    assert pause.status == "cancelled"
+    assert projection.status == "cancelled"
+    assert source_run.status == "cancelled"
+    assert source_run.finished_at is not None
+    assert len(fork_runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_fork_does_not_discard_an_accepted_review_in_progress(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="fork-responding-tenant",
+        workspace_id="fork-responding-workspace",
+        user_id="oidc|fork-responding-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    queued, source_run_id, _ = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        owner,
+        interrupt_id="fork-source-accepted-review",
+        status="responding",
+    )
+
+    with pytest.raises(
+        service_module.ForkConflictError,
+        match="accepted review decision",
+    ):
+        await service.fork_task(
+            owner,
+            str(queued["task_id"]),
+            ForkSubmission(source_run_id=source_run_id),
+            "fork-responding-pause",
+        )
 
 
 @pytest.mark.asyncio
@@ -1415,9 +1660,7 @@ async def test_concurrent_cancel_requests_create_one_durable_command(
         )
         first_key = f"concurrent-cancel-request-{suffix}"
         second_key = (
-            first_key
-            if reuse_idempotency_key
-            else f"concurrent-cancel-retry-{suffix}"
+            first_key if reuse_idempotency_key else f"concurrent-cancel-retry-{suffix}"
         )
 
         first, second = await asyncio.gather(
@@ -1568,9 +1811,7 @@ async def test_admission_key_is_isolated_between_actors_in_one_workspace(
         roles=("member",),
         permissions=("analysis:read", "analysis:write"),
     )
-    actor_two = actor_one.model_copy(
-        update={"user_id": "oidc|actor-scope-user-2"}
-    )
+    actor_two = actor_one.model_copy(update={"user_id": "oidc|actor-scope-user-2"})
     service = ProductAnalysisService(session_factory=session_factory)
     await service.bootstrap_actor(actor_one)
     await service.bootstrap_actor(actor_two)
@@ -1851,9 +2092,7 @@ async def test_agent_stream_is_null_when_persisted_triple_is_incomplete(
         thread = await session.scalar(select(Thread).where(Thread.id == task.thread_id))
         assert thread is not None
         thread.official_thread_id = (
-            None
-            if missing_component == "thread_id"
-            else f"official-thread-{task.id}"
+            None if missing_component == "thread_id" else f"official-thread-{task.id}"
         )
         task.status = "running"
         session.add(
@@ -1872,9 +2111,7 @@ async def test_agent_stream_is_null_when_persisted_triple_is_incomplete(
                     else "official-assistant"
                 ),
                 official_run_id=(
-                    None
-                    if missing_component == "run_id"
-                    else f"official-run-{task.id}"
+                    None if missing_component == "run_id" else f"official-run-{task.id}"
                 ),
                 input_payload=task.request_payload,
             )

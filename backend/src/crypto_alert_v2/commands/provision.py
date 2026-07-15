@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -30,6 +31,7 @@ async def run_provisioning(
     workspace_id: str,
     workspace_name: str,
     user_id: str,
+    identity_issuer: str,
     user_display_name: str,
     role: str,
     permissions: tuple[str, ...],
@@ -38,6 +40,7 @@ async def run_provisioning(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         user_id=user_id,
+        identity_issuer=_hosted_identity_issuer(identity_issuer),
         roles=(role,),
         permissions=permissions,
     )
@@ -63,6 +66,7 @@ async def _run_default(args: argparse.Namespace) -> None:
             workspace_id=args.workspace_id,
             workspace_name=args.workspace_name,
             user_id=args.user_id,
+            identity_issuer=args.identity_issuer,
             user_display_name=args.user_display_name,
             role=args.role,
             permissions=tuple(args.permission),
@@ -79,6 +83,12 @@ def main() -> None:
     parser.add_argument("--tenant-name", required=True)
     parser.add_argument("--workspace-id", required=True)
     parser.add_argument("--workspace-name", required=True)
+    parser.add_argument(
+        "--identity-issuer",
+        required=True,
+        type=_hosted_identity_issuer,
+        help="Exact hosted OIDC issuer URL for the user subject",
+    )
     parser.add_argument("--user-id", required=True)
     parser.add_argument("--user-display-name", required=True)
     parser.add_argument("--role", default="member")
@@ -90,6 +100,23 @@ def main() -> None:
         required=True,
     )
     asyncio.run(_run_default(parser.parse_args()))
+
+
+def _hosted_identity_issuer(value: str) -> str:
+    normalized = value.strip()
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "identity issuer must be a hosted HTTPS URL without credentials, query, or fragment"
+        )
+    return normalized
 
 
 if __name__ == "__main__":

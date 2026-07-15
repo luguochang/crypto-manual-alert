@@ -3,22 +3,24 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { issueInternalToken } from "../../src/lib/auth/internal-token";
+import {
+  IDENTITY_DISCOVERY_AUDIENCE,
+  issueIdentityToken,
+  issueScopedToken,
+} from "../../src/lib/auth/internal-token";
 
 
 describe("BFF internal token", () => {
-  it("issues a 60-second RS256 token with only server-owned identity claims", () => {
+  it("issues a scoped token without tenant, workspace, role, or permission claims", () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const now = new Date("2026-07-13T08:00:00Z");
 
-    const token = issueInternalToken(
+    const token = issueScopedToken(
       {
         subject: "oidc|user-1",
-        tenantId: "tenant-1",
-        workspaceId: "workspace-1",
-        roles: ["member"],
-        permissions: ["analysis:read", "analysis:write"],
+        identityIssuer: "https://identity.example.com",
+        contextId: "11111111-1111-4111-8111-111111111111",
       },
       {
         privateKey: privatePem,
@@ -48,10 +50,9 @@ describe("BFF internal token", () => {
       iss: "https://product.example.com",
       aud: "crypto-alert-product-api",
       sub: "oidc|user-1",
-      tenant_id: "tenant-1",
-      workspace_id: "workspace-1",
-      roles: ["member"],
-      permissions: ["analysis:read", "analysis:write"],
+      identity_issuer: "https://identity.example.com",
+      token_use: "user",
+      context_id: "11111111-1111-4111-8111-111111111111",
       jti: "request-1",
       iat: 1783929600,
       exp: 1783929660,
@@ -61,13 +62,11 @@ describe("BFF internal token", () => {
   it("rejects incomplete identities before signing", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 
-    expect(() => issueInternalToken(
+    expect(() => issueScopedToken(
       {
         subject: "",
-        tenantId: "tenant-1",
-        workspaceId: "workspace-1",
-        roles: ["member"],
-        permissions: ["analysis:read"],
+        identityIssuer: "https://identity.example.com",
+        contextId: "11111111-1111-4111-8111-111111111111",
       },
       {
         privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
@@ -82,19 +81,16 @@ describe("BFF internal token", () => {
   it("rejects token lifetimes above 60 seconds", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 
-    expect(() => issueInternalToken(
+    expect(() => issueIdentityToken(
       {
         subject: "oidc|user-1",
-        tenantId: "tenant-1",
-        workspaceId: "workspace-1",
-        roles: ["member"],
-        permissions: ["analysis:read"],
+        identityIssuer: "https://identity.example.com",
       },
       {
         privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
         keyId: "key-1",
         issuer: "https://product.example.com",
-        audience: "crypto-alert-product-api",
+        audience: IDENTITY_DISCOVERY_AUDIENCE,
         ttlSeconds: 61,
       },
     )).toThrow("Internal token TTL must be between 1 and 60 seconds");

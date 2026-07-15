@@ -1,8 +1,13 @@
 import { Radar, ShieldCheck } from "lucide-react";
 
+import { AuthenticatedAppShell } from "@/components/authenticated-app-shell";
 import { PrimaryNavigation } from "@/components/primary-navigation";
+import { requiresAuthenticatedRuntime } from "@/lib/runtime/app-environment";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
+  if (requiresAuthenticatedRuntime()) {
+    return <AuthenticatedAppShell>{children}</AuthenticatedAppShell>;
+  }
   return (
     <div className="app-shell">
       <aside className="sidebar">

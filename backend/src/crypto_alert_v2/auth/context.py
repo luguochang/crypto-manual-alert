@@ -1,5 +1,6 @@
 import ipaddress
 from typing import TYPE_CHECKING, Any, Mapping
+from uuid import UUID
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +15,8 @@ class ActorContext(BaseModel):
     tenant_id: str = Field(min_length=1)
     workspace_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
+    identity_issuer: str = Field(default="legacy", min_length=1)
+    context_id: UUID | None = None
     roles: tuple[str, ...]
     permissions: tuple[str, ...]
 
@@ -89,6 +92,8 @@ def resolve_actor_context(
         tenant_id=str(authenticated_claims["tenant_id"]),
         workspace_id=str(authenticated_claims["workspace_id"]),
         user_id=str(authenticated_claims["sub"]),
+        identity_issuer=str(authenticated_claims.get("identity_issuer", "legacy")),
+        context_id=authenticated_claims.get("context_id"),
         roles=tuple(str(value) for value in authenticated_claims.get("roles", ())),
         permissions=tuple(
             str(value) for value in authenticated_claims.get("permissions", ())
