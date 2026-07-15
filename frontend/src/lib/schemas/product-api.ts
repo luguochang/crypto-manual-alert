@@ -372,12 +372,106 @@ const persistedInterruptResponseSchema = z.discriminatedUnion("action", [
   }),
 ]);
 
+export const inboxQueryStatusSchema = z.enum([
+  "active",
+  "pending",
+  "responding",
+  "resolved",
+  "expired",
+  "all",
+]);
+
+export const inboxItemStatusSchema = z.enum([
+  "pending",
+  "responding",
+  "resolved",
+  "expired",
+  "cancelled",
+]);
+
+export const inboxCursorSchema = z
+  .string()
+  .min(1)
+  .max(2048)
+  .regex(/^[A-Za-z0-9_-]+$/, "Invalid Inbox cursor");
+
+export const inboxItemSchema = z
+  .strictObject({
+    task_id: z.string().trim().min(1).max(255),
+    status: inboxItemStatusSchema,
+    payload: officialReviewPayloadSchema,
+    response: persistedInterruptResponseSchema.nullable().optional().default(null),
+    expires_at: absoluteTimestampSchema.nullable().optional().default(null),
+    responded_at: absoluteTimestampSchema.nullable().optional().default(null),
+    created_at: absoluteTimestampSchema,
+    updated_at: absoluteTimestampSchema,
+    symbol: productSymbolSchema,
+    horizon: z.string().trim().min(1).max(32),
+    query_text: z.string().trim().min(1).max(2000).nullable().optional().default(null),
+  })
+  .superRefine((item, context) => {
+    if (item.payload.artifact.analysis.instrument !== item.symbol) {
+      context.addIssue({
+        code: "custom",
+        message: "Inbox review instrument must match its task symbol",
+        path: ["payload", "artifact", "analysis", "instrument"],
+      });
+    }
+    if (item.payload.artifact.analysis.horizon !== item.horizon) {
+      context.addIssue({
+        code: "custom",
+        message: "Inbox review horizon must match its task horizon",
+        path: ["payload", "artifact", "analysis", "horizon"],
+      });
+    }
+    if (item.responded_at !== null && item.response === null) {
+      context.addIssue({
+        code: "custom",
+        message: "A responded Inbox item requires its accepted response",
+        path: ["response"],
+      });
+    }
+    if (item.status === "pending" && (item.response !== null || item.responded_at !== null)) {
+      context.addIssue({
+        code: "custom",
+        message: "A pending Inbox item cannot already contain a response",
+        path: ["status"],
+      });
+    }
+    if (
+      (item.status === "responding" || item.status === "resolved")
+      && item.response === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: `A ${item.status} Inbox item requires an accepted response`,
+        path: ["status"],
+      });
+    }
+    if (item.status === "resolved" && item.responded_at === null) {
+      context.addIssue({
+        code: "custom",
+        message: "A resolved Inbox item requires a response timestamp",
+        path: ["responded_at"],
+      });
+    }
+    if (item.status === "expired" && item.expires_at === null) {
+      context.addIssue({
+        code: "custom",
+        message: "An expired Inbox item requires an expiry timestamp",
+        path: ["expires_at"],
+      });
+    }
+  });
+
+export const inboxViewSchema = z.strictObject({
+  items: z.array(inboxItemSchema),
+  next_cursor: inboxCursorSchema.nullable().optional().default(null),
+});
+
 export const pendingInterruptSchema = z.strictObject({
   task_id: z.string().trim().min(1).max(255),
-  run_id: z.string().trim().min(1).max(255),
   interrupt_id: z.string().trim().min(1).max(255),
-  namespace: z.string().trim().max(2000),
-  checkpoint_id: z.string().trim().min(1).max(255),
   response_version: z.number().int().min(1),
   status: z.enum(["pending", "responding"]),
   payload: officialReviewPayloadSchema,
@@ -478,6 +572,10 @@ export const productTaskSchema = z
 export type AnalysisSubmission = z.infer<typeof analysisSubmissionSchema>;
 export type AgentStreamBinding = z.infer<typeof agentStreamBindingSchema>;
 export type ArtifactReviewEdits = z.infer<typeof artifactReviewEditsSchema>;
+export type InboxItem = z.infer<typeof inboxItemSchema>;
+export type InboxItemStatus = z.infer<typeof inboxItemStatusSchema>;
+export type InboxQueryStatus = z.infer<typeof inboxQueryStatusSchema>;
+export type InboxView = z.infer<typeof inboxViewSchema>;
 export type InterruptResponse = z.infer<typeof interruptResponseSchema>;
 export type MarketSnapshot = z.infer<typeof marketSnapshotSchema>;
 export type OfficialReviewPayload = z.infer<typeof officialReviewPayloadSchema>;

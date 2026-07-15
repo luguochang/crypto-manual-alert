@@ -208,10 +208,7 @@ function reviewInterrupt({
 }): PendingInterrupt {
   return {
     task_id: "22222222-2222-4222-8222-222222222222",
-    run_id: "11111111-1111-4111-8111-111111111111",
     interrupt_id: "interrupt-review-1",
-    namespace: "review",
-    checkpoint_id: "checkpoint-review-1",
     response_version: 1,
     status: "pending",
     payload: {

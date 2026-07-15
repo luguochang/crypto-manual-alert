@@ -74,6 +74,7 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   const path = pathSegments.join("/");
   if (method === "GET" && path === "api/v2/health") return true;
   if (method === "GET" && path === "api/v2/runs") return true;
+  if (method === "GET" && path === "api/v2/inbox") return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
   if (method === "POST" && isTaskCancelRoute(pathSegments)) return true;
   if (method === "POST" && isInterruptResponseRoute(pathSegments)) return true;

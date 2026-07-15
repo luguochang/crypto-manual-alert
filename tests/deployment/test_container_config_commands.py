@@ -661,6 +661,8 @@ def test_compose_commands_use_product_helpers_and_no_custom_runtime():
         "/run/internal-jwt-private",
         "--public-directory",
         "/run/internal-jwt-public",
+        "--cursor-key-directory",
+        "/run/product-inbox-cursor-key",
     ]
     assert services["development-bootstrap"]["command"] == [
         "python",
@@ -727,6 +729,9 @@ def test_official_api_gets_product_state_auth_and_production_settings():
     assert environment["INTERNAL_JWT_PUBLIC_KEY_FILE"] == (
         "/run/internal-jwt-public/public.pem"
     )
+    assert environment["PRODUCT_INBOX_CURSOR_KEY_FILE"] == (
+        "/run/product-inbox-cursor-key/key"
+    )
     assert environment["INTERNAL_JWT_MAX_TTL_SECONDS"] == "60"
     assert "INTERNAL_JWT_PRIVATE_KEY_FILE" not in environment
     assert "INTERNAL_JWT_AUDIENCE" not in environment
@@ -736,7 +741,13 @@ def test_official_api_gets_product_state_auth_and_production_settings():
             "source": "internal-jwt-public",
             "target": "/run/internal-jwt-public",
             "read_only": True,
-        }
+        },
+        "/run/product-inbox-cursor-key": {
+            "type": "volume",
+            "source": "product-inbox-cursor-key",
+            "target": "/run/product-inbox-cursor-key",
+            "read_only": True,
+        },
     }
 
 
@@ -848,7 +859,10 @@ def test_compose_secret_consumers_and_jwt_mounts_follow_least_privilege():
         ]
 
     expected_mounts = {
-        "langgraph-api": {"/run/internal-jwt-public": "internal-jwt-public"},
+        "langgraph-api": {
+            "/run/internal-jwt-public": "internal-jwt-public",
+            "/run/product-inbox-cursor-key": "product-inbox-cursor-key",
+        },
         "langgraph-api-readiness": {
             "/run/internal-jwt-private": "internal-jwt-private"
         },
@@ -987,11 +1001,18 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
     assert 'testDir: "./tests/e2e-v2"' in config
     assert {path.name for path in suite_directory.glob("*.spec.ts")} == {
         "durable-cancel-flow.spec.ts",
+        "hitl-review-flow.spec.ts",
         "official-stream-main-flow.spec.ts",
+        "real-inbox-flow.spec.ts",
         "real-product-flow.spec.ts",
         "runs-product.spec.ts",
         "work-product.spec.ts",
     }
+    package = load_json((ROOT / "frontend" / "package.json").read_text())
+    real_inbox_gate = package["scripts"]["test:e2e:real-inbox"]
+    assert "REAL_PRODUCT_E2E=1" in real_inbox_gate
+    assert "PLAYWRIGHT_EXTERNAL_SERVER=1" in real_inbox_gate
+    assert "real-inbox-flow.spec.ts" in real_inbox_gate
     assert "forbidOnly: true" in config
     assert 'trace: "retain-on-failure"' in config
     assert 'screenshot: "only-on-failure"' in config

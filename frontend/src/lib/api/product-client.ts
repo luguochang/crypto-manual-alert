@@ -1,9 +1,14 @@
 import {
   analysisSubmissionSchema,
+  inboxCursorSchema,
+  inboxQueryStatusSchema,
+  inboxViewSchema,
   interruptResponseSchema,
   productRunListSchema,
   productTaskSchema,
   type AnalysisSubmission,
+  type InboxQueryStatus,
+  type InboxView,
   type InterruptResponse,
   type ProductRunList,
   type ProductTask,
@@ -20,6 +25,12 @@ export class ProductApiError extends Error {
     this.status = status;
   }
 }
+
+export type ListInboxOptions = {
+  status?: InboxQueryStatus;
+  limit?: number;
+  cursor?: string | null;
+};
 
 export async function createAnalysis(
   input: AnalysisSubmission,
@@ -122,6 +133,42 @@ export async function listRuns(
   const parsed = productRunListSchema.safeParse(body);
   if (!parsed.success) {
     throw new ProductApiError("Product API returned an invalid Run list.", 502);
+  }
+  return parsed.data;
+}
+
+export async function listInbox(
+  options: ListInboxOptions = {},
+  fetcher: Fetcher = fetch,
+): Promise<InboxView> {
+  const status = inboxQueryStatusSchema.parse(options.status ?? "active");
+  const requestedLimit = options.limit ?? 25;
+  const normalizedLimit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(100, Math.trunc(requestedLimit)))
+    : 25;
+  const query = new URLSearchParams({
+    status,
+    limit: String(normalizedLimit),
+  });
+  if (options.cursor !== undefined && options.cursor !== null) {
+    query.set("cursor", inboxCursorSchema.parse(options.cursor));
+  }
+
+  const response = await fetcher(
+    `/api/product/api/v2/inbox?${query.toString()}`,
+    {
+      method: "GET",
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw new ProductApiError(readableDetail(body, response.status), response.status);
+  }
+  const parsed = inboxViewSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ProductApiError("Product API returned an invalid Inbox view.", 502);
   }
   return parsed.data;
 }

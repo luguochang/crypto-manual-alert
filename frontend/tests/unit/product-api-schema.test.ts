@@ -542,10 +542,7 @@ function waitingHumanTask(status: "pending" | "responding") {
     status: "waiting_human",
     pending_interrupts: [{
       task_id: task.task_id,
-      run_id: "11111111-1111-4111-8111-111111111111",
       interrupt_id: "interrupt-review-1",
-      namespace: "review",
-      checkpoint_id: "checkpoint-review-1",
       response_version: 3,
       status,
       payload: {
