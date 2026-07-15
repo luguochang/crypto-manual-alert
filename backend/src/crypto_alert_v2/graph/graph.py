@@ -377,7 +377,31 @@ def complete_blocked(state: AnalysisState) -> AnalysisState:
         if state.get("review_action") == "reject"
         else "completed_blocked"
     )
-    return {"terminal_status": "blocked", "lifecycle": lifecycle}
+    result: AnalysisState = {
+        "terminal_status": "blocked",
+        "lifecycle": lifecycle,
+    }
+    if state.get("review_action") == "reject" and state.get("artifact") is not None:
+        artifact_payload = state["artifact"]
+        risk_payload = artifact_payload["risk_verdict"]
+        rejection_reason = "Rejected during required human review."
+        blocked_reasons = list(risk_payload.get("blocked_reasons", []))
+        if rejection_reason not in blocked_reasons:
+            blocked_reasons.append(rejection_reason)
+        artifact = Artifact.model_validate(
+            {
+                **artifact_payload,
+                "status": "draft",
+                "risk_verdict": {
+                    **risk_payload,
+                    "allowed": False,
+                    "blocked_reasons": blocked_reasons,
+                    "confidence_cap": 0,
+                },
+            }
+        )
+        result["artifact"] = artifact.model_dump(mode="json")
+    return result
 
 
 def complete_failed(state: AnalysisState) -> AnalysisState:

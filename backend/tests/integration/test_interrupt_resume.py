@@ -7,6 +7,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command, Interrupt
 
+from crypto_alert_v2.api.schemas import TerminalGraphOutput
 from crypto_alert_v2.domain.models import MarketAnalysis, MarketSnapshot, ResearchBundle
 from crypto_alert_v2.graph.graph import create_graph
 from crypto_alert_v2.graph.runtime import AnalysisRuntime, ResearchResult
@@ -188,7 +189,12 @@ def test_required_review_reject_finishes_blocked_with_draft_artifact() -> None:
     assert result["terminal_status"] == "blocked"
     assert result["lifecycle"] == "completed_rejected"
     assert result["artifact"]["status"] == "draft"
+    assert result["artifact"]["risk_verdict"]["allowed"] is False
+    assert result["artifact"]["risk_verdict"]["blocked_reasons"] == [
+        "Rejected during required human review."
+    ]
     assert result["review_comment"] == "Entry risk is too high."
+    assert TerminalGraphOutput.model_validate(result).terminal_status == "blocked"
     _assert_external_calls(runtime, 1)
 
 
