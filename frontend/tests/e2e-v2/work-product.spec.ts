@@ -368,7 +368,7 @@ test("rejects rapid duplicate submits before React state commits", async ({ page
   expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
 });
 
-test("pauses polling while preserving the waiting-human projection", async ({ page }) => {
+test("continues polling from waiting-human to the terminal projection", async ({ page }) => {
   const requests = await installProductFixture(page, [
     taskProjection("waiting_human"),
     taskProjection("blocked"),
@@ -382,8 +382,8 @@ test("pauses polling while preserving the waiting-human projection", async ({ pa
   await expect(page.getByRole("button", { name: "开始分析" })).toBeEnabled();
   await page.waitForTimeout(1_100);
 
-  expect(requests.filter((request) => request.method === "GET")).toHaveLength(1);
-  await expect(page.getByTestId("task-status")).toContainText("等待人工确认");
+  expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+  await expect(page.getByTestId("task-status")).toContainText("已被风险门禁阻断");
 });
 
 test("a new submission invalidates an older poll loop", async ({ page }) => {
@@ -411,6 +411,10 @@ test("a new submission invalidates an older poll loop", async ({ page }) => {
   await page.getByLabel("分析问题").fill("检查 BTC 当前方向");
   await page.getByRole("button", { name: "开始分析" }).click();
   await expect(page.getByTestId("task-status")).toContainText("分析中");
+  await expect.poll(
+    () => requests.filter((request) => request.method === "GET").length,
+    { timeout: 3_000 },
+  ).toBe(2);
 
   await page.locator("form").evaluate((form) => {
     form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
@@ -686,7 +690,7 @@ test("artifact state: expires from completion time while the page remains open",
   const expiringTask = {
     ...succeededTask(),
     created_at: "2026-07-13T08:59:58Z",
-    completed_at: "2026-07-13T08:59:58Z",
+    completed_at: "2026-07-13T09:00:00Z",
   };
   expiringTask.artifact.analysis.expires_in_seconds = 3;
   await installProductFixture(page, [expiringTask]);
@@ -696,7 +700,7 @@ test("artifact state: expires from completion time while the page remains open",
   await page.getByRole("button", { name: "开始分析" }).click();
 
   await expect(page.getByTestId("task-status")).toContainText("已排队");
-  await page.clock.fastForward(350);
+  await page.clock.fastForward(1_100);
   await expect(page.getByTestId("task-status")).toContainText("分析完成");
   await expect(page.getByTestId("analysis-result")).toHaveAttribute(
     "data-actionable",

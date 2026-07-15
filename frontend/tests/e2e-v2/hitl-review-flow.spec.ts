@@ -291,7 +291,11 @@ async function assertReadablePendingReview(page: Page, interrupt: PendingInterru
   await expect(page.getByTestId("task-status").getByRole("heading")).toHaveText("等待人工确认");
   await expect(panel).toHaveCount(1);
   await expect(panel.getByRole("heading", { name: "分析草稿待人工确认", exact: true })).toBeVisible();
-  await expect(panel.getByRole("status")).toHaveText(/^(?:等待决定|剩余 \d{2}:\d{2}(?::\d{2})?)$/);
+  const pendingBadge = panel.locator('.hitl-review-state[aria-live="off"]');
+  await expect(pendingBadge).not.toHaveAttribute("role", "status");
+  await expect(pendingBadge).toHaveText(
+    /^(?:等待决定|剩余 \d{2}:\d{2}(?::\d{2})?)$/,
+  );
 
   const analysis = interrupt.payload.artifact.analysis;
   const summary = panel.getByLabel("待审核决策摘要");
@@ -323,6 +327,17 @@ async function assertReadablePendingReview(page: Page, interrupt: PendingInterru
     "证据满足门禁",
     "风险策略允许",
   ]);
+  const sources = panel.locator(".hitl-review-sources");
+  await expect(sources.getByRole("heading", { name: "分析来源", exact: true })).toBeVisible();
+  await expect(sources.getByRole("link")).toHaveCount(
+    interrupt.payload.artifact.source_references.length,
+  );
+  for (const reference of interrupt.payload.artifact.source_references) {
+    await expect(sources.getByRole("link", { name: reference })).toHaveAttribute(
+      "href",
+      new URL(reference).toString(),
+    );
+  }
   await expect(panel.getByRole("group", { name: "审核决定" })).toBeVisible();
   await expect(panel.getByRole("button", { name: "批准", exact: true })).toBeEnabled();
   await expect(panel.getByRole("button", { name: "拒绝", exact: true })).toBeEnabled();
