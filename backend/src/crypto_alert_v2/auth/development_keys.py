@@ -50,7 +50,7 @@ def ensure_development_cursor_key(directory: Path) -> Path:
         key_file.chmod(0o600)
         return key_file
 
-    key_file.write_text(token_urlsafe(48))
+    key_file.write_text(token_urlsafe(32))
     key_file.chmod(0o600)
     return key_file
 

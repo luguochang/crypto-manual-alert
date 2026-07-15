@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from hashlib import sha256
 from typing import Annotated, Any, AsyncIterator, Mapping, Protocol
 from uuid import UUID
@@ -435,9 +437,24 @@ def _configured_inbox_cursor_key(settings: Settings) -> bytes | None:
     if configured_key is not None:
         value = configured_key.get_secret_value().strip()
         if value:
+            try:
+                encoded = value.encode("ascii")
+                key_material = b64decode(
+                    encoded + (b"=" * (-len(encoded) % 4)),
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (BinasciiError, UnicodeEncodeError):
+                raise ValueError(
+                    "Product Inbox cursor key must be URL-safe Base64"
+                ) from None
+            if len(key_material) < 32:
+                raise ValueError(
+                    "Product Inbox cursor key must decode to at least 32 bytes"
+                )
             return sha256(
                 b"crypto-alert-v2:product-inbox-cursor:configured-key\0"
-                + value.encode("utf-8")
+                + key_material
             ).digest()
     if settings.app_environment in {"staging", "production"}:
         raise ValueError(

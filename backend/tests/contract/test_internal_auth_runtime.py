@@ -2,6 +2,7 @@ import importlib
 import os
 import subprocess
 import sys
+from base64 import urlsafe_b64encode
 
 from cryptography.hazmat.primitives import serialization
 import jwt
@@ -9,6 +10,10 @@ import pytest
 from pydantic import SecretStr
 
 from crypto_alert_v2.config import Settings
+
+
+def _cursor_key_secret(seed: bytes = b"c") -> str:
+    return urlsafe_b64encode(seed * 32).decode("ascii").rstrip("=")
 
 
 def _development_settings(**overrides: object) -> Settings:
@@ -75,7 +80,7 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
         app_environment="production",
         internal_jwt_public_keys={"test-key": "test-public-key"},
         internal_jwt_audience="standalone-product-audience",
-        product_inbox_cursor_key="test-inbox-cursor-secret-material",
+        product_inbox_cursor_key=_cursor_key_secret(),
     )
     captured_audiences: list[str] = []
 
@@ -124,9 +129,7 @@ def test_production_inbox_cursor_key_is_independent_and_required() -> None:
 
     configured = without_product_key.model_copy(
         update={
-            "product_inbox_cursor_key": SecretStr(
-                "dedicated-product-inbox-cursor-key"
-            )
+            "product_inbox_cursor_key": SecretStr(_cursor_key_secret(b"d"))
         }
     )
     first = module._configured_inbox_cursor_key(configured)
@@ -134,6 +137,13 @@ def test_production_inbox_cursor_key_is_independent_and_required() -> None:
     assert first is not None
     assert len(first) == 32
     assert first == second
+    for weak_key in ("x", urlsafe_b64encode(b"short").decode("ascii")):
+        with pytest.raises(ValueError, match="Product Inbox cursor key"):
+            module._configured_inbox_cursor_key(
+                configured.model_copy(
+                    update={"product_inbox_cursor_key": SecretStr(weak_key)}
+                )
+            )
 
 
 async def _seeded_actors_for_default_app(
@@ -241,7 +251,7 @@ def test_development_cursor_key_is_private_and_stable(tmp_path) -> None:
     key_file = module.ensure_development_cursor_key(tmp_path)
     first_key = key_file.read_text()
 
-    assert len(first_key) >= 48
+    assert len(first_key) >= 43
     assert key_file.stat().st_mode & 0o777 == 0o600
     assert module.ensure_development_cursor_key(tmp_path) == key_file
     assert key_file.read_text() == first_key
@@ -278,7 +288,7 @@ def test_development_key_cli_populates_compose_volume(tmp_path) -> None:
         .read_text()
         .startswith("-----BEGIN PUBLIC KEY-----")
     )
-    assert len((cursor_key_directory / "key").read_text()) >= 48
+    assert len((cursor_key_directory / "key").read_text()) >= 43
 
 
 def test_explicit_development_bootstrap_builds_server_owned_actor() -> None:
