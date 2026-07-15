@@ -4,7 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from crypto_alert_v2.domain.models import Artifact, MarketSnapshot, Symbol
-from crypto_alert_v2.graph.request import ReviewResponse
+from crypto_alert_v2.graph.request import ArtifactReviewPayload, ReviewResponse
 from crypto_alert_v2.providers.search import WebEvidence
 
 
@@ -52,16 +52,66 @@ class PendingInterruptView(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     task_id: StrictStr = Field(min_length=1, max_length=255)
-    run_id: StrictStr = Field(min_length=1, max_length=255)
     interrupt_id: StrictStr = Field(min_length=1, max_length=255)
-    namespace: StrictStr = Field(max_length=2000)
-    checkpoint_id: StrictStr = Field(min_length=1, max_length=255)
     response_version: int = Field(ge=1)
     status: Literal["pending", "responding"]
-    payload: dict[str, Any]
-    response: dict[str, Any] | None = None
+    payload: ArtifactReviewPayload
+    response: ReviewResponse | None = None
     expires_at: datetime | None = None
     responded_at: datetime | None = None
+
+
+InboxQueryStatus = Literal[
+    "active",
+    "pending",
+    "responding",
+    "resolved",
+    "expired",
+    "all",
+]
+
+
+class InboxItemView(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    task_id: StrictStr = Field(min_length=1, max_length=255)
+    status: Literal["pending", "responding", "resolved", "expired", "cancelled"]
+    payload: ArtifactReviewPayload
+    response: ReviewResponse | None = None
+    expires_at: datetime | None = None
+    responded_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    symbol: Symbol
+    horizon: StrictStr = Field(min_length=1, max_length=32)
+    query_text: StrictStr | None = Field(default=None, min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_coherent_response_state(self) -> "InboxItemView":
+        if self.responded_at is not None and self.response is None:
+            raise ValueError("responded inbox item requires its accepted response")
+        if self.status == "pending" and (
+            self.response is not None or self.responded_at is not None
+        ):
+            raise ValueError("pending inbox item cannot contain a response")
+        if self.status in {"responding", "resolved"} and self.response is None:
+            raise ValueError(f"{self.status} inbox item requires an accepted response")
+        if self.status == "resolved" and self.responded_at is None:
+            raise ValueError("resolved inbox item requires a response timestamp")
+        if self.status == "expired" and self.expires_at is None:
+            raise ValueError("expired inbox item requires an expiry timestamp")
+        if self.payload.artifact.analysis.instrument != self.symbol:
+            raise ValueError("inbox review instrument must match its task symbol")
+        if self.payload.artifact.analysis.horizon != self.horizon:
+            raise ValueError("inbox review horizon must match its task horizon")
+        return self
+
+
+class InboxView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[InboxItemView]
+    next_cursor: StrictStr | None = None
 
 
 class InterruptResponseSubmission(ReviewResponse):

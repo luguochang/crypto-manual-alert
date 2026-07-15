@@ -51,12 +51,20 @@ from crypto_alert_v2.api.schemas import (
     PendingInterruptView,
     TaskView,
 )
+from crypto_alert_v2.domain.models import (
+    Artifact as DomainArtifact,
+    EvidenceVerdict,
+    MarketAnalysis,
+    RiskVerdict,
+)
+from crypto_alert_v2.graph.request import ArtifactReviewPayload
 from crypto_alert_v2.persistence.repositories import (
     ArtifactRepository,
     RunRepository,
     TaskCommandRepository,
     TaskRepository,
 )
+from tests.fixtures.golden_cases import valid_market_analysis
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -404,15 +412,23 @@ def test_interrupt_projection_has_formal_state_scope_and_query_contracts() -> No
 
 def test_task_view_exposes_only_typed_pending_interrupts() -> None:
     now = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
+    payload = ArtifactReviewPayload(
+        review_iteration=1,
+        artifact=DomainArtifact(
+            content_version=1,
+            status="draft",
+            analysis=MarketAnalysis.model_validate(valid_market_analysis()),
+            evidence_verdict=EvidenceVerdict(sufficient=True),
+            risk_verdict=RiskVerdict(allowed=True),
+            source_references=["https://example.com/review-source"],
+        ),
+    ).model_dump(mode="json")
     interrupt = {
         "task_id": "task-1",
-        "run_id": "run-1",
         "interrupt_id": "interrupt-1",
-        "namespace": "research:approval",
-        "checkpoint_id": "checkpoint-1",
         "response_version": 1,
         "status": "pending",
-        "payload": {"action": "approve"},
+        "payload": payload,
         "expires_at": now,
     }
     view = TaskView.model_validate(
@@ -428,9 +444,13 @@ def test_task_view_exposes_only_typed_pending_interrupts() -> None:
     )
 
     assert view.pending_interrupts == [PendingInterruptView.model_validate(interrupt)]
-    assert PendingInterruptView.model_validate(
-        {**interrupt, "namespace": ""}
-    ).namespace == ""
+    serialized = view.model_dump(mode="json")
+    for internal_field in ("run_id", "namespace", "checkpoint_id"):
+        assert internal_field not in serialized["pending_interrupts"][0]
+        with pytest.raises(ValidationError):
+            PendingInterruptView.model_validate(
+                {**interrupt, internal_field: "must-not-leak"}
+            )
     assert TaskView.model_validate(
         {
             "task_id": "task-2",

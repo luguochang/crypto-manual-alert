@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from typing import Annotated, Any, AsyncIterator, Mapping, Protocol
 from uuid import UUID
 
@@ -10,12 +11,15 @@ from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
     HealthView,
     IDEMPOTENCY_KEY_PATTERN,
+    InboxQueryStatus,
+    InboxView,
     InterruptResponseSubmission,
     RunListView,
     TaskView,
 )
 from crypto_alert_v2.api.service import (
     IdempotencyConflictError,
+    InvalidInboxCursorError,
     InterruptResponseConflictError,
     ProductAnalysisService,
     TaskNotCancellableError,
@@ -46,6 +50,15 @@ class ProductService(Protocol):
     ) -> dict[str, Any] | None: ...
 
     async def list_runs(self, actor: ActorContext, *, limit: int) -> dict[str, Any]: ...
+
+    async def list_inbox(
+        self,
+        actor: ActorContext,
+        *,
+        status: InboxQueryStatus,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]: ...
 
     async def cancel_task(
         self,
@@ -95,6 +108,20 @@ class UnavailableProductService:
         del actor, limit
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Product persistence is not configured",
+        )
+
+    async def list_inbox(
+        self,
+        actor: ActorContext,
+        *,
+        status: InboxQueryStatus,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        del actor, status, limit, cursor
+        raise HTTPException(
+            status_code=503,
             detail="Product persistence is not configured",
         )
 
@@ -252,6 +279,32 @@ def create_app(
         )
         return await service.list_runs(actor, limit=limit)
 
+    @product.get("/api/v2/inbox", response_model=InboxView)
+    async def list_inbox(
+        request: Request,
+        inbox_status: InboxQueryStatus = Query(default="active", alias="status"),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None, min_length=1, max_length=2048),
+    ) -> dict[str, Any]:
+        actor = _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+        )
+        try:
+            return await service.list_inbox(
+                actor,
+                status=inbox_status,
+                limit=limit,
+                cursor=cursor,
+            )
+        except InvalidInboxCursorError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+
     @product.post(
         "/api/v2/tasks/{task_id}/cancel",
         response_model=TaskView,
@@ -339,6 +392,7 @@ def create_default_app(*, token_audience: str | None = None) -> FastAPI:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     service = ProductAnalysisService(
         session_factory=session_factory,
+        inbox_cursor_key=_configured_inbox_cursor_key(settings),
     )
     mode = settings.app_environment
     development_actor = configured_development_actor(settings)
@@ -374,6 +428,22 @@ def create_default_app(*, token_audience: str | None = None) -> FastAPI:
     product.router.lifespan_context = lifespan
     product.state.product_service = service
     return product
+
+
+def _configured_inbox_cursor_key(settings: Settings) -> bytes | None:
+    configured_key = getattr(settings, "product_inbox_cursor_key", None)
+    if configured_key is not None:
+        value = configured_key.get_secret_value().strip()
+        if value:
+            return sha256(
+                b"crypto-alert-v2:product-inbox-cursor:configured-key\0"
+                + value.encode("utf-8")
+            ).digest()
+    if settings.app_environment in {"staging", "production"}:
+        raise ValueError(
+            "A server-side secret is required for stable Product Inbox cursors"
+        )
+    return None
 
 
 app = create_default_app()

@@ -176,6 +176,8 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "/run/internal-jwt-private",
         "--public-directory",
         "/run/internal-jwt-public",
+        "--cursor-key-directory",
+        "/run/product-inbox-cursor-key",
     ]
     assert services["development-bootstrap"]["command"] == [
         "python",
@@ -258,6 +260,9 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert services["langgraph-api"]["environment"]["MARKET_DATA_HTTP_PROXY"] == (
         "http://proxy.example:7890"
     )
+    assert services["langgraph-api"]["environment"][
+        "PRODUCT_INBOX_CURSOR_KEY_FILE"
+    ] == "/run/product-inbox-cursor-key/key"
     for service_name in (
         "development-bootstrap",
         "langgraph-api-readiness",
@@ -282,7 +287,8 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "/run/internal-jwt-private": "internal-jwt-private"
     }
     assert _volume_sources(services["langgraph-api"]) == {
-        "/run/internal-jwt-public": "internal-jwt-public"
+        "/run/internal-jwt-public": "internal-jwt-public",
+        "/run/product-inbox-cursor-key": "product-inbox-cursor-key",
     }
     assert _volume_sources(services["langgraph-api-readiness"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"

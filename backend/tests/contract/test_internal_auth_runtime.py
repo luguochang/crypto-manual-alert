@@ -6,6 +6,7 @@ import sys
 from cryptography.hazmat.primitives import serialization
 import jwt
 import pytest
+from pydantic import SecretStr
 
 from crypto_alert_v2.config import Settings
 
@@ -74,6 +75,7 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
         app_environment="production",
         internal_jwt_public_keys={"test-key": "test-public-key"},
         internal_jwt_audience="standalone-product-audience",
+        product_inbox_cursor_key="test-inbox-cursor-secret-material",
     )
     captured_audiences: list[str] = []
 
@@ -107,6 +109,31 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
     module.create_default_app(**kwargs)
 
     assert captured_audiences == [expected_audience]
+
+
+def test_production_inbox_cursor_key_is_independent_and_required() -> None:
+    module = importlib.import_module("crypto_alert_v2.api.app")
+    without_product_key = Settings(
+        _env_file=None,
+        app_environment="production",
+        agent_server_local_token="agent-local-token-must-not-be-reused",
+        internal_jwt_private_key="jwt-private-key-must-not-be-reused",
+    )
+    with pytest.raises(ValueError, match="Product Inbox cursors"):
+        module._configured_inbox_cursor_key(without_product_key)
+
+    configured = without_product_key.model_copy(
+        update={
+            "product_inbox_cursor_key": SecretStr(
+                "dedicated-product-inbox-cursor-key"
+            )
+        }
+    )
+    first = module._configured_inbox_cursor_key(configured)
+    second = module._configured_inbox_cursor_key(configured)
+    assert first is not None
+    assert len(first) == 32
+    assert first == second
 
 
 async def _seeded_actors_for_default_app(
@@ -152,17 +179,22 @@ def test_settings_load_internal_jwt_keys_from_files(
 ) -> None:
     private_key_file = tmp_path / "private.pem"
     public_key_file = tmp_path / "public.pem"
+    cursor_key_file = tmp_path / "cursor-key"
     private_key_file.write_text("private-key")
     public_key_file.write_text("public-key")
+    cursor_key_file.write_text("cursor-key-material")
     monkeypatch.setenv("INTERNAL_JWT_KID", "compose-ephemeral")
     monkeypatch.setenv("INTERNAL_JWT_PRIVATE_KEY_FILE", str(private_key_file))
     monkeypatch.setenv("INTERNAL_JWT_PUBLIC_KEY_FILE", str(public_key_file))
+    monkeypatch.setenv("PRODUCT_INBOX_CURSOR_KEY_FILE", str(cursor_key_file))
 
     settings = Settings(_env_file=None, app_environment="test")
 
     assert settings.internal_jwt_private_key is not None
     assert settings.internal_jwt_private_key.get_secret_value() == "private-key"
     assert settings.internal_jwt_public_keys == {"compose-ephemeral": "public-key"}
+    assert settings.product_inbox_cursor_key is not None
+    assert settings.product_inbox_cursor_key.get_secret_value() == "cursor-key-material"
 
 
 def test_development_key_pair_is_matching_and_stable(tmp_path) -> None:
@@ -204,9 +236,21 @@ def test_development_key_pair_can_split_private_and_public_volumes(
     assert not (public_directory / "private.pem").exists()
 
 
+def test_development_cursor_key_is_private_and_stable(tmp_path) -> None:
+    module = importlib.import_module("crypto_alert_v2.auth.development_keys")
+    key_file = module.ensure_development_cursor_key(tmp_path)
+    first_key = key_file.read_text()
+
+    assert len(first_key) >= 48
+    assert key_file.stat().st_mode & 0o777 == 0o600
+    assert module.ensure_development_cursor_key(tmp_path) == key_file
+    assert key_file.read_text() == first_key
+
+
 def test_development_key_cli_populates_compose_volume(tmp_path) -> None:
     private_directory = tmp_path / "private"
     public_directory = tmp_path / "public"
+    cursor_key_directory = tmp_path / "cursor"
     result = subprocess.run(
         [
             sys.executable,
@@ -215,6 +259,8 @@ def test_development_key_cli_populates_compose_volume(tmp_path) -> None:
             str(private_directory),
             "--public-directory",
             str(public_directory),
+            "--cursor-key-directory",
+            str(cursor_key_directory),
         ],
         capture_output=True,
         text=True,
@@ -232,6 +278,7 @@ def test_development_key_cli_populates_compose_volume(tmp_path) -> None:
         .read_text()
         .startswith("-----BEGIN PUBLIC KEY-----")
     )
+    assert len((cursor_key_directory / "key").read_text()) >= 48
 
 
 def test_explicit_development_bootstrap_builds_server_owned_actor() -> None:

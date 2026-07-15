@@ -28,6 +28,7 @@ from crypto_alert_v2.config import get_settings
 from crypto_alert_v2.graph.request import (
     AnalysisRequest,
     ArtifactEdit,
+    ArtifactReviewPayload,
     ReviewResponse,
 )
 from crypto_alert_v2.graph.runtime import AnalysisRuntime, get_default_runtime
@@ -317,15 +318,11 @@ def review_policy(state: AnalysisState) -> AnalysisState:
 
 def interrupt_review(state: AnalysisState) -> AnalysisState:
     review_iteration = state.get("review_iteration", 0) + 1
-    response = interrupt(
-        {
-            "kind": "artifact_review",
-            "schema_version": "1.0",
-            "allowed_actions": ["approve", "reject", "edit"],
-            "review_iteration": review_iteration,
-            "artifact": state["artifact"],
-        }
+    payload = ArtifactReviewPayload(
+        review_iteration=review_iteration,
+        artifact=state["artifact"],
     )
+    response = interrupt(payload.model_dump(mode="json"))
     decision = ReviewResponse.model_validate(response)
     edits = (
         decision.edits.model_dump(mode="json", exclude_unset=True)

@@ -89,6 +89,8 @@ services:
       - /run/internal-jwt-private
       - --public-directory
       - /run/internal-jwt-public
+      - --cursor-key-directory
+      - /run/product-inbox-cursor-key
     volumes:
       - type: volume
         source: internal-jwt-private
@@ -96,6 +98,9 @@ services:
       - type: volume
         source: internal-jwt-public
         target: /run/internal-jwt-public
+      - type: volume
+        source: product-inbox-cursor-key
+        target: /run/product-inbox-cursor-key
 
   development-bootstrap:
     image: crypto-manual-alert-v2-backend:local
@@ -140,12 +145,17 @@ services:
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_MAX_TTL_SECONDS: "60"
       INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
+      PRODUCT_INBOX_CURSOR_KEY_FILE: /run/product-inbox-cursor-key/key
     ports:
       - 127.0.0.1:${AGENT_SERVER_PORT:-8123}:8000
     volumes:
       - type: volume
         source: internal-jwt-public
         target: /run/internal-jwt-public
+        read_only: true
+      - type: volume
+        source: product-inbox-cursor-key
+        target: /run/product-inbox-cursor-key
         read_only: true
     healthcheck:
       test:
@@ -295,3 +305,4 @@ volumes:
   agent-postgres-data:
   internal-jwt-private:
   internal-jwt-public:
+  product-inbox-cursor-key:

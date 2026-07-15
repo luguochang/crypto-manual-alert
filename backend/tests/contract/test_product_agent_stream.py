@@ -417,4 +417,5 @@ def test_default_app_does_not_inject_current_agent_assistant_id(
 
     assert captured == {
         "session_factory": "session-factory",
+        "inbox_cursor_key": None,
     }

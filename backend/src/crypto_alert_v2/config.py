@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     agent_server_url: str = "http://127.0.0.1:8123"
     agent_assistant_id: str = "crypto_analysis"
     agent_server_local_token: SecretStr | None = None
+    product_inbox_cursor_key: SecretStr | None = None
+    product_inbox_cursor_key_file: str | None = None
     internal_jwt_public_keys: dict[str, str] = Field(default_factory=dict)
     internal_jwt_private_key: SecretStr | None = None
     internal_jwt_public_key_file: str | None = None
@@ -79,6 +81,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def load_internal_jwt_key_files(self) -> "Settings":
+        if self.product_inbox_cursor_key_file:
+            cursor_key = Path(self.product_inbox_cursor_key_file).read_text().strip()
+            if not cursor_key:
+                raise ValueError("Product Inbox cursor key file is empty")
+            self.product_inbox_cursor_key = SecretStr(cursor_key)
         if self.internal_jwt_private_key_file:
             self.internal_jwt_private_key = SecretStr(
                 _read_key_file(self.internal_jwt_private_key_file)

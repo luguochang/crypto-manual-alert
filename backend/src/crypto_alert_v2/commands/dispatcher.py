@@ -22,7 +22,7 @@ from crypto_alert_v2.api.agent_server import (
 )
 from crypto_alert_v2.api.schemas import AnalysisSubmission, TerminalGraphOutput
 from crypto_alert_v2.auth.context import ActorContext
-from crypto_alert_v2.graph.request import ReviewResponse
+from crypto_alert_v2.graph.request import ArtifactReviewPayload, ReviewResponse
 from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
@@ -1260,6 +1260,9 @@ class CommandDispatcher:
                 return False
             await self._resolve_responding_interrupt(session, lease, now)
             for remote_interrupt in interrupts:
+                public_payload = ArtifactReviewPayload.model_validate(
+                    remote_interrupt.value
+                ).model_dump(mode="json")
                 projection = await session.scalar(
                     select(InterruptProjection)
                     .where(
@@ -1289,7 +1292,7 @@ class CommandDispatcher:
                             checkpoint_id=remote_interrupt.checkpoint_id,
                             response_version=1,
                             status="pending",
-                            payload=remote_interrupt.value,
+                            payload=public_payload,
                             expires_at=now
                             + timedelta(seconds=self._interrupt_ttl_seconds),
                         )
@@ -1301,7 +1304,7 @@ class CommandDispatcher:
                     )
                 if projection.status == "pending":
                     projection.namespace = remote_interrupt.namespace
-                    projection.payload = remote_interrupt.value
+                    projection.payload = public_payload
             task.status = "waiting_human"
             product_run.status = "waiting_human"
             product_run.last_heartbeat_at = now

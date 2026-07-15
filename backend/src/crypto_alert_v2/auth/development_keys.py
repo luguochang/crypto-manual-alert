@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from secrets import token_urlsafe
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -40,19 +41,36 @@ def ensure_development_key_pair(
     return private_key_file, public_key_file
 
 
+def ensure_development_cursor_key(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    key_file = directory / "key"
+    if key_file.exists():
+        if not key_file.read_text().strip():
+            raise RuntimeError("development Product Inbox cursor key is empty")
+        key_file.chmod(0o600)
+        return key_file
+
+    key_file.write_text(token_urlsafe(48))
+    key_file.chmod(0o600)
+    return key_file
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create local internal JWT keys")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--public-directory", type=Path)
+    parser.add_argument("--cursor-key-directory", type=Path)
     args = parser.parse_args()
     ensure_development_key_pair(
         args.directory,
         public_directory=args.public_directory,
     )
+    if args.cursor_key_directory is not None:
+        ensure_development_cursor_key(args.cursor_key_directory)
 
 
 if __name__ == "__main__":
     main()
 
 
-__all__ = ["ensure_development_key_pair", "main"]
+__all__ = ["ensure_development_cursor_key", "ensure_development_key_pair", "main"]

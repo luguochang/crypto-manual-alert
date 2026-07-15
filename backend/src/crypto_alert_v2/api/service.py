@@ -1,15 +1,26 @@
+from base64 import b64decode, urlsafe_b64encode
+from binascii import Error as BinasciiError
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+import hmac
 import json
+from secrets import token_bytes
 from typing import Any, Callable
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, select
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from crypto_alert_v2.api.schemas import AnalysisSubmission, InterruptResponseSubmission
+from crypto_alert_v2.api.schemas import (
+    AnalysisSubmission,
+    InboxQueryStatus,
+    InterruptResponseSubmission,
+)
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.graph.request import ReviewResponse
 from crypto_alert_v2.persistence.models import (
@@ -45,6 +56,34 @@ class InterruptResponseConflictError(RuntimeError):
     pass
 
 
+class InvalidInboxCursorError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _InboxCursor:
+    created_at: datetime
+    projection_id: UUID
+    scope: str
+    status: str
+
+
+_INBOX_CURSOR_VERSION = 2
+_INBOX_CURSOR_MAX_LENGTH = 2048
+_INBOX_CURSOR_NONCE_LENGTH = 12
+_INBOX_CURSOR_AAD = b"crypto-alert-v2:product-inbox-cursor:v2"
+_INBOX_QUERY_STATUSES = frozenset(
+    {"active", "pending", "responding", "resolved", "expired", "all"}
+)
+_INBOX_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
+    "active": ("pending", "responding"),
+    "pending": ("pending",),
+    "responding": ("responding",),
+    "resolved": ("resolved",),
+    "expired": ("expired",),
+}
+
+
 _MAIN_ACTIONS = frozenset(
     {
         "open_long",
@@ -60,6 +99,102 @@ _MAIN_ACTIONS = frozenset(
         "no_trade",
     }
 )
+
+
+def _encode_inbox_cursor(cursor: _InboxCursor, *, key: bytes) -> str:
+    created_at = cursor.created_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    payload = {
+        "created_at": created_at,
+        "id": str(cursor.projection_id),
+        "scope": cursor.scope,
+        "status": cursor.status,
+        "v": _INBOX_CURSOR_VERSION,
+    }
+    plaintext = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    nonce = token_bytes(_INBOX_CURSOR_NONCE_LENGTH)
+    encrypted = AESGCM(key).encrypt(nonce, plaintext, _INBOX_CURSOR_AAD)
+    return urlsafe_b64encode(nonce + encrypted).decode("ascii").rstrip("=")
+
+
+def _parse_inbox_cursor(
+    cursor: str,
+    *,
+    key: bytes,
+    scope: str,
+    status: str,
+) -> _InboxCursor:
+    try:
+        if (
+            not cursor
+            or len(cursor) > _INBOX_CURSOR_MAX_LENGTH
+            or not cursor.isascii()
+            or any(
+                not (character.isalnum() or character in "-_")
+                for character in cursor
+            )
+        ):
+            raise ValueError
+        encoded = cursor.encode("ascii")
+        envelope = b64decode(
+            encoded + (b"=" * (-len(encoded) % 4)),
+            altchars=b"-_",
+            validate=True,
+        )
+        if len(envelope) <= _INBOX_CURSOR_NONCE_LENGTH + 16:
+            raise ValueError
+        nonce = envelope[:_INBOX_CURSOR_NONCE_LENGTH]
+        ciphertext = envelope[_INBOX_CURSOR_NONCE_LENGTH:]
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, _INBOX_CURSOR_AAD)
+        payload = json.loads(plaintext.decode("utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "created_at",
+            "id",
+            "scope",
+            "status",
+            "v",
+        }:
+            raise ValueError
+        if type(payload["v"]) is not int or payload["v"] != _INBOX_CURSOR_VERSION:
+            raise ValueError
+        if payload["status"] != status:
+            raise ValueError
+        if not isinstance(payload["scope"], str) or not hmac.compare_digest(
+            payload["scope"], scope
+        ):
+            raise ValueError
+        if not isinstance(payload["created_at"], str) or not isinstance(
+            payload["id"], str
+        ):
+            raise ValueError
+        created_at = datetime.fromisoformat(
+            payload["created_at"].replace("Z", "+00:00")
+        )
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError
+        parsed = _InboxCursor(
+            created_at=created_at.astimezone(UTC),
+            projection_id=UUID(payload["id"]),
+            scope=scope,
+            status=status,
+        )
+        return parsed
+    except (
+        BinasciiError,
+        InvalidTag,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        raise InvalidInboxCursorError("Invalid inbox cursor.") from None
+
+
+def _inbox_scope(resolved: ResolvedActor) -> str:
+    identity = (
+        f"{resolved.tenant_id}\0{resolved.workspace_id}\0{resolved.user_id}"
+    ).encode("utf-8")
+    return sha256(identity).hexdigest()
 
 
 def _payload_hash(payload: dict[str, Any]) -> str:
@@ -329,10 +464,7 @@ async def _task_view(
     pending_interrupts = [
         {
             "task_id": str(projection.task_id),
-            "run_id": str(projection.run_id),
             "interrupt_id": projection.official_interrupt_id,
-            "namespace": projection.namespace,
-            "checkpoint_id": projection.checkpoint_id,
             "response_version": projection.response_version,
             "status": projection.status,
             "payload": projection.payload,
@@ -370,8 +502,15 @@ class ProductAnalysisService:
         self,
         *,
         session_factory: Callable[[], AsyncSession],
+        inbox_cursor_key: bytes | None = None,
     ) -> None:
         self._session_factory = session_factory
+        key_material = inbox_cursor_key if inbox_cursor_key is not None else token_bytes(32)
+        if len(key_material) < 32:
+            raise ValueError("inbox cursor key must contain at least 32 bytes")
+        self._inbox_cursor_key = sha256(
+            b"crypto-alert-v2:product-inbox-cursor:key\0" + key_material
+        ).digest()
 
     async def bootstrap_actor(self, actor: ActorContext) -> None:
         await self.provision_actor(
@@ -923,4 +1062,108 @@ class ProductAnalysisService:
                     for run, task in rows
                 ],
                 "limit": limit,
+            }
+
+    async def list_inbox(
+        self,
+        actor: ActorContext,
+        *,
+        status: InboxQueryStatus = "active",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in _INBOX_QUERY_STATUSES:
+            raise ValueError("unsupported inbox status")
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(actor, resolved)
+            scope = _inbox_scope(resolved)
+            parsed_cursor = (
+                _parse_inbox_cursor(
+                    cursor,
+                    key=self._inbox_cursor_key,
+                    scope=scope,
+                    status=status,
+                )
+                if cursor is not None
+                else None
+            )
+            statement = (
+                select(InterruptProjection, Task)
+                .join(
+                    Task,
+                    and_(
+                        InterruptProjection.task_id == Task.id,
+                        InterruptProjection.tenant_id == Task.tenant_id,
+                        InterruptProjection.workspace_id == Task.workspace_id,
+                        InterruptProjection.owner_user_id == Task.owner_user_id,
+                    ),
+                )
+                .where(
+                    InterruptProjection.tenant_id == resolved.tenant_id,
+                    InterruptProjection.workspace_id == resolved.workspace_id,
+                    InterruptProjection.owner_user_id == resolved.user_id,
+                    Task.tenant_id == resolved.tenant_id,
+                    Task.workspace_id == resolved.workspace_id,
+                    Task.owner_user_id == resolved.user_id,
+                )
+            )
+            status_filter = _INBOX_STATUS_FILTERS.get(status)
+            if status_filter is not None:
+                statement = statement.where(
+                    InterruptProjection.status.in_(status_filter)
+                )
+            if parsed_cursor is not None:
+                statement = statement.where(
+                    or_(
+                        InterruptProjection.created_at < parsed_cursor.created_at,
+                        and_(
+                            InterruptProjection.created_at
+                            == parsed_cursor.created_at,
+                            InterruptProjection.id < parsed_cursor.projection_id,
+                        ),
+                    )
+                )
+            rows = (
+                await session.execute(
+                    statement.order_by(
+                        InterruptProjection.created_at.desc(),
+                        InterruptProjection.id.desc(),
+                    ).limit(limit + 1)
+                )
+            ).all()
+            page = rows[:limit]
+            next_cursor = None
+            if len(rows) > limit:
+                last_projection = page[-1][0]
+                next_cursor = _encode_inbox_cursor(
+                    _InboxCursor(
+                        created_at=last_projection.created_at,
+                        projection_id=last_projection.id,
+                        scope=scope,
+                        status=status,
+                    ),
+                    key=self._inbox_cursor_key,
+                )
+            return {
+                "items": [
+                    {
+                        "task_id": str(projection.task_id),
+                        "status": projection.status,
+                        "payload": projection.payload,
+                        "response": projection.response,
+                        "expires_at": projection.expires_at,
+                        "responded_at": projection.responded_at,
+                        "created_at": projection.created_at,
+                        "updated_at": projection.updated_at,
+                        "symbol": task.request_payload["symbol"],
+                        "horizon": task.request_payload["horizon"],
+                        "query_text": task.request_payload.get("query_text"),
+                    }
+                    for projection, task in page
+                ],
+                "next_cursor": next_cursor,
             }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from base64 import b64decode
 from datetime import UTC, datetime, timedelta
 import os
 from typing import AsyncIterator
@@ -33,6 +34,7 @@ from crypto_alert_v2.domain.models import (
     MarketSnapshot as DomainMarketSnapshot,
     RiskVerdict,
 )
+from crypto_alert_v2.graph.request import ArtifactReviewPayload
 from crypto_alert_v2.persistence.base import Base
 from crypto_alert_v2.persistence.models import (
     Artifact,
@@ -40,6 +42,7 @@ from crypto_alert_v2.persistence.models import (
     Decision,
     InterruptProjection,
     MarketSnapshot,
+    Membership,
     Run,
     Task,
     TaskCommand,
@@ -72,6 +75,21 @@ def submission(*, query_text: str = "Assess current BTC risk.") -> AnalysisSubmi
     )
 
 
+def artifact_review_payload() -> dict[str, object]:
+    artifact = DomainArtifact(
+        content_version=1,
+        status="draft",
+        analysis=MarketAnalysis.model_validate(valid_market_analysis()),
+        evidence_verdict=EvidenceVerdict(sufficient=True),
+        risk_verdict=RiskVerdict(allowed=True),
+        source_references=["https://example.com/review-source"],
+    )
+    return ArtifactReviewPayload(
+        review_iteration=1,
+        artifact=artifact,
+    ).model_dump(mode="json")
+
+
 async def seed_waiting_interrupt(
     session_factory: async_sessionmaker[AsyncSession],
     service: ProductAnalysisService,
@@ -81,11 +99,14 @@ async def seed_waiting_interrupt(
     response_version: int = 1,
     status: str = "pending",
     expires_at: datetime | None = None,
+    projection_id: UUID | None = None,
+    created_at: datetime | None = None,
+    query_text: str = "Assess current BTC risk.",
 ) -> tuple[dict[str, object], UUID, UUID]:
     suffix = uuid4().hex
     queued = await service.create_analysis(
         actor,
-        submission(),
+        submission(query_text=query_text),
         idempotency_key=f"waiting-interrupt-task-{suffix}",
     )
     task_id = UUID(str(queued["task_id"]))
@@ -123,7 +144,7 @@ async def seed_waiting_interrupt(
             else None
         )
         projection_values: dict[str, object] = {
-            "id": uuid4(),
+            "id": projection_id or uuid4(),
             "tenant_id": task.tenant_id,
             "workspace_id": task.workspace_id,
             "owner_user_id": task.owner_user_id,
@@ -134,9 +155,11 @@ async def seed_waiting_interrupt(
             "checkpoint_id": f"checkpoint-{suffix}",
             "response_version": response_version,
             "status": status,
-            "payload": {"kind": "artifact_review", "artifact_version": 1},
+            "payload": artifact_review_payload(),
             "expires_at": expires_at,
         }
+        if created_at is not None:
+            projection_values.update(created_at=created_at, updated_at=created_at)
         if stored_response is not None:
             projection_values.update(
                 response=stored_response,
@@ -269,7 +292,7 @@ async def test_interrupt_view_and_response_are_actor_scoped(
     await service.bootstrap_actor(owner)
     for other_actor in other_actors:
         await service.bootstrap_actor(other_actor)
-    queued, waiting_run_id, projection_id = await seed_waiting_interrupt(
+    queued, _, projection_id = await seed_waiting_interrupt(
         session_factory,
         service,
         owner,
@@ -284,13 +307,10 @@ async def test_interrupt_view_and_response_are_actor_scoped(
     assert owner_view["pending_interrupts"] == [
         {
             "task_id": str(queued["task_id"]),
-            "run_id": str(waiting_run_id),
             "interrupt_id": "scoped-interrupt",
-            "namespace": "review",
-            "checkpoint_id": owner_view["pending_interrupts"][0]["checkpoint_id"],
             "response_version": 1,
             "status": "pending",
-            "payload": {"kind": "artifact_review", "artifact_version": 1},
+            "payload": artifact_review_payload(),
             "response": None,
             "expires_at": owner_view["pending_interrupts"][0]["expires_at"],
             "responded_at": None,
@@ -326,6 +346,237 @@ async def test_interrupt_view_and_response_are_actor_scoped(
     assert projection.status == "pending"
     assert projection.response is None
     assert respond_count == 0
+
+
+@pytest.mark.asyncio
+async def test_inbox_filters_stable_pagination_and_actor_scope(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="inbox-scope-tenant",
+        workspace_id="inbox-scope-workspace",
+        user_id="oidc|inbox-scope-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    other_actors = (
+        owner.model_copy(update={"user_id": "oidc|inbox-scope-other-owner"}),
+        owner.model_copy(update={"workspace_id": "inbox-scope-other-workspace"}),
+        owner.model_copy(update={"tenant_id": "inbox-scope-other-tenant"}),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    for other_actor in other_actors:
+        await service.bootstrap_actor(other_actor)
+
+    created_at = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    seeded: dict[str, tuple[str, UUID, UUID]] = {}
+    status_specs = (
+        ("pending", UUID(int=5), created_at + timedelta(minutes=10)),
+        ("responding", UUID(int=4), created_at + timedelta(minutes=10)),
+        ("resolved", UUID(int=3), created_at + timedelta(minutes=10)),
+        ("expired", UUID(int=2), created_at - timedelta(minutes=10)),
+        ("cancelled", UUID(int=1), None),
+    )
+    for projection_status, projection_id, expires_at in status_specs:
+        queued, run_id, persisted_projection_id = await seed_waiting_interrupt(
+            session_factory,
+            service,
+            owner,
+            interrupt_id=f"inbox-{projection_status}",
+            status=projection_status,
+            expires_at=expires_at,
+            projection_id=projection_id,
+            created_at=created_at,
+            query_text=f"Inbox query for {projection_status}.",
+        )
+        assert persisted_projection_id == projection_id
+        seeded[projection_status] = (str(queued["task_id"]), run_id, projection_id)
+
+    expected_filters = {
+        "active": ["pending", "responding"],
+        "pending": ["pending"],
+        "responding": ["responding"],
+        "resolved": ["resolved"],
+        "expired": ["expired"],
+        "all": ["pending", "responding", "resolved", "expired", "cancelled"],
+    }
+    for inbox_status, expected_statuses in expected_filters.items():
+        view = await service.list_inbox(owner, status=inbox_status, limit=50)
+        assert [item["status"] for item in view["items"]] == expected_statuses
+        assert view["next_cursor"] is None
+
+    active = await service.list_inbox(owner)
+    assert [item["status"] for item in active["items"]] == [
+        "pending",
+        "responding",
+    ]
+    pending_item = active["items"][0]
+    pending_task_id, _, _ = seeded["pending"]
+    assert pending_item == {
+        "task_id": pending_task_id,
+        "status": "pending",
+        "payload": artifact_review_payload(),
+        "response": None,
+        "expires_at": created_at + timedelta(minutes=10),
+        "responded_at": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "symbol": "BTC-USDT-SWAP",
+        "horizon": "4h",
+        "query_text": "Inbox query for pending.",
+    }
+
+    first_page = await service.list_inbox(owner, status="all", limit=2)
+    assert [item["status"] for item in first_page["items"]] == [
+        "pending",
+        "responding",
+    ]
+    assert first_page["next_cursor"] is not None
+    decoded_cursor = b64decode(
+        first_page["next_cursor"]
+        + ("=" * (-len(first_page["next_cursor"]) % 4)),
+        altchars=b"-_",
+        validate=True,
+    )
+    for _, _, projection_id in seeded.values():
+        assert str(projection_id).encode() not in decoded_cursor
+    tampered_cursor = (
+        ("A" if first_page["next_cursor"][0] != "A" else "B")
+        + first_page["next_cursor"][1:]
+    )
+    with pytest.raises(service_module.InvalidInboxCursorError):
+        await service.list_inbox(
+            owner,
+            status="all",
+            limit=2,
+            cursor=tampered_cursor,
+        )
+    second_page = await service.list_inbox(
+        owner,
+        status="all",
+        limit=2,
+        cursor=first_page["next_cursor"],
+    )
+    assert [item["status"] for item in second_page["items"]] == [
+        "resolved",
+        "expired",
+    ]
+    assert second_page["next_cursor"] is not None
+    third_page = await service.list_inbox(
+        owner,
+        status="all",
+        limit=2,
+        cursor=second_page["next_cursor"],
+    )
+    assert [item["status"] for item in third_page["items"]] == ["cancelled"]
+    assert third_page["next_cursor"] is None
+    assert {
+        item["task_id"]
+        for page in (first_page, second_page, third_page)
+        for item in page["items"]
+    } == {task_id for task_id, _, _ in seeded.values()}
+
+    for other_actor in other_actors:
+        assert await service.list_inbox(other_actor, status="all", limit=100) == {
+            "items": [],
+            "next_cursor": None,
+        }
+        with pytest.raises(service_module.InvalidInboxCursorError):
+            await service.list_inbox(
+                other_actor,
+                status="all",
+                limit=100,
+                cursor=first_page["next_cursor"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_inbox_rejects_invalid_cursor_limit_and_inactive_read_membership(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="inbox-auth-tenant",
+        workspace_id="inbox-auth-workspace",
+        user_id="oidc|inbox-auth-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    _, _, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="inbox-auth-interrupt",
+    )
+    await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="inbox-auth-responding",
+        status="responding",
+    )
+
+    with pytest.raises(service_module.InvalidInboxCursorError):
+        await service.list_inbox(actor, cursor="malformed-cursor")
+    first_page = await service.list_inbox(actor, status="active", limit=1)
+    assert first_page["items"]
+    assert first_page["next_cursor"] is not None
+    with pytest.raises(service_module.InvalidInboxCursorError):
+        await service.list_inbox(
+            actor,
+            status="all",
+            limit=1,
+            cursor=first_page["next_cursor"],
+        )
+    for invalid_limit in (0, 101):
+        with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+            await service.list_inbox(actor, limit=invalid_limit)
+    with pytest.raises(PermissionError, match="analysis:read"):
+        await service.list_inbox(
+            actor.model_copy(update={"permissions": ("analysis:write",)})
+        )
+
+    async with session_factory() as session, session.begin():
+        projection = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.id == projection_id)
+        )
+        assert projection is not None
+        membership = await session.scalar(
+            select(Membership).where(
+                Membership.tenant_id == projection.tenant_id,
+                Membership.workspace_id == projection.workspace_id,
+                Membership.user_id == projection.owner_user_id,
+            )
+        )
+        assert membership is not None
+        membership_id = membership.id
+        membership.permissions = ["analysis:write"]
+
+    with pytest.raises(PermissionError, match="analysis:read"):
+        await service.list_inbox(actor)
+
+    async with session_factory() as session, session.begin():
+        membership = await session.scalar(
+            select(Membership).where(Membership.id == membership_id)
+        )
+        assert membership is not None
+        membership.permissions = ["analysis:read", "analysis:write"]
+        membership.is_active = False
+
+    with pytest.raises(PermissionError, match="active member"):
+        await service.list_inbox(actor)
 
 
 @pytest.mark.asyncio

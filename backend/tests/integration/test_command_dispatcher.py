@@ -152,7 +152,10 @@ class InspectingRunner:
                     "schema_version": "1.0",
                     "allowed_actions": ["approve", "reject", "edit"],
                     "review_iteration": 2 if handle.run_id.startswith("resumed-") else 1,
-                    "artifact": successful_terminal_output()["artifact"],
+                    "artifact": {
+                        **successful_terminal_output()["artifact"],
+                        "status": "draft",
+                    },
                 },
             ),
         )
@@ -1113,7 +1116,15 @@ async def test_required_review_resumes_official_run_and_projects_approval(
     )
     service, queued = await queue_task(session_factory)
     async with session_factory() as session, session.begin():
-        workspace = await session.scalar(select(Workspace).with_for_update())
+        task = await session.scalar(
+            select(Task).where(Task.id == UUID(str(queued["task_id"])))
+        )
+        assert task is not None
+        workspace = await session.scalar(
+            select(Workspace)
+            .where(Workspace.id == task.workspace_id)
+            .with_for_update()
+        )
         assert workspace is not None
         workspace.review_policy = "required"
 
@@ -1226,16 +1237,20 @@ async def test_review_edit_resumes_then_projects_a_new_interrupt(
                 await session.scalars(
                     select(InterruptProjection)
                     .where(InterruptProjection.task_id == task_id)
-                    .order_by(InterruptProjection.created_at)
                 )
             ).all()
         )
     assert len(projections) == 2
-    assert projections[0].id == first_projection_id
-    assert projections[0].status == "resolved"
-    assert projections[1].status == "pending"
-    assert projections[1].run_id == resumed_run_id
-    assert projections[1].payload["review_iteration"] == 2
+    first_projection = next(
+        projection for projection in projections if projection.id == first_projection_id
+    )
+    next_projection = next(
+        projection for projection in projections if projection.id != first_projection_id
+    )
+    assert first_projection.status == "resolved"
+    assert next_projection.status == "pending"
+    assert next_projection.run_id == resumed_run_id
+    assert next_projection.payload["review_iteration"] == 2
     assert runner.events.count("start") == 1
     assert runner.events.count("resume") == 1
     assert runner.events.count("get_interrupts") == 2

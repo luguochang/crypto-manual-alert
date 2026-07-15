@@ -3,11 +3,33 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from crypto_alert_v2.domain.models import Action, Symbol
+from crypto_alert_v2.domain.models import Action, Artifact, Symbol
 
 
 ReviewPolicy = Literal["bypass", "required"]
 ReviewAction = Literal["approve", "reject", "edit"]
+
+
+class ArtifactReviewPayload(BaseModel):
+    """Canonical public contract for an official artifact review interrupt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["artifact_review"] = "artifact_review"
+    schema_version: Literal["1.0"] = "1.0"
+    allowed_actions: tuple[
+        Literal["approve"],
+        Literal["reject"],
+        Literal["edit"],
+    ] = ("approve", "reject", "edit")
+    review_iteration: int = Field(ge=1)
+    artifact: Artifact
+
+    @model_validator(mode="after")
+    def require_reviewable_draft(self) -> Self:
+        if self.artifact.status != "draft":
+            raise ValueError("artifact review payload requires a draft artifact")
+        return self
 
 
 class AnalysisRequest(BaseModel):

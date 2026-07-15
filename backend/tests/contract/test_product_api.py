@@ -8,12 +8,36 @@ import pytest
 from crypto_alert_v2.api.app import UnavailableProductService, create_app
 from crypto_alert_v2.api.service import (
     IdempotencyConflictError,
+    InvalidInboxCursorError,
     InterruptResponseConflictError,
     ProductAnalysisService,
     _public_error,
 )
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.config import Settings
+from crypto_alert_v2.domain.models import (
+    Artifact,
+    EvidenceVerdict,
+    MarketAnalysis,
+    RiskVerdict,
+)
+from crypto_alert_v2.graph.request import ArtifactReviewPayload
+from tests.fixtures.golden_cases import valid_market_analysis
+
+
+def _review_payload() -> dict[str, Any]:
+    artifact = Artifact(
+        content_version=1,
+        status="draft",
+        analysis=MarketAnalysis.model_validate(valid_market_analysis()),
+        evidence_verdict=EvidenceVerdict(sufficient=True),
+        risk_verdict=RiskVerdict(allowed=True),
+        source_references=["https://example.com/review-source"],
+    )
+    return ArtifactReviewPayload(
+        review_iteration=1,
+        artifact=artifact,
+    ).model_dump(mode="json")
 
 
 class FakeProductService:
@@ -28,6 +52,9 @@ class FakeProductService:
         self.responded_interrupt_id: str | None = None
         self.interrupt_submission: Any = None
         self.interrupt_idempotency_key: str | None = None
+        self.inbox_status: str | None = None
+        self.inbox_limit: int | None = None
+        self.inbox_cursor: str | None = None
         self.dispatch_calls = 0
 
     async def create_analysis(
@@ -95,6 +122,37 @@ class FakeProductService:
             "limit": limit,
         }
 
+    async def list_inbox(
+        self,
+        actor: ActorContext,
+        *,
+        status: str,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        self.actor = actor
+        self.inbox_status = status
+        self.inbox_limit = limit
+        self.inbox_cursor = cursor
+        return {
+            "items": [
+                {
+                    "task_id": "22222222-2222-4222-8222-222222222222",
+                    "status": "responding",
+                    "payload": _review_payload(),
+                    "response": {"action": "approve"},
+                    "expires_at": datetime(2026, 7, 13, 0, 10, tzinfo=UTC),
+                    "responded_at": datetime(2026, 7, 13, 0, 2, tzinfo=UTC),
+                    "created_at": datetime(2026, 7, 13, tzinfo=UTC),
+                    "updated_at": datetime(2026, 7, 13, 0, 2, tzinfo=UTC),
+                    "symbol": "BTC-USDT-SWAP",
+                    "horizon": "4h",
+                    "query_text": "Assess current BTC risk.",
+                }
+            ],
+            "next_cursor": "next-cursor",
+        }
+
     async def cancel_task(
         self,
         actor: ActorContext,
@@ -145,13 +203,10 @@ class FakeProductService:
             "pending_interrupts": [
                 {
                     "task_id": task_id,
-                    "run_id": "run-1",
                     "interrupt_id": interrupt_id,
-                    "namespace": "review",
-                    "checkpoint_id": "checkpoint-1",
                     "response_version": submission.response_version,
                     "status": "responding",
-                    "payload": {"kind": "artifact_review"},
+                    "payload": _review_payload(),
                     "response": submission.model_dump(
                         mode="json",
                         exclude={"response_version"},
@@ -236,6 +291,19 @@ class ConflictingInterruptService(FakeProductService):
     ) -> dict[str, Any] | None:
         del actor, task_id, interrupt_id, submission, idempotency_key
         raise self.error
+
+
+class InvalidInboxCursorService(FakeProductService):
+    async def list_inbox(
+        self,
+        actor: ActorContext,
+        *,
+        status: str,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        del actor, status, limit, cursor
+        raise InvalidInboxCursorError("Invalid inbox cursor.")
 
 
 def _development_settings(**overrides: object) -> Settings:
@@ -365,6 +433,114 @@ async def test_list_runs_uses_server_owned_actor_and_typed_projection() -> None:
     assert service.actor.tenant_id == "compose-tenant"
     assert service.actor.workspace_id == "compose-workspace"
     assert service.actor.user_id == "compose-user"
+
+
+@pytest.mark.asyncio
+async def test_list_inbox_uses_defaults_and_returns_a_strict_typed_projection() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.get("/api/v2/inbox")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "status": "responding",
+                "payload": _review_payload(),
+                "response": {"action": "approve", "edits": None, "comment": None},
+                "expires_at": "2026-07-13T00:10:00Z",
+                "responded_at": "2026-07-13T00:02:00Z",
+                "created_at": "2026-07-13T00:00:00Z",
+                "updated_at": "2026-07-13T00:02:00Z",
+                "symbol": "BTC-USDT-SWAP",
+                "horizon": "4h",
+                "query_text": "Assess current BTC risk.",
+            }
+        ],
+        "next_cursor": "next-cursor",
+    }
+    assert service.inbox_status == "active"
+    assert service.inbox_limit == 50
+    assert service.inbox_cursor is None
+    assert service.actor is not None
+    assert service.actor.tenant_id == "compose-tenant"
+    assert service.actor.workspace_id == "compose-workspace"
+    assert service.actor.user_id == "compose-user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "inbox_status",
+    ("active", "pending", "responding", "resolved", "expired", "all"),
+)
+async def test_list_inbox_forwards_supported_status_limit_and_cursor(
+    inbox_status: str,
+) -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.get(
+            "/api/v2/inbox",
+            params={
+                "status": inbox_status,
+                "limit": 100,
+                "cursor": "opaque-cursor",
+            },
+        )
+
+    assert response.status_code == 200
+    assert service.inbox_status == inbox_status
+    assert service.inbox_limit == 100
+    assert service.inbox_cursor == "opaque-cursor"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    (
+        {"status": "cancelled"},
+        {"status": "unknown"},
+        {"limit": 0},
+        {"limit": 101},
+        {"cursor": ""},
+        {"cursor": "x" * 2049},
+    ),
+)
+async def test_list_inbox_rejects_invalid_query_parameters(
+    params: dict[str, object],
+) -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.get("/api/v2/inbox", params=params)
+
+    assert response.status_code == 422
+    assert service.actor is None
+
+
+@pytest.mark.asyncio
+async def test_list_inbox_fails_closed_for_a_malformed_opaque_cursor() -> None:
+    transport = httpx.ASGITransport(
+        app=_development_app(InvalidInboxCursorService())
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.get(
+            "/api/v2/inbox",
+            params={"cursor": "not-a-valid-inbox-cursor"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid inbox cursor."}
 
 
 @pytest.mark.asyncio
