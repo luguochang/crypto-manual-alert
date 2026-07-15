@@ -38,6 +38,13 @@ const optionalPriceSchema = positiveNumberSchema.nullable().optional().default(n
 const timestampSchema = z
   .string()
   .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid timestamp");
+const absoluteTimestampSchema = z
+  .string()
+  .regex(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/,
+    "Timestamp must include an explicit UTC offset",
+  )
+  .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid timestamp");
 const sourceUrlSchema = z
   .string()
   .url()
@@ -101,7 +108,7 @@ export const webEvidenceSchema = z.strictObject({
   evidence_relation: z.string(),
 });
 
-const actionSchema = z.enum([
+export const actionSchema = z.enum([
   "open_long",
   "open_short",
   "hold_long",
@@ -132,7 +139,7 @@ export const productRunListSchema = z.strictObject({
   limit: z.number().int().min(1).max(100),
 });
 
-const marketAnalysisSchema = z.strictObject({
+export const marketAnalysisSchema = z.strictObject({
   regime: z.enum(["risk_on", "risk_off", "event_compression", "surprise_repricing"]),
   factor_scores: z.record(z.string(), z.number().int().min(-2).max(2)),
   total_score: z.number().int(),
@@ -239,6 +246,146 @@ export const agentStreamBindingSchema = z.strictObject({
   run_id: z.string().trim().min(1).max(255),
 });
 
+const reviewCommentSchema = z.string().trim().min(1).max(1000);
+const reviewTextSchema = z.string().trim().min(1).max(2000);
+
+const artifactReviewEditShape = {
+  regime: z.enum(["risk_on", "risk_off", "event_compression", "surprise_repricing"]),
+  factor_scores: z.record(z.string(), z.number().int().min(-2).max(2)),
+  total_score: z.number().int(),
+  main_action: actionSchema,
+  reference_price: positiveNumberSchema,
+  entry_trigger: positiveNumberSchema.nullable(),
+  stop_price: positiveNumberSchema.nullable(),
+  target_1: positiveNumberSchema.nullable(),
+  target_2: positiveNumberSchema.nullable(),
+  probability: ratioSchema,
+  position_size_class: z.enum(["light", "standard", "heavy", "none"]),
+  max_leverage: z.number().int().min(1),
+  risk_pct: ratioSchema,
+  root_cause_chain: z.array(z.string().trim().min(1).max(2000)).min(1),
+  why_not_opposite: reviewTextSchema,
+  invalidation: reviewTextSchema,
+  unavailable_data: z.array(z.string()),
+  manual_execution_required: z.boolean(),
+  expires_in_seconds: z.number().int().positive(),
+};
+
+export const artifactReviewEditsSchema = z
+  .strictObject({
+    regime: artifactReviewEditShape.regime.optional(),
+    factor_scores: artifactReviewEditShape.factor_scores.optional(),
+    total_score: artifactReviewEditShape.total_score.optional(),
+    main_action: artifactReviewEditShape.main_action.optional(),
+    reference_price: artifactReviewEditShape.reference_price.optional(),
+    entry_trigger: artifactReviewEditShape.entry_trigger.optional(),
+    stop_price: artifactReviewEditShape.stop_price.optional(),
+    target_1: artifactReviewEditShape.target_1.optional(),
+    target_2: artifactReviewEditShape.target_2.optional(),
+    probability: artifactReviewEditShape.probability.optional(),
+    position_size_class: artifactReviewEditShape.position_size_class.optional(),
+    max_leverage: artifactReviewEditShape.max_leverage.optional(),
+    risk_pct: artifactReviewEditShape.risk_pct.optional(),
+    root_cause_chain: artifactReviewEditShape.root_cause_chain.optional(),
+    why_not_opposite: artifactReviewEditShape.why_not_opposite.optional(),
+    invalidation: artifactReviewEditShape.invalidation.optional(),
+    unavailable_data: artifactReviewEditShape.unavailable_data.optional(),
+    manual_execution_required: artifactReviewEditShape.manual_execution_required.optional(),
+    expires_in_seconds: artifactReviewEditShape.expires_in_seconds.optional(),
+  })
+  .refine((edits) => Object.keys(edits).length > 0, {
+    message: "At least one artifact edit is required",
+  });
+
+const reviewResponseBase = {
+  response_version: z.number().int().min(1),
+  comment: reviewCommentSchema.nullable().optional(),
+};
+
+export const interruptResponseSchema = z.discriminatedUnion("action", [
+  z.strictObject({
+    ...reviewResponseBase,
+    action: z.literal("approve"),
+    edits: z.null().optional(),
+  }),
+  z.strictObject({
+    ...reviewResponseBase,
+    action: z.literal("reject"),
+    edits: z.null().optional(),
+  }),
+  z.strictObject({
+    ...reviewResponseBase,
+    action: z.literal("edit"),
+    edits: artifactReviewEditsSchema,
+  }),
+]);
+
+export const officialReviewPayloadSchema = z.strictObject({
+  kind: z.literal("artifact_review"),
+  schema_version: z.literal("1.0"),
+  allowed_actions: z.tuple([
+    z.literal("approve"),
+    z.literal("reject"),
+    z.literal("edit"),
+  ]),
+  review_iteration: z.number().int().min(1),
+  artifact: analysisArtifactSchema,
+});
+
+const persistedArtifactReviewEditsSchema = z.strictObject({
+  regime: artifactReviewEditShape.regime.nullable().optional(),
+  factor_scores: artifactReviewEditShape.factor_scores.nullable().optional(),
+  total_score: artifactReviewEditShape.total_score.nullable().optional(),
+  main_action: artifactReviewEditShape.main_action.nullable().optional(),
+  reference_price: artifactReviewEditShape.reference_price.nullable().optional(),
+  entry_trigger: artifactReviewEditShape.entry_trigger.nullable().optional(),
+  stop_price: artifactReviewEditShape.stop_price.nullable().optional(),
+  target_1: artifactReviewEditShape.target_1.nullable().optional(),
+  target_2: artifactReviewEditShape.target_2.nullable().optional(),
+  probability: artifactReviewEditShape.probability.nullable().optional(),
+  position_size_class: artifactReviewEditShape.position_size_class.nullable().optional(),
+  max_leverage: artifactReviewEditShape.max_leverage.nullable().optional(),
+  risk_pct: artifactReviewEditShape.risk_pct.nullable().optional(),
+  root_cause_chain: artifactReviewEditShape.root_cause_chain.nullable().optional(),
+  why_not_opposite: artifactReviewEditShape.why_not_opposite.nullable().optional(),
+  invalidation: artifactReviewEditShape.invalidation.nullable().optional(),
+  unavailable_data: artifactReviewEditShape.unavailable_data.nullable().optional(),
+  manual_execution_required: artifactReviewEditShape.manual_execution_required.nullable().optional(),
+  expires_in_seconds: artifactReviewEditShape.expires_in_seconds.nullable().optional(),
+});
+
+const persistedInterruptResponseSchema = z.discriminatedUnion("action", [
+  z.strictObject({
+    action: z.literal("approve"),
+    comment: reviewCommentSchema.nullable().optional(),
+    edits: z.null().optional(),
+  }),
+  z.strictObject({
+    action: z.literal("reject"),
+    comment: reviewCommentSchema.nullable().optional(),
+    edits: z.null().optional(),
+  }),
+  z.strictObject({
+    action: z.literal("edit"),
+    comment: reviewCommentSchema.nullable().optional(),
+    edits: persistedArtifactReviewEditsSchema,
+  }),
+]);
+
+export const pendingInterruptSchema = z.strictObject({
+  task_id: z.string().trim().min(1).max(255),
+  run_id: z.string().trim().min(1).max(255),
+  interrupt_id: z.string().trim().min(1).max(255),
+  namespace: z.string().trim().max(2000),
+  checkpoint_id: z.string().trim().min(1).max(255),
+  response_version: z.number().int().min(1),
+  status: z.enum(["pending", "responding"]),
+  payload: officialReviewPayloadSchema,
+  response: persistedInterruptResponseSchema.nullable().optional().default(null),
+  expires_at: absoluteTimestampSchema.nullable().optional().default(null),
+  responded_at: absoluteTimestampSchema.nullable().optional().default(null),
+});
+
 export const productTaskSchema = z
   .strictObject({
     task_id: z.string().trim().min(1),
@@ -254,6 +401,7 @@ export const productTaskSchema = z
     agent_stream: agentStreamBindingSchema.nullable().default(null),
     market_snapshot: marketSnapshotSchema.nullable().default(null),
     web_evidence: z.array(webEvidenceSchema).default([]),
+    pending_interrupts: z.array(pendingInterruptSchema).default([]),
   })
   .superRefine((task, context) => {
     const artifact = task.artifact;
@@ -302,11 +450,38 @@ export const productTaskSchema = z
         path: ["artifact", "analysis", "horizon"],
       });
     }
+    for (const [index, pendingInterrupt] of task.pending_interrupts.entries()) {
+      if (pendingInterrupt.task_id !== task.task_id) {
+        context.addIssue({
+          code: "custom",
+          message: "Pending interrupt task ID must match its task",
+          path: ["pending_interrupts", index, "task_id"],
+        });
+      }
+      if (pendingInterrupt.status === "pending" && pendingInterrupt.response !== null) {
+        context.addIssue({
+          code: "custom",
+          message: "A pending interrupt cannot already contain a response",
+          path: ["pending_interrupts", index, "response"],
+        });
+      }
+      if (pendingInterrupt.status === "responding" && pendingInterrupt.response === null) {
+        context.addIssue({
+          code: "custom",
+          message: "A responding interrupt requires its accepted response",
+          path: ["pending_interrupts", index, "response"],
+        });
+      }
+    }
   });
 
 export type AnalysisSubmission = z.infer<typeof analysisSubmissionSchema>;
 export type AgentStreamBinding = z.infer<typeof agentStreamBindingSchema>;
+export type ArtifactReviewEdits = z.infer<typeof artifactReviewEditsSchema>;
+export type InterruptResponse = z.infer<typeof interruptResponseSchema>;
 export type MarketSnapshot = z.infer<typeof marketSnapshotSchema>;
+export type OfficialReviewPayload = z.infer<typeof officialReviewPayloadSchema>;
+export type PendingInterrupt = z.infer<typeof pendingInterruptSchema>;
 export type ProductError = z.infer<typeof productErrorSchema>;
 export type ProductRunList = z.infer<typeof productRunListSchema>;
 export type ProductRunSummary = z.infer<typeof productRunSummarySchema>;

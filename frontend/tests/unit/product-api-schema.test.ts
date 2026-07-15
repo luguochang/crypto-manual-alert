@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   analysisSubmissionSchema,
+  interruptResponseSchema,
   productRunListSchema,
   productTaskSchema,
   runStatusSchema,
@@ -330,6 +331,138 @@ describe("Product API schemas", () => {
 
     expect(() => productTaskSchema.parse(task)).toThrow();
   });
+
+  it("strictly parses the official pending artifact review projection", () => {
+    const task = waitingHumanTask("pending");
+    const parsed = productTaskSchema.parse(task);
+
+    expect(parsed.pending_interrupts).toEqual([
+      expect.objectContaining({
+        task_id: task.task_id,
+        interrupt_id: "interrupt-review-1",
+        response_version: 3,
+        status: "pending",
+        response: null,
+        expires_at: "2026-07-15T18:30:00+08:00",
+      }),
+    ]);
+    expect(parsed.pending_interrupts[0]?.payload.artifact.status).toBe("draft");
+
+    const withRawPayload = waitingHumanTask("pending");
+    Object.assign(withRawPayload.pending_interrupts[0].payload, {
+      raw_agent_interrupt: { resumable: true },
+    });
+    expect(() => productTaskSchema.parse(withRawPayload)).toThrow();
+  });
+
+  it("parses a responding projection whose persisted response has no response_version", () => {
+    const task = waitingHumanTask("responding");
+    task.pending_interrupts[0].response = {
+      action: "edit",
+      comment: "Reduce risk before the next gate.",
+      edits: {
+        regime: null,
+        factor_scores: null,
+        total_score: null,
+        main_action: "open_long",
+        reference_price: null,
+        entry_trigger: null,
+        stop_price: null,
+        target_1: null,
+        target_2: null,
+        probability: 0.61,
+        position_size_class: "light",
+        max_leverage: 2,
+        risk_pct: "0.005",
+        root_cause_chain: ["Momentum remains positive", "Event risk is elevated"],
+        why_not_opposite: "Downside confirmation is incomplete.",
+        invalidation: "A close below support invalidates the thesis.",
+        unavailable_data: null,
+        manual_execution_required: null,
+        expires_in_seconds: null,
+      },
+    };
+    task.pending_interrupts[0].responded_at = "2026-07-15T10:20:00Z";
+
+    const parsed = productTaskSchema.parse(task);
+
+    expect(parsed.pending_interrupts[0]?.response).toMatchObject({
+      action: "edit",
+      edits: { risk_pct: 0.005 },
+    });
+  });
+
+  it("strictly validates approve, reject, and controlled edit submissions", () => {
+    expect(interruptResponseSchema.parse({
+      response_version: 3,
+      action: "approve",
+      comment: null,
+    })).toEqual({
+      response_version: 3,
+      action: "approve",
+      comment: null,
+    });
+    expect(interruptResponseSchema.parse({
+      response_version: 3,
+      action: "reject",
+      edits: null,
+      comment: "Evidence quality is too low.",
+    }).action).toBe("reject");
+
+    const edited = interruptResponseSchema.parse({
+      response_version: 3,
+      action: "edit",
+      comment: "Use a smaller position.",
+      edits: {
+        main_action: "open_long",
+        probability: "0.61",
+        position_size_class: "light",
+        max_leverage: 125,
+        risk_pct: "0.005",
+        root_cause_chain: ["Momentum remains positive"],
+        why_not_opposite: "Downside confirmation is incomplete.",
+        invalidation: "A close below support invalidates the thesis.",
+      },
+    });
+    expect(edited).toMatchObject({
+      action: "edit",
+      edits: { probability: 0.61, risk_pct: 0.005, max_leverage: 125 },
+    });
+
+    expect(() => interruptResponseSchema.parse({
+      response_version: 3,
+      action: "edit",
+      edits: {},
+    })).toThrow();
+    expect(() => interruptResponseSchema.parse({
+      response_version: 3,
+      action: "approve",
+      edits: { main_action: "open_long" },
+    })).toThrow();
+    expect(() => interruptResponseSchema.parse({
+      response_version: 3,
+      action: "edit",
+      edits: { main_action: "open_long", raw_agent_state: true },
+    })).toThrow();
+  });
+
+  it("requires absolute server timestamps and coherent pending/responding states", () => {
+    const localTimestamp = waitingHumanTask("pending");
+    localTimestamp.pending_interrupts[0].expires_at = "2026-07-15T18:30:00";
+
+    const pendingWithResponse = waitingHumanTask("pending");
+    pendingWithResponse.pending_interrupts[0].response = {
+      action: "approve",
+      comment: null,
+      edits: null,
+    };
+
+    const respondingWithoutResponse = waitingHumanTask("responding");
+
+    expect(() => productTaskSchema.parse(localTimestamp)).toThrow();
+    expect(() => productTaskSchema.parse(pendingWithResponse)).toThrow();
+    expect(() => productTaskSchema.parse(respondingWithoutResponse)).toThrow();
+  });
 });
 
 function successTask() {
@@ -400,6 +533,33 @@ function blockedDraftTask() {
   task.artifact.risk_verdict.confidence_cap = 0;
   task.artifact.risk_verdict.blocked_reasons = ["evidence.insufficient:order_book"];
   return task;
+}
+
+function waitingHumanTask(status: "pending" | "responding") {
+  const task = blockedDraftTask();
+  return {
+    ...task,
+    status: "waiting_human",
+    pending_interrupts: [{
+      task_id: task.task_id,
+      run_id: "11111111-1111-4111-8111-111111111111",
+      interrupt_id: "interrupt-review-1",
+      namespace: "review",
+      checkpoint_id: "checkpoint-review-1",
+      response_version: 3,
+      status,
+      payload: {
+        kind: "artifact_review",
+        schema_version: "1.0",
+        allowed_actions: ["approve", "reject", "edit"],
+        review_iteration: 2,
+        artifact: structuredClone(task.artifact),
+      },
+      response: null as null | Record<string, unknown>,
+      expires_at: "2026-07-15T18:30:00+08:00",
+      responded_at: null as string | null,
+    }],
+  };
 }
 
 function taskProjection(status: (typeof allStatuses)[number]) {

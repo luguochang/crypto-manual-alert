@@ -248,6 +248,71 @@ describe("Product BFF proxy", () => {
     expect(rejected.status).toBe(404);
   });
 
+  it("forwards only the exact interrupt response route, JSON body, and idempotency key", async () => {
+    const taskId = "22222222-2222-4222-8222-222222222222";
+    const interruptId = "interrupt:review-4";
+    const body = JSON.stringify({
+      response_version: 4,
+      action: "approve",
+      comment: null,
+      edits: null,
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json(taskProjection("waiting_human"), { status: 202 });
+    });
+
+    const response = await proxyProductRequest(
+      new Request(
+        `http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/interrupts/${interruptId}/respond`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": "review-network-retry-4",
+            authorization: "Bearer browser-forgery",
+          },
+          body,
+        },
+      ),
+      ["api", "v2", "tasks", taskId, "interrupts", interruptId, "respond"],
+      fetcher,
+    );
+
+    expect(response.status).toBe(202);
+    expect(fetcher).toHaveBeenCalledOnce();
+    const [upstreamUrl, upstreamInit] = fetcher.mock.calls[0] ?? [];
+    expect(upstreamUrl).toBe(
+      `http://127.0.0.1:8123/app/api/v2/tasks/${taskId}/interrupts/interrupt%3Areview-4/respond`,
+    );
+    const headers = new Headers(upstreamInit?.headers);
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("idempotency-key")).toBe("review-network-retry-4");
+    expect(headers.get("authorization")).toBeNull();
+    expect(new TextDecoder().decode(upstreamInit?.body as ArrayBuffer)).toBe(body);
+  });
+
+  it.each([
+    ["GET", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "interrupt-1", "respond"]],
+    ["POST", ["api", "v2", "tasks", "not-a-task", "interrupts", "interrupt-1", "respond"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "bad/interrupt", "respond"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "interrupt-1", "respond", "extra"]],
+  ])("rejects an interrupt response lookalike route (%s %j)", async (method, path) => {
+    const fetcher = vi.fn();
+    const response = await proxyProductRequest(
+      new Request(`http://127.0.0.1:3101/api/product/${path.join("/")}`, {
+        method,
+        body: method === "POST" ? "{}" : undefined,
+      }),
+      path,
+      fetcher,
+    );
+
+    expect(response.status).toBe(404);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it.each(["staging", "production"])(
     "rejects %s requests without a server-owned identity",
     async (environment) => {

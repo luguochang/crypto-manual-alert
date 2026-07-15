@@ -8,6 +8,8 @@ export type AuthorizationResolver = (request: Request) => Promise<string | null>
 const defaultProductApiBaseUrl = "http://127.0.0.1:8123/app";
 const defaultAgentServerAudience = "crypto-alert-agent-server";
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
+const taskIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const interruptIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
 export async function proxyProductRequest(
   request: Request,
@@ -73,10 +75,34 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   if (method === "GET" && path === "api/v2/health") return true;
   if (method === "GET" && path === "api/v2/runs") return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
-  if (method === "POST" && /^api\/v2\/tasks\/[0-9a-f-]{36}\/cancel$/i.test(path)) {
-    return true;
-  }
-  return method === "GET" && /^api\/v2\/tasks\/[0-9a-f-]{36}$/i.test(path);
+  if (method === "POST" && isTaskCancelRoute(pathSegments)) return true;
+  if (method === "POST" && isInterruptResponseRoute(pathSegments)) return true;
+  return method === "GET" && isTaskReadRoute(pathSegments);
+}
+
+function isTaskReadRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 4
+    && pathSegments[0] === "api"
+    && pathSegments[1] === "v2"
+    && pathSegments[2] === "tasks"
+    && taskIdPattern.test(pathSegments[3] ?? "");
+}
+
+function isTaskCancelRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 5
+    && isTaskReadRoute(pathSegments.slice(0, 4))
+    && pathSegments[4] === "cancel";
+}
+
+function isInterruptResponseRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 7
+    && pathSegments[0] === "api"
+    && pathSegments[1] === "v2"
+    && pathSegments[2] === "tasks"
+    && taskIdPattern.test(pathSegments[3] ?? "")
+    && pathSegments[4] === "interrupts"
+    && interruptIdPattern.test(pathSegments[5] ?? "")
+    && pathSegments[6] === "respond";
 }
 
 async function defaultAuthorizationResolver(request: Request): Promise<string | null> {
@@ -137,7 +163,8 @@ function buildServerOwnedHeaders(
     request.method === "POST"
     && (
       path === "api/v2/analysis"
-      || /^api\/v2\/tasks\/[0-9a-f-]{36}\/cancel$/i.test(path)
+      || isTaskCancelRoute(pathSegments)
+      || isInterruptResponseRoute(pathSegments)
     )
   ) {
     const idempotencyKey = request.headers.get("idempotency-key");

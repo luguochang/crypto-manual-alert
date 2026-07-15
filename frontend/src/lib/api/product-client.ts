@@ -1,8 +1,10 @@
 import {
   analysisSubmissionSchema,
+  interruptResponseSchema,
   productRunListSchema,
   productTaskSchema,
   type AnalysisSubmission,
+  type InterruptResponse,
   type ProductRunList,
   type ProductTask,
 } from "@/lib/schemas/product-api";
@@ -72,6 +74,29 @@ export async function cancelTask(
         accept: "application/json",
         "idempotency-key": idempotencyKey,
       },
+    },
+    fetcher,
+  );
+}
+
+export async function respondInterrupt(
+  taskId: string,
+  interruptId: string,
+  input: InterruptResponse,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<ProductTask> {
+  const response = interruptResponseSchema.parse(input);
+  return requestTask(
+    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}/interrupts/${encodeURIComponent(interruptId)}/respond`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(response),
     },
     fetcher,
   );

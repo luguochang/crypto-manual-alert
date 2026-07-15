@@ -12,14 +12,18 @@ import {
 
 import { AnalysisProjection } from "@/features/analysis/analysis-projection";
 import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";
+import { HumanReviewPanel } from "@/features/work/human-review-panel";
 import {
   cancelTask,
   createAnalysis,
   getTask,
   ProductApiError,
+  respondInterrupt,
 } from "@/lib/api/product-client";
 import type {
   AgentStreamBinding,
+  InterruptResponse,
+  PendingInterrupt,
   ProductSymbol,
   ProductTask,
 } from "@/lib/schemas/product-api";
@@ -190,6 +194,45 @@ export function WorkSurface() {
     const taskId = taskRef.current?.task_id;
     if (taskId) void refreshProductTask(taskId);
   }, [refreshProductTask]);
+
+  const respondToPendingInterrupt = useCallback(async (
+    interrupt: PendingInterrupt,
+    response: InterruptResponse,
+    idempotencyKey: string,
+  ) => {
+    const currentTask = taskRef.current;
+    if (
+      currentTask === null
+      || currentTask.task_id !== interrupt.task_id
+      || selectedRunIdRef.current !== null
+    ) {
+      throw new ProductApiError("该审核项已不属于当前实时任务，请重新读取任务状态。", 409);
+    }
+
+    const updatedTask = await respondInterrupt(
+      interrupt.task_id,
+      interrupt.interrupt_id,
+      response,
+      undefined,
+      idempotencyKey,
+    );
+    if (taskRef.current?.task_id !== interrupt.task_id) return updatedTask;
+
+    const version = pollVersion.current + 1;
+    pollVersion.current = version;
+    pollingLock.current = false;
+    setPolling(false);
+    setTask(updatedTask);
+    setRequestError(null);
+    setRecoverableTaskId(null);
+    startPolling(updatedTask, version, null);
+    return updatedTask;
+  }, [startPolling]);
+
+  const refreshAfterInterruptConflict = useCallback(() => {
+    const taskId = taskRef.current?.task_id;
+    if (taskId !== undefined) void recoverTask(taskId, null);
+  }, [recoverTask]);
 
   useEffect(() => {
     const selection = taskSelectionFromLocation();
@@ -407,6 +450,21 @@ export function WorkSurface() {
         </div>
       ) : null}
 
+      {task && task.pending_interrupts.length > 0 ? (
+        <div className="hitl-review-stack">
+          {task.pending_interrupts.map((interrupt) => (
+            <HumanReviewPanel
+              key={`${interrupt.interrupt_id}:${interrupt.response_version}`}
+              interrupt={interrupt}
+              disabled={historicalRunSelection || cancelling || cancellationPending}
+              onRespond={(response, idempotencyKey) =>
+                respondToPendingInterrupt(interrupt, response, idempotencyKey)}
+              onConflict={refreshAfterInterruptConflict}
+            />
+          ))}
+        </div>
+      ) : null}
+
       {task ? (
         <AnalysisProjection
           key={`${task.task_id}:${task.status}:${task.artifact?.content_version ?? 0}`}
@@ -535,13 +593,8 @@ function isRecoverableTaskRead(error: unknown): boolean {
   return error.status === 408 || error.status === 429 || error.status >= 500;
 }
 
-function shouldContinuouslyPoll(task: ProductTask) {
-  return task.status !== "waiting_human" && !terminalStatuses.has(task.status);
-}
-
 function shouldPollTask(task: ProductTask) {
-  return shouldContinuouslyPoll(task)
-    || (task.status === "waiting_human" && task.cancel_requested_at !== null);
+  return !terminalStatuses.has(task.status);
 }
 
 function delay(milliseconds: number) {
