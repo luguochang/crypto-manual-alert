@@ -397,9 +397,8 @@ test("a new submission invalidates an older poll loop", async ({ page }) => {
     errors: [{ code: "stale", message: "旧任务不应覆盖新任务。", retryable: false }],
   };
   const newWaitingTask = {
-    ...taskProjection("waiting_human"),
+    ...taskProjection("waiting_human", "SOL-USDT-SWAP"),
     task_id: "task-new",
-    symbol: "SOL-USDT-SWAP",
   };
   const requests = await installProductFixture(
     page,
@@ -488,15 +487,44 @@ function isPollNetworkFailure(value: unknown): value is typeof pollNetworkFailur
   return typeof value === "object" && value !== null && "fixture" in value && value.fixture === "network-failure";
 }
 
-function taskProjection(status: string) {
-  return {
+function taskProjection(
+  status: string,
+  symbol = "ETH-USDT-SWAP",
+  horizon = "4h",
+) {
+  const projection = {
     task_id: "task-fixture-1",
     status,
-    symbol: "ETH-USDT-SWAP",
-    horizon: "4h",
+    symbol,
+    horizon,
     created_at: fixtureCreatedAt,
     artifact: null,
     errors: [],
+  };
+  if (status !== "waiting_human") return projection;
+  const artifact = fixtureArtifact("draft", symbol, horizon);
+  return {
+    ...projection,
+    pending_interrupts: {
+      pause_id: "33333333-3333-4333-8333-333333333333",
+      pause_version: 1,
+      status: "pending",
+      expires_at: "2026-07-13T10:00:00Z",
+      members: [{
+        interrupt_id: "fixture-review-interrupt",
+        response_version: 1,
+        status: "pending",
+        payload: {
+          kind: "artifact_review",
+          schema_version: "1.0",
+          allowed_actions: ["approve", "reject", "edit"],
+          review_iteration: 1,
+          artifact,
+        },
+        response: null,
+        responded_at: null,
+      }],
+    },
   };
 }
 
@@ -518,18 +546,27 @@ function succeededTask() {
       excerpt: "Spot and derivatives structure support the current directional read.",
       evidence_relation: "supports",
     }],
-    artifact: {
+    artifact: fixtureArtifact("committed", "ETH-USDT-SWAP", "4h"),
+  };
+}
+
+function fixtureArtifact(
+  status: "draft" | "committed",
+  instrument: string,
+  horizon: string,
+) {
+  return {
       artifact_type: "analysis_report",
       schema_version: "1.0",
       content_version: 1,
-      status: "committed",
+      status,
       analysis: {
         regime: "risk_on",
         factor_scores: { momentum: 2, macro: 1 },
         total_score: 3,
         main_action: "open_long",
-        instrument: "ETH-USDT-SWAP",
-        horizon: "4h",
+        instrument,
+        horizon,
         reference_price: "67250.5",
         entry_trigger: "67400",
         stop_price: "65800",
@@ -563,8 +600,7 @@ function succeededTask() {
         "https://example.com/market/eth",
         "https://example.com/macro/fed",
       ],
-    },
-  };
+    };
 }
 
 async function assertNoRawPayload(page: Page) {

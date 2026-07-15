@@ -12,20 +12,27 @@ import {
 
 import { AnalysisProjection } from "@/features/analysis/analysis-projection";
 import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";
-import { HumanReviewPanel } from "@/features/work/human-review-panel";
+import {
+  HumanReviewPanel,
+  isServerExpiredReviewConflict,
+  type ReviewSubmissionPhase,
+} from "@/features/work/human-review-panel";
 import {
   cancelTask,
   createAnalysis,
   getTask,
   ProductApiError,
-  respondInterrupt,
+  respondAllInterrupts,
 } from "@/lib/api/product-client";
-import type {
-  AgentStreamBinding,
-  InterruptResponse,
-  PendingInterrupt,
-  ProductSymbol,
-  ProductTask,
+import {
+  interruptResponseSchema,
+  respondAllInterruptsSchema,
+  type AgentStreamBinding,
+  type InterruptResponse,
+  type PendingInterruptPause,
+  type ProductSymbol,
+  type ProductTask,
+  type RespondAllInterrupts,
 } from "@/lib/schemas/product-api";
 
 const symbols: Array<{ short: string; value: ProductSymbol }> = [
@@ -39,6 +46,210 @@ const productTaskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 const officialStreamAttachDelayMs = 1_000;
 const taskPollIntervalMs = 1_000;
 const subscribeHydration = () => () => undefined;
+
+export type ReviewBatchRequestIdentity = {
+  fingerprint: string;
+  idempotencyKey: string;
+};
+
+type ReviewBatchDisplayState = ReviewSubmissionPhase | "responding";
+
+export type ReviewBatchCoordinatorState = {
+  authorityFingerprint: string | null;
+  drafts: Readonly<Record<string, InterruptResponse>>;
+  phase: ReviewSubmissionPhase;
+  failureMessage: string | null;
+  retryRequest: ReviewBatchRequestIdentity | null;
+};
+
+export type ReviewSubmissionFailure = {
+  phase: Exclude<ReviewSubmissionPhase, "idle" | "submitting" | "accepted">;
+  message: string;
+  preserveRequestIdentity: boolean;
+  refreshTask: boolean;
+};
+
+export function createEmptyReviewBatchState(
+  authorityFingerprint: string | null = null,
+): ReviewBatchCoordinatorState {
+  return {
+    authorityFingerprint,
+    drafts: {},
+    phase: "idle",
+    failureMessage: null,
+    retryRequest: null,
+  };
+}
+
+export function reviewPauseFingerprint(pause: PendingInterruptPause): string {
+  const members = pause.members
+    .map((member) => [member.interrupt_id, member.response_version] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return JSON.stringify([pause.pause_id, pause.pause_version, members]);
+}
+
+export function reconcileReviewBatchState(
+  current: ReviewBatchCoordinatorState,
+  pause: PendingInterruptPause | null,
+): ReviewBatchCoordinatorState {
+  if (pause === null) {
+    return current.authorityFingerprint === null
+      ? current
+      : createEmptyReviewBatchState();
+  }
+
+  const authorityFingerprint = reviewPauseFingerprint(pause);
+  if (current.authorityFingerprint !== authorityFingerprint) {
+    return createEmptyReviewBatchState(authorityFingerprint);
+  }
+  if (pause.status === "responding" && (
+    Object.keys(current.drafts).length > 0
+    || current.retryRequest !== null
+    || current.failureMessage !== null
+    || current.phase !== "idle"
+  )) {
+    return createEmptyReviewBatchState(authorityFingerprint);
+  }
+  return current;
+}
+
+export function recordReviewDecision(
+  current: ReviewBatchCoordinatorState,
+  pause: PendingInterruptPause,
+  interruptId: string,
+  response: InterruptResponse,
+): ReviewBatchCoordinatorState {
+  const reconciled = reconcileReviewBatchState(current, pause);
+  if (
+    pause.status !== "pending"
+    || !pause.members.some((member) => member.interrupt_id === interruptId)
+  ) {
+    throw new Error("Review decision does not belong to the active pending pause");
+  }
+  return {
+    ...reconciled,
+    drafts: {
+      ...reconciled.drafts,
+      [interruptId]: interruptResponseSchema.parse(response),
+    },
+    phase: reconciled.phase === "network_error" ? "idle" : reconciled.phase,
+    failureMessage: reconciled.phase === "network_error"
+      ? null
+      : reconciled.failureMessage,
+  };
+}
+
+export function buildRespondAllSubmission(
+  pause: PendingInterruptPause,
+  drafts: Readonly<Record<string, InterruptResponse>>,
+): RespondAllInterrupts {
+  const memberIds = new Set(pause.members.map((member) => member.interrupt_id));
+  const draftIds = Object.keys(drafts);
+  if (
+    pause.status !== "pending"
+    || draftIds.length !== memberIds.size
+    || draftIds.some((interruptId) => !memberIds.has(interruptId))
+    || pause.members.some((member) => drafts[member.interrupt_id] === undefined)
+  ) {
+    throw new Error("Every member of the active pause requires exactly one decision");
+  }
+
+  return respondAllInterruptsSchema.parse({
+    pause_id: pause.pause_id,
+    pause_version: pause.pause_version,
+    responses: pause.members.map((member) => ({
+      interrupt_id: member.interrupt_id,
+      response_version: member.response_version,
+      response: drafts[member.interrupt_id],
+    })),
+  });
+}
+
+export function isReviewBatchComplete(
+  pause: PendingInterruptPause,
+  state: ReviewBatchCoordinatorState,
+): boolean {
+  try {
+    buildRespondAllSubmission(pause, state.drafts);
+    return state.authorityFingerprint === reviewPauseFingerprint(pause);
+  } catch {
+    return false;
+  }
+}
+
+export function resolveReviewBatchRequestIdentity(
+  input: RespondAllInterrupts,
+  previous: ReviewBatchRequestIdentity | null,
+  createIdempotencyKey: () => string = () => crypto.randomUUID(),
+): ReviewBatchRequestIdentity {
+  const fingerprint = JSON.stringify(respondAllInterruptsSchema.parse(input));
+  return previous?.fingerprint === fingerprint
+    ? previous
+    : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function hasUnsubmittedReviewDrafts(
+  pause: PendingInterruptPause | null,
+  state: ReviewBatchCoordinatorState,
+): boolean {
+  return pause?.status === "pending"
+    && state.authorityFingerprint === reviewPauseFingerprint(pause)
+    && Object.keys(state.drafts).length > 0;
+}
+
+export function classifyReviewSubmissionFailure(error: unknown): ReviewSubmissionFailure {
+  if (!(error instanceof ProductApiError)) {
+    return {
+      phase: "network_error",
+      message: "网络连接中断，本次整组响应尚未得到服务端确认。",
+      preserveRequestIdentity: true,
+      refreshTask: false,
+    };
+  }
+  if (error.status === 409) {
+    const expired = isServerExpiredReviewConflict(error.status, error.message);
+    return {
+      phase: expired ? "expired" : "conflict",
+      message: expired
+        ? "服务端已关闭本次审核窗口，正在读取任务的最终状态。"
+        : "该审核请求已被处理或版本已更新，正在重新读取服务端状态。",
+      preserveRequestIdentity: false,
+      refreshTask: true,
+    };
+  }
+  if (error.status === 401 || error.status === 403) {
+    return {
+      phase: "auth_error",
+      message: error.status === 401
+        ? "登录状态已失效，请重新登录后再读取任务。"
+        : "当前账号无权提交这组审核决定。",
+      preserveRequestIdentity: false,
+      refreshTask: false,
+    };
+  }
+  if (
+    error.status === 408
+    || error.status === 429
+    || (error.status >= 500 && error.status <= 599)
+  ) {
+    return {
+      phase: "network_error",
+      message: error.message,
+      preserveRequestIdentity: true,
+      refreshTask: false,
+    };
+  }
+  return {
+    phase: "invalid_request",
+    message: error.status === 404
+      ? "审核任务或暂停已不存在，正在重新读取服务端状态。"
+      : error.status === 422
+        ? "服务端拒绝了审核内容，正在重新读取任务；请勿重试旧请求。"
+        : "服务端未接受这组审核决定，正在重新读取任务状态。",
+    preserveRequestIdentity: false,
+    refreshTask: true,
+  };
+}
 
 export function WorkSurface() {
   const hydrated = useSyncExternalStore(
@@ -57,13 +268,18 @@ export function WorkSurface() {
   const [recoverableTaskId, setRecoverableTaskId] = useState<string | null>(null);
   const [streamBinding, setStreamBinding] = useState<AgentStreamBinding | null>(null);
   const [historicalRunSelection, setHistoricalRunSelection] = useState(false);
+  const [reviewBatch, setReviewBatch] = useState<ReviewBatchCoordinatorState>(
+    createEmptyReviewBatchState,
+  );
   const pollVersion = useRef(0);
   const submitLock = useRef(false);
   const cancelLock = useRef(false);
   const cancelRequest = useRef<{ taskId: string; idempotencyKey: string } | null>(null);
   const pollingLock = useRef(false);
+  const reviewSubmissionLock = useRef(false);
   const taskRef = useRef<ProductTask | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
+  const reviewBatchRef = useRef(reviewBatch);
 
   useEffect(() => {
     taskRef.current = task;
@@ -72,6 +288,26 @@ export function WorkSurface() {
       cancelLock.current = false;
     }
   }, [task]);
+
+  useEffect(() => {
+    setReviewBatch((current) => {
+      const next = reconcileReviewBatchState(
+        current,
+        task?.pending_interrupts ?? null,
+      );
+      reviewBatchRef.current = next;
+      return next;
+    });
+  }, [task?.pending_interrupts]);
+
+  const updateReviewBatch = useCallback((
+    update: (current: ReviewBatchCoordinatorState) => ReviewBatchCoordinatorState,
+  ) => {
+    const next = update(reviewBatchRef.current);
+    reviewBatchRef.current = next;
+    setReviewBatch(next);
+    return next;
+  }, []);
 
   const pollTask = useCallback(async (
     initialTask: ProductTask,
@@ -150,7 +386,7 @@ export function WorkSurface() {
       setTask(recoveredTask);
       setSymbol(recoveredTask.symbol);
       setHorizon(recoveredTask.horizon);
-      if (recoveredTask.query_text !== null) setQuery(recoveredTask.query_text);
+      setQuery(recoveredTask.query_text ?? "");
       pollingLock.current = false;
       setPolling(false);
       startPolling(recoveredTask, version, selectedRunId);
@@ -195,61 +431,173 @@ export function WorkSurface() {
     if (taskId) void refreshProductTask(taskId);
   }, [refreshProductTask]);
 
-  const respondToPendingInterrupt = useCallback(async (
-    interrupt: PendingInterrupt,
-    response: InterruptResponse,
-    idempotencyKey: string,
+  const submitReviewBatch = useCallback(async (
+    preparedState?: ReviewBatchCoordinatorState,
   ) => {
+    if (reviewSubmissionLock.current) return;
     const currentTask = taskRef.current;
+    const pause = currentTask?.pending_interrupts ?? null;
     if (
       currentTask === null
-      || currentTask.task_id !== interrupt.task_id
+      || pause === null
       || selectedRunIdRef.current !== null
-    ) {
-      throw new ProductApiError("该审核项已不属于当前实时任务，请重新读取任务状态。", 409);
+      || pause.status !== "pending"
+      || currentTask.cancel_requested_at !== null
+      || cancelLock.current
+    ) return;
+
+    const coordinatorState = reconcileReviewBatchState(
+      preparedState ?? reviewBatchRef.current,
+      pause,
+    );
+    let submission: RespondAllInterrupts;
+    try {
+      submission = buildRespondAllSubmission(pause, coordinatorState.drafts);
+    } catch {
+      return;
     }
 
-    const updatedTask = await respondInterrupt(
-      interrupt.task_id,
-      interrupt.interrupt_id,
-      response,
-      undefined,
-      idempotencyKey,
+    const request = resolveReviewBatchRequestIdentity(
+      submission,
+      coordinatorState.retryRequest,
     );
-    if (taskRef.current?.task_id !== interrupt.task_id) return updatedTask;
+    const authorityFingerprint = reviewPauseFingerprint(pause);
+    reviewSubmissionLock.current = true;
+    updateReviewBatch((current) => current.authorityFingerprint === authorityFingerprint
+      ? {
+          ...current,
+          phase: "submitting",
+          failureMessage: null,
+          retryRequest: request,
+        }
+      : current);
 
-    const version = pollVersion.current + 1;
-    pollVersion.current = version;
+    try {
+      const updatedTask = await respondAllInterrupts(
+        currentTask.task_id,
+        submission,
+        undefined,
+        request.idempotencyKey,
+      );
+      if (
+        taskRef.current?.task_id !== currentTask.task_id
+        || taskRef.current.pending_interrupts === null
+        || reviewPauseFingerprint(taskRef.current.pending_interrupts) !== authorityFingerprint
+      ) return;
+
+      updateReviewBatch((current) => current.authorityFingerprint === authorityFingerprint
+        ? {
+            ...current,
+            phase: "accepted",
+            failureMessage: null,
+            retryRequest: null,
+          }
+        : current);
+      const version = pollVersion.current + 1;
+      pollVersion.current = version;
+      pollingLock.current = false;
+      setPolling(false);
+      setTask(updatedTask);
+      setRequestError(null);
+      setRecoverableTaskId(null);
+      startPolling(updatedTask, version, null);
+    } catch (error) {
+      if (
+        taskRef.current?.task_id !== currentTask.task_id
+        || taskRef.current.pending_interrupts === null
+        || reviewPauseFingerprint(taskRef.current.pending_interrupts) !== authorityFingerprint
+      ) return;
+
+      const failure = classifyReviewSubmissionFailure(error);
+      updateReviewBatch((current) => current.authorityFingerprint === authorityFingerprint
+        ? {
+            ...current,
+            phase: failure.phase,
+            failureMessage: failure.message,
+            retryRequest: failure.preserveRequestIdentity ? request : null,
+          }
+        : current);
+      if (failure.refreshTask) void recoverTask(currentTask.task_id, null);
+    } finally {
+      reviewSubmissionLock.current = false;
+    }
+  }, [recoverTask, startPolling, updateReviewBatch]);
+
+  const handleReviewDecision = useCallback((
+    pause: PendingInterruptPause,
+    interruptId: string,
+    response: InterruptResponse,
+  ) => {
+    const currentTask = taskRef.current;
+    const currentPause = currentTask?.pending_interrupts ?? null;
+    if (
+      currentTask === null
+      || currentPause === null
+      || selectedRunIdRef.current !== null
+      || reviewPauseFingerprint(currentPause) !== reviewPauseFingerprint(pause)
+    ) return;
+
+    let preparedState: ReviewBatchCoordinatorState;
+    try {
+      preparedState = updateReviewBatch((current) =>
+        recordReviewDecision(current, currentPause, interruptId, response));
+    } catch {
+      return;
+    }
+    if (currentPause.members.length === 1) {
+      void submitReviewBatch(preparedState);
+    }
+  }, [submitReviewBatch, updateReviewBatch]);
+
+  useEffect(() => {
+    const pause = task?.pending_interrupts ?? null;
+    if (!hasUnsubmittedReviewDrafts(pause, reviewBatch)) return;
+
+    const protectDrafts = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protectDrafts);
+    return () => window.removeEventListener("beforeunload", protectDrafts);
+  }, [reviewBatch, task?.pending_interrupts]);
+
+  const loadTaskSelectionFromLocation = useCallback(() => {
+    const selection = taskSelectionFromLocation();
+    pollVersion.current += 1;
     pollingLock.current = false;
-    setPolling(false);
-    setTask(updatedTask);
+    submitLock.current = false;
+    reviewSubmissionLock.current = false;
+    cancelLock.current = false;
+    cancelRequest.current = null;
+    taskRef.current = null;
+    selectedRunIdRef.current = selection?.runId ?? null;
+    const emptyReviewBatch = createEmptyReviewBatchState();
+    reviewBatchRef.current = emptyReviewBatch;
+    setReviewBatch(emptyReviewBatch);
+    setTask(null);
+    setStreamBinding(null);
     setRequestError(null);
     setRecoverableTaskId(null);
-    startPolling(updatedTask, version, null);
-    return updatedTask;
-  }, [startPolling]);
-
-  const refreshAfterInterruptConflict = useCallback(() => {
-    const taskId = taskRef.current?.task_id;
-    if (taskId !== undefined) void recoverTask(taskId, null);
+    setSubmitting(false);
+    setPolling(false);
+    setCancelling(false);
+    setHistoricalRunSelection(selection?.runId !== null && selection !== null);
+    if (selection !== null) void recoverTask(selection.taskId, selection.runId);
   }, [recoverTask]);
 
   useEffect(() => {
-    const selection = taskSelectionFromLocation();
-    const recoveryTimer = selection === null
-      ? undefined
-      : window.setTimeout(
-        () => void recoverTask(selection.taskId, selection.runId),
-        0,
-      );
+    const recoveryTimer = window.setTimeout(loadTaskSelectionFromLocation, 0);
+    window.addEventListener("popstate", loadTaskSelectionFromLocation);
 
     return () => {
-      if (recoveryTimer !== undefined) window.clearTimeout(recoveryTimer);
+      window.clearTimeout(recoveryTimer);
+      window.removeEventListener("popstate", loadTaskSelectionFromLocation);
       pollVersion.current += 1;
       submitLock.current = false;
       pollingLock.current = false;
+      reviewSubmissionLock.current = false;
     };
-  }, [recoverTask]);
+  }, [loadTaskSelectionFromLocation]);
 
   const agentAssistantId = task?.agent_stream?.assistant_id ?? null;
   const agentThreadId = task?.agent_stream?.thread_id ?? null;
@@ -306,6 +654,10 @@ export function WorkSurface() {
     setStreamBinding(null);
     cancelRequest.current = null;
     cancelLock.current = false;
+    reviewSubmissionLock.current = false;
+    const emptyReviewBatch = createEmptyReviewBatchState();
+    reviewBatchRef.current = emptyReviewBatch;
+    setReviewBatch(emptyReviewBatch);
     setTask(null);
     selectedRunIdRef.current = null;
     setHistoricalRunSelection(false);
@@ -343,6 +695,7 @@ export function WorkSurface() {
       || terminalStatuses.has(currentTask.status)
       || currentTask.cancel_requested_at !== null
       || cancelLock.current
+      || reviewSubmissionLock.current
     ) return;
 
     cancelLock.current = true;
@@ -393,6 +746,22 @@ export function WorkSurface() {
     void recoverTask(recoverableTaskId, selectedRunIdRef.current);
   }
 
+  const pendingPause = task?.pending_interrupts ?? null;
+  const renderedReviewBatch = reconcileReviewBatchState(reviewBatch, pendingPause);
+  const reviewBatchComplete = pendingPause !== null
+    && isReviewBatchComplete(pendingPause, renderedReviewBatch);
+  const draftedReviewCount = pendingPause === null
+    ? 0
+    : pendingPause.members.filter(
+      (member) => renderedReviewBatch.drafts[member.interrupt_id] !== undefined,
+    ).length;
+  const externalReviewDisabled = historicalRunSelection
+    || cancelling
+    || cancellationPending;
+  const reviewBatchDisplayState: ReviewBatchDisplayState = pendingPause?.status === "responding"
+    ? "responding"
+    : renderedReviewBatch.phase;
+
   return (
     <div className="work-page">
       <header className="work-header">
@@ -436,7 +805,11 @@ export function WorkSurface() {
             className="cancel-task-button"
             type="button"
             onClick={() => void cancelCurrentTask()}
-            disabled={cancelling || cancellationPending}
+            disabled={
+              cancelling
+              || cancellationPending
+              || renderedReviewBatch.phase === "submitting"
+            }
             aria-describedby={cancellationPending ? "cancel-task-status" : undefined}
           >
             <CircleX size={17} aria-hidden="true" />
@@ -450,18 +823,74 @@ export function WorkSurface() {
         </div>
       ) : null}
 
-      {task && task.pending_interrupts.length > 0 ? (
+      {pendingPause !== null ? (
         <div className="hitl-review-stack">
-          {task.pending_interrupts.map((interrupt) => (
+          {pendingPause.members.map((interrupt, index) => (
             <HumanReviewPanel
-              key={`${interrupt.interrupt_id}:${interrupt.response_version}`}
+              key={`${pendingPause.pause_id}:${pendingPause.pause_version}:${interrupt.interrupt_id}:${interrupt.response_version}`}
               interrupt={interrupt}
-              disabled={historicalRunSelection || cancelling || cancellationPending}
-              onRespond={(response, idempotencyKey) =>
-                respondToPendingInterrupt(interrupt, response, idempotencyKey)}
-              onConflict={refreshAfterInterruptConflict}
+              expiresAt={pendingPause.expires_at}
+              disabled={externalReviewDisabled}
+              phase={renderedReviewBatch.phase}
+              failureMessage={renderedReviewBatch.failureMessage}
+              decision={renderedReviewBatch.drafts[interrupt.interrupt_id] ?? null}
+              deferSubmission={pendingPause.members.length > 1}
+              announceSubmissionState={pendingPause.members.length === 1}
+              showSubmissionNotice={pendingPause.members.length === 1}
+              reviewPosition={pendingPause.members.length > 1
+                ? { index: index + 1, total: pendingPause.members.length }
+                : undefined}
+              onDecide={(response) => handleReviewDecision(
+                pendingPause,
+                interrupt.interrupt_id,
+                response,
+              )}
             />
           ))}
+          {pendingPause.members.length > 1 ? (
+            <section
+              className="hitl-confirmation"
+              data-tone={reviewBatchComplete || reviewBatchDisplayState === "responding"
+                ? "positive"
+                : undefined}
+              aria-labelledby="review-batch-confirmation-title"
+            >
+              <div>
+                <h3 id="review-batch-confirmation-title">提交整组审核决定</h3>
+                <p
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  data-state={reviewBatchDisplayState}
+                >
+                  {reviewBatchStatusMessage(
+                    renderedReviewBatch,
+                    draftedReviewCount,
+                    pendingPause.members.length,
+                    reviewBatchDisplayState,
+                  )}
+                </p>
+              </div>
+              <div className="hitl-confirmation-actions">
+                <button
+                  type="button"
+                  className="hitl-action-button is-approve"
+                  onClick={() => void submitReviewBatch()}
+                  disabled={
+                    externalReviewDisabled
+                    || !reviewBatchComplete
+                    || !reviewBatchCanSubmit(reviewBatchDisplayState)
+                  }
+                >
+                  <Send size={17} aria-hidden="true" />
+                  {reviewBatchSubmitLabel(
+                    reviewBatchDisplayState,
+                    pendingPause.members.length,
+                  )}
+                </button>
+              </div>
+            </section>
+          ) : null}
         </div>
       ) : null}
 
@@ -586,6 +1015,57 @@ function EmptyWorkState() {
 function readableRequestError(error: unknown): string {
   if (error instanceof ProductApiError) return error.message;
   return "无法连接 Product API，请检查本地服务后重试。";
+}
+
+function reviewBatchCanSubmit(state: ReviewBatchDisplayState): boolean {
+  return state === "idle" || state === "network_error";
+}
+
+function reviewBatchStatusMessage(
+  state: ReviewBatchCoordinatorState,
+  draftedCount: number,
+  memberCount: number,
+  displayState: ReviewBatchDisplayState,
+): string {
+  if (displayState === "responding") {
+    return "整组决定已持久化，Product 服务正在恢复 Agent 执行。";
+  }
+  if (displayState === "submitting") {
+    return "正在一次性提交整组审核决定，请勿重复操作。";
+  }
+  if (displayState === "accepted") {
+    return "整组审核决定已保存，正在同步 Product 任务状态。";
+  }
+  if (displayState === "conflict") {
+    return state.failureMessage ?? "审核状态已更新，正在重新读取服务端状态。";
+  }
+  if (displayState === "expired") {
+    return "服务端已关闭本次审核窗口，最终状态以重新读取的任务为准。";
+  }
+  if (displayState === "network_error") {
+    return state.failureMessage ?? "整组响应尚未得到服务端确认，可以原样重试。";
+  }
+  if (displayState === "auth_error") {
+    return state.failureMessage ?? "登录状态或账号权限不足，不能提交整组决定。";
+  }
+  if (displayState === "invalid_request") {
+    return state.failureMessage ?? "服务端未接受旧请求，不能原样重试。";
+  }
+  return `本页已选择 ${draftedCount} / ${memberCount} 项决定；全部完成后可一次提交。`;
+}
+
+function reviewBatchSubmitLabel(
+  state: ReviewBatchDisplayState,
+  memberCount: number,
+): string {
+  if (state === "submitting") return "正在提交整组决定";
+  if (state === "accepted") return "整组决定已保存";
+  if (state === "responding") return "正在恢复任务";
+  if (state === "network_error") return "重试提交整组决定";
+  if (state === "conflict" || state === "expired") return "审核状态已更新";
+  if (state === "auth_error") return "认证失败，无法提交";
+  if (state === "invalid_request") return "请求已拒绝，无法重试";
+  return `确认提交 ${memberCount} 项决定`;
 }
 
 function isRecoverableTaskRead(error: unknown): boolean {

@@ -298,7 +298,6 @@ export const artifactReviewEditsSchema = z
   });
 
 const reviewResponseBase = {
-  response_version: z.number().int().min(1),
   comment: reviewCommentSchema.nullable().optional(),
 };
 
@@ -319,6 +318,32 @@ export const interruptResponseSchema = z.discriminatedUnion("action", [
     edits: artifactReviewEditsSchema,
   }),
 ]);
+
+const respondAllInterruptMemberSchema = z.strictObject({
+  interrupt_id: z.string().trim().min(1).max(255),
+  response_version: z.number().int().min(1),
+  response: interruptResponseSchema,
+});
+
+export const respondAllInterruptsSchema = z
+  .strictObject({
+    pause_id: z.string().uuid(),
+    pause_version: z.number().int().min(1),
+    responses: z.array(respondAllInterruptMemberSchema).min(1).max(64),
+  })
+  .superRefine((submission, context) => {
+    const interruptIds = new Set<string>();
+    for (const [index, response] of submission.responses.entries()) {
+      if (interruptIds.has(response.interrupt_id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Aggregate interrupt responses must have unique interrupt IDs",
+          path: ["responses", index, "interrupt_id"],
+        });
+      }
+      interruptIds.add(response.interrupt_id);
+    }
+  });
 
 export const officialReviewPayloadSchema = z.strictObject({
   kind: z.literal("artifact_review"),
@@ -378,6 +403,7 @@ export const inboxQueryStatusSchema = z.enum([
   "responding",
   "resolved",
   "expired",
+  "resume_failed",
   "all",
 ]);
 
@@ -386,6 +412,7 @@ export const inboxItemStatusSchema = z.enum([
   "responding",
   "resolved",
   "expired",
+  "resume_failed",
   "cancelled",
 ]);
 
@@ -398,9 +425,11 @@ export const inboxCursorSchema = z
 export const inboxItemSchema = z
   .strictObject({
     task_id: z.string().trim().min(1).max(255),
+    pause_id: z.string().uuid(),
+    pause_version: z.number().int().min(1),
     status: inboxItemStatusSchema,
+    member_count: z.number().int().min(1).max(64),
     payload: officialReviewPayloadSchema,
-    response: persistedInterruptResponseSchema.nullable().optional().default(null),
     expires_at: absoluteTimestampSchema.nullable().optional().default(null),
     responded_at: absoluteTimestampSchema.nullable().optional().default(null),
     created_at: absoluteTimestampSchema,
@@ -424,34 +453,22 @@ export const inboxItemSchema = z
         path: ["payload", "artifact", "analysis", "horizon"],
       });
     }
-    if (item.responded_at !== null && item.response === null) {
+    if (item.status === "pending" && item.responded_at !== null) {
       context.addIssue({
         code: "custom",
-        message: "A responded Inbox item requires its accepted response",
-        path: ["response"],
-      });
-    }
-    if (item.status === "pending" && (item.response !== null || item.responded_at !== null)) {
-      context.addIssue({
-        code: "custom",
-        message: "A pending Inbox item cannot already contain a response",
-        path: ["status"],
+        message: "A pending Inbox aggregate cannot have a response timestamp",
+        path: ["responded_at"],
       });
     }
     if (
-      (item.status === "responding" || item.status === "resolved")
-      && item.response === null
+      (item.status === "responding"
+        || item.status === "resolved"
+        || item.status === "resume_failed")
+      && item.responded_at === null
     ) {
       context.addIssue({
         code: "custom",
-        message: `A ${item.status} Inbox item requires an accepted response`,
-        path: ["status"],
-      });
-    }
-    if (item.status === "resolved" && item.responded_at === null) {
-      context.addIssue({
-        code: "custom",
-        message: "A resolved Inbox item requires a response timestamp",
+        message: `A ${item.status} Inbox aggregate requires a response timestamp`,
         path: ["responded_at"],
       });
     }
@@ -470,15 +487,59 @@ export const inboxViewSchema = z.strictObject({
 });
 
 export const pendingInterruptSchema = z.strictObject({
-  task_id: z.string().trim().min(1).max(255),
   interrupt_id: z.string().trim().min(1).max(255),
   response_version: z.number().int().min(1),
   status: z.enum(["pending", "responding"]),
   payload: officialReviewPayloadSchema,
   response: persistedInterruptResponseSchema.nullable().optional().default(null),
-  expires_at: absoluteTimestampSchema.nullable().optional().default(null),
   responded_at: absoluteTimestampSchema.nullable().optional().default(null),
 });
+
+export const pendingInterruptPauseSchema = z
+  .strictObject({
+    pause_id: z.string().uuid(),
+    pause_version: z.number().int().min(1),
+    status: z.enum(["pending", "responding"]),
+    expires_at: absoluteTimestampSchema.nullable().optional().default(null),
+    members: z.array(pendingInterruptSchema).min(1).max(64),
+  })
+  .superRefine((pause, context) => {
+    const interruptIds = new Set<string>();
+    for (const [index, member] of pause.members.entries()) {
+      if (interruptIds.has(member.interrupt_id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Pending pause members must have unique interrupt IDs",
+          path: ["members", index, "interrupt_id"],
+        });
+      }
+      interruptIds.add(member.interrupt_id);
+      if (member.status !== pause.status) {
+        context.addIssue({
+          code: "custom",
+          message: "Pending pause member status must match its aggregate pause",
+          path: ["members", index, "status"],
+        });
+      }
+      if (member.status === "pending" && (member.response !== null || member.responded_at !== null)) {
+        context.addIssue({
+          code: "custom",
+          message: "A pending interrupt cannot already contain a response",
+          path: ["members", index, "response"],
+        });
+      }
+      if (
+        member.status === "responding"
+        && (member.response === null || member.responded_at === null)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "A responding interrupt requires its accepted response",
+          path: ["members", index, "response"],
+        });
+      }
+    }
+  });
 
 export const productTaskSchema = z
   .strictObject({
@@ -495,10 +556,11 @@ export const productTaskSchema = z
     agent_stream: agentStreamBindingSchema.nullable().default(null),
     market_snapshot: marketSnapshotSchema.nullable().default(null),
     web_evidence: z.array(webEvidenceSchema).default([]),
-    pending_interrupts: z.array(pendingInterruptSchema).default([]),
+    pending_interrupts: pendingInterruptPauseSchema.nullable().optional().default(null),
   })
   .superRefine((task, context) => {
     const artifact = task.artifact;
+    const pendingPause = task.pending_interrupts;
 
     if (task.status === "succeeded" && artifact?.status !== "committed") {
       context.addIssue({
@@ -544,26 +606,49 @@ export const productTaskSchema = z
         path: ["artifact", "analysis", "horizon"],
       });
     }
-    for (const [index, pendingInterrupt] of task.pending_interrupts.entries()) {
-      if (pendingInterrupt.task_id !== task.task_id) {
+    if (task.status === "waiting_human" && pendingPause === null) {
+      context.addIssue({
+        code: "custom",
+        message: "A waiting_human task requires an active interrupt pause",
+        path: ["pending_interrupts"],
+      });
+    }
+    if (task.status !== "waiting_human" && pendingPause !== null) {
+      context.addIssue({
+        code: "custom",
+        message: "Only a waiting_human task may expose an active interrupt pause",
+        path: ["pending_interrupts"],
+      });
+    }
+    for (const [index, member] of (pendingPause?.members ?? []).entries()) {
+      if (member.payload.artifact.analysis.instrument !== task.symbol) {
         context.addIssue({
           code: "custom",
-          message: "Pending interrupt task ID must match its task",
-          path: ["pending_interrupts", index, "task_id"],
+          message: "Pending review instrument must match its task symbol",
+          path: [
+            "pending_interrupts",
+            "members",
+            index,
+            "payload",
+            "artifact",
+            "analysis",
+            "instrument",
+          ],
         });
       }
-      if (pendingInterrupt.status === "pending" && pendingInterrupt.response !== null) {
+      if (member.payload.artifact.analysis.horizon !== task.horizon) {
         context.addIssue({
           code: "custom",
-          message: "A pending interrupt cannot already contain a response",
-          path: ["pending_interrupts", index, "response"],
-        });
-      }
-      if (pendingInterrupt.status === "responding" && pendingInterrupt.response === null) {
-        context.addIssue({
-          code: "custom",
-          message: "A responding interrupt requires its accepted response",
-          path: ["pending_interrupts", index, "response"],
+          message: "Pending review horizon must match its task horizon",
+          path: [
+            "pending_interrupts",
+            "members",
+            index,
+            "payload",
+            "artifact",
+            "analysis",
+            "horizon",
+          ],
         });
       }
     }
@@ -580,10 +665,12 @@ export type InterruptResponse = z.infer<typeof interruptResponseSchema>;
 export type MarketSnapshot = z.infer<typeof marketSnapshotSchema>;
 export type OfficialReviewPayload = z.infer<typeof officialReviewPayloadSchema>;
 export type PendingInterrupt = z.infer<typeof pendingInterruptSchema>;
+export type PendingInterruptPause = z.infer<typeof pendingInterruptPauseSchema>;
 export type ProductError = z.infer<typeof productErrorSchema>;
 export type ProductRunList = z.infer<typeof productRunListSchema>;
 export type ProductRunSummary = z.infer<typeof productRunSummarySchema>;
 export type ProductSymbol = z.infer<typeof productSymbolSchema>;
 export type ProductTask = z.infer<typeof productTaskSchema>;
+export type RespondAllInterrupts = z.infer<typeof respondAllInterruptsSchema>;
 export type RunStatus = z.infer<typeof runStatusSchema>;
 export type WebEvidence = z.infer<typeof webEvidenceSchema>;

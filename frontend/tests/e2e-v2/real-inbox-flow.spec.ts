@@ -89,9 +89,10 @@ test("opens a persisted Inbox review without browser-side writes", async ({ page
   const task = productTaskSchema.parse(await (await taskResponsePromise).json());
   expect(task.task_id).toBe(pendingItem.task_id);
   expect(task.status).toBe("waiting_human");
-  expect(task.pending_interrupts).toHaveLength(1);
-  expect(task.pending_interrupts[0]?.status).toBe("pending");
-  expect(task.pending_interrupts[0]?.payload).toEqual(pendingItem.payload);
+  expect(task.pending_interrupts?.status).toBe("pending");
+  expect(task.pending_interrupts?.members).toHaveLength(pendingItem.member_count);
+  expect(task.pending_interrupts?.members[0]?.status).toBe("pending");
+  expect(task.pending_interrupts?.members[0]?.payload).toEqual(pendingItem.payload);
 
   await expect(page).toHaveURL(new RegExp(`/work\\?task=${pendingItem.task_id}$`));
   await expect(page.getByTestId("task-status").getByRole("heading")).toHaveText("等待人工确认");
@@ -110,8 +111,9 @@ test("opens a persisted Inbox review without browser-side writes", async ({ page
 
   expect(refreshedTask.task_id).toBe(pendingItem.task_id);
   expect(refreshedTask.status).toBe("waiting_human");
-  expect(refreshedTask.pending_interrupts[0]?.status).toBe("pending");
-  expect(refreshedTask.pending_interrupts[0]?.payload).toEqual(pendingItem.payload);
+  expect(refreshedTask.pending_interrupts?.status).toBe("pending");
+  expect(refreshedTask.pending_interrupts?.members[0]?.status).toBe("pending");
+  expect(refreshedTask.pending_interrupts?.members[0]?.payload).toEqual(pendingItem.payload);
   await expect(page.locator("section.hitl-review-panel")).toHaveCount(1);
   await assertNoInternalRuntimeText(page, pendingItem);
   await assertPageQuality(page, "refreshed review", true);
@@ -198,7 +200,7 @@ function requirePendingItem(items: InboxItem[]): InboxItem {
   expect(pendingItem.payload.kind).toBe("artifact_review");
   expect(pendingItem.payload.artifact.status).toBe("draft");
   expect(pendingItem.payload.artifact.analysis.root_cause_chain.length).toBeGreaterThan(0);
-  expect(pendingItem.response).toBeNull();
+  expect(pendingItem.member_count).toBeGreaterThan(0);
   expect(pendingItem.responded_at).toBeNull();
   return pendingItem;
 }

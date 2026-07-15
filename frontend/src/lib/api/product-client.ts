@@ -3,15 +3,15 @@ import {
   inboxCursorSchema,
   inboxQueryStatusSchema,
   inboxViewSchema,
-  interruptResponseSchema,
   productRunListSchema,
   productTaskSchema,
+  respondAllInterruptsSchema,
   type AnalysisSubmission,
   type InboxQueryStatus,
   type InboxView,
-  type InterruptResponse,
   type ProductRunList,
   type ProductTask,
+  type RespondAllInterrupts,
 } from "@/lib/schemas/product-api";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -90,16 +90,15 @@ export async function cancelTask(
   );
 }
 
-export async function respondInterrupt(
+export async function respondAllInterrupts(
   taskId: string,
-  interruptId: string,
-  input: InterruptResponse,
+  input: RespondAllInterrupts,
   fetcher: Fetcher = fetch,
   idempotencyKey: string = crypto.randomUUID(),
 ): Promise<ProductTask> {
-  const response = interruptResponseSchema.parse(input);
+  const response = respondAllInterruptsSchema.parse(input);
   return requestTask(
-    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}/interrupts/${encodeURIComponent(interruptId)}/respond`,
+    `/api/product/api/v2/tasks/${encodeURIComponent(taskId)}/interrupts/respond-all`,
     {
       method: "POST",
       headers: {

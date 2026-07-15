@@ -248,14 +248,16 @@ describe("Product BFF proxy", () => {
     expect(rejected.status).toBe(404);
   });
 
-  it("forwards only the exact interrupt response route, JSON body, and idempotency key", async () => {
+  it("forwards only the exact respond-all route, JSON body, and idempotency key", async () => {
     const taskId = "22222222-2222-4222-8222-222222222222";
-    const interruptId = "interrupt:review-4";
     const body = JSON.stringify({
-      response_version: 4,
-      action: "approve",
-      comment: null,
-      edits: null,
+      pause_id: "33333333-3333-4333-8333-333333333334",
+      pause_version: 7,
+      responses: [{
+        interrupt_id: "interrupt:review-4",
+        response_version: 4,
+        response: { action: "approve", comment: null, edits: null },
+      }],
     });
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void input;
@@ -265,7 +267,7 @@ describe("Product BFF proxy", () => {
 
     const response = await proxyProductRequest(
       new Request(
-        `http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/interrupts/${interruptId}/respond`,
+        `http://127.0.0.1:3101/api/product/api/v2/tasks/${taskId}/interrupts/respond-all`,
         {
           method: "POST",
           headers: {
@@ -276,7 +278,7 @@ describe("Product BFF proxy", () => {
           body,
         },
       ),
-      ["api", "v2", "tasks", taskId, "interrupts", interruptId, "respond"],
+      ["api", "v2", "tasks", taskId, "interrupts", "respond-all"],
       fetcher,
     );
 
@@ -284,7 +286,7 @@ describe("Product BFF proxy", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     const [upstreamUrl, upstreamInit] = fetcher.mock.calls[0] ?? [];
     expect(upstreamUrl).toBe(
-      `http://127.0.0.1:8123/app/api/v2/tasks/${taskId}/interrupts/interrupt%3Areview-4/respond`,
+      `http://127.0.0.1:8123/app/api/v2/tasks/${taskId}/interrupts/respond-all`,
     );
     const headers = new Headers(upstreamInit?.headers);
     expect(headers.get("content-type")).toBe("application/json");
@@ -294,11 +296,12 @@ describe("Product BFF proxy", () => {
   });
 
   it.each([
-    ["GET", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "interrupt-1", "respond"]],
-    ["POST", ["api", "v2", "tasks", "not-a-task", "interrupts", "interrupt-1", "respond"]],
-    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "bad/interrupt", "respond"]],
-    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "interrupt-1", "respond", "extra"]],
-  ])("rejects an interrupt response lookalike route (%s %j)", async (method, path) => {
+    ["GET", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "respond-all"]],
+    ["POST", ["api", "v2", "tasks", "not-a-task", "interrupts", "respond-all"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "respond"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "interrupt-1", "respond"]],
+    ["POST", ["api", "v2", "tasks", "22222222-2222-4222-8222-222222222222", "interrupts", "respond-all", "extra"]],
+  ])("rejects a respond-all lookalike route (%s %j)", async (method, path) => {
     const fetcher = vi.fn();
     const response = await proxyProductRequest(
       new Request(`http://127.0.0.1:3101/api/product/${path.join("/")}`, {

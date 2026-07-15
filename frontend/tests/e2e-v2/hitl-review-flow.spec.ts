@@ -10,6 +10,7 @@ import {
 import {
   productTaskSchema,
   type PendingInterrupt,
+  type PendingInterruptPause,
   type ProductTask,
 } from "../../src/lib/schemas/product-api";
 
@@ -84,8 +85,10 @@ test("approves a real Product HITL review and persists the committed artifact", 
 
   await page.goto(`/work?task=${encodeURIComponent(taskId)}`);
   const waitingTask = await parseProductTaskResponse(await initialProjectionResponse);
-  const interrupt = assertWaitingReviewProjection(waitingTask, taskId);
-  const respondPath = `${taskPath}/interrupts/${encodeURIComponent(interrupt.interrupt_id)}/respond`;
+  const pause = assertWaitingReviewProjection(waitingTask, taskId);
+  const interrupt = pause.members[0];
+  if (interrupt === undefined) throw new Error("waiting_human pause has no review member");
+  const respondPath = `${taskPath}/interrupts/respond-all`;
 
   await assertReadablePendingReview(page, interrupt);
   await assertNoRawPayload(page);
@@ -118,6 +121,7 @@ test("approves a real Product HITL review and persists the committed artifact", 
   assertRespondRequest(
     respondResponse.request(),
     respondPath,
+    pause,
     interrupt.response_version,
     approvalComment,
   );
@@ -266,14 +270,19 @@ async function parseProductTaskResponse(response: PlaywrightResponse): Promise<P
   return parsed.data;
 }
 
-function assertWaitingReviewProjection(task: ProductTask, taskId: string): PendingInterrupt {
+function assertWaitingReviewProjection(
+  task: ProductTask,
+  taskId: string,
+): PendingInterruptPause {
   expect(task.task_id).toBe(taskId);
   expect(task.status).toBe("waiting_human");
-  expect(task.pending_interrupts).toHaveLength(1);
-  const interrupt = task.pending_interrupts[0];
+  const pause = task.pending_interrupts;
+  if (pause === null) throw new Error("waiting_human task has no review pause");
+  expect(pause.status).toBe("pending");
+  expect(pause.members).toHaveLength(1);
+  const interrupt = pause.members[0];
   if (interrupt === undefined) throw new Error("waiting_human task has no review interrupt");
 
-  expect(interrupt.task_id).toBe(taskId);
   expect(interrupt.status).toBe("pending");
   expect(interrupt.response).toBeNull();
   expect(interrupt.responded_at).toBeNull();
@@ -283,7 +292,7 @@ function assertWaitingReviewProjection(task: ProductTask, taskId: string): Pendi
   expect(interrupt.payload.artifact.status).toBe("draft");
   expect(interrupt.payload.artifact.evidence_verdict.sufficient).toBe(true);
   expect(interrupt.payload.artifact.risk_verdict.allowed).toBe(true);
-  return interrupt;
+  return pause;
 }
 
 async function assertReadablePendingReview(page: Page, interrupt: PendingInterrupt) {
@@ -347,6 +356,7 @@ async function assertReadablePendingReview(page: Page, interrupt: PendingInterru
 function assertRespondRequest(
   request: PlaywrightRequest,
   respondPath: string,
+  pause: PendingInterruptPause,
   responseVersion: number,
   approvalComment: string,
 ) {
@@ -356,10 +366,17 @@ function assertRespondRequest(
   expect(headers["content-type"]).toContain("application/json");
   expect(headers["idempotency-key"]).toMatch(uuidPattern);
   expect(request.postDataJSON()).toEqual({
-    response_version: responseVersion,
-    action: "approve",
-    comment: approvalComment,
-    edits: null,
+    pause_id: pause.pause_id,
+    pause_version: pause.pause_version,
+    responses: [{
+      interrupt_id: pause.members[0]!.interrupt_id,
+      response_version: responseVersion,
+      response: {
+        action: "approve",
+        comment: approvalComment,
+        edits: null,
+      },
+    }],
   });
 }
 
@@ -371,8 +388,11 @@ function assertRespondingProjection(
 ) {
   expect(task.task_id).toBe(taskId);
   expect(task.status).toBe("waiting_human");
-  expect(task.pending_interrupts).toHaveLength(1);
-  const respondingInterrupt = task.pending_interrupts[0];
+  const pause = task.pending_interrupts;
+  if (pause === null) throw new Error("respond endpoint did not return its pause");
+  expect(pause.status).toBe("responding");
+  expect(pause.members).toHaveLength(1);
+  const respondingInterrupt = pause.members[0];
   if (respondingInterrupt === undefined) {
     throw new Error("respond endpoint did not return its responding interrupt");
   }
@@ -389,7 +409,7 @@ function assertRespondingProjection(
 function assertSucceededProjection(task: ProductTask, taskId: string): AnalysisArtifact {
   expect(task.task_id).toBe(taskId);
   expect(task.status).toBe("succeeded");
-  expect(task.pending_interrupts).toEqual([]);
+  expect(task.pending_interrupts).toBeNull();
   if (task.artifact === null) throw new Error("succeeded Product task has no artifact");
   expect(task.artifact.status).toBe("committed");
   expect(task.artifact.evidence_verdict.sufficient).toBe(true);

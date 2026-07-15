@@ -14,6 +14,7 @@
     "build": "next build",
     "test:e2e": "playwright test",
     "test:e2e:real-inbox": "REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-inbox-flow.spec.ts",
+    "test:e2e:real-multi-interrupt": "REAL_MULTI_INTERRUPT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-multi-interrupt-flow.spec.ts",
     "e2e": "playwright test"
   },
   "dependencies": {

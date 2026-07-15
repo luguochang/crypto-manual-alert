@@ -9,7 +9,6 @@ const defaultProductApiBaseUrl = "http://127.0.0.1:8123/app";
 const defaultAgentServerAudience = "crypto-alert-agent-server";
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 const taskIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const interruptIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/;
 
 export async function proxyProductRequest(
   request: Request,
@@ -77,7 +76,7 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   if (method === "GET" && path === "api/v2/inbox") return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
   if (method === "POST" && isTaskCancelRoute(pathSegments)) return true;
-  if (method === "POST" && isInterruptResponseRoute(pathSegments)) return true;
+  if (method === "POST" && isInterruptRespondAllRoute(pathSegments)) return true;
   return method === "GET" && isTaskReadRoute(pathSegments);
 }
 
@@ -95,15 +94,14 @@ function isTaskCancelRoute(pathSegments: string[]): boolean {
     && pathSegments[4] === "cancel";
 }
 
-function isInterruptResponseRoute(pathSegments: string[]): boolean {
-  return pathSegments.length === 7
+function isInterruptRespondAllRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 6
     && pathSegments[0] === "api"
     && pathSegments[1] === "v2"
     && pathSegments[2] === "tasks"
     && taskIdPattern.test(pathSegments[3] ?? "")
     && pathSegments[4] === "interrupts"
-    && interruptIdPattern.test(pathSegments[5] ?? "")
-    && pathSegments[6] === "respond";
+    && pathSegments[5] === "respond-all";
 }
 
 async function defaultAuthorizationResolver(request: Request): Promise<string | null> {
@@ -165,7 +163,7 @@ function buildServerOwnedHeaders(
     && (
       path === "api/v2/analysis"
       || isTaskCancelRoute(pathSegments)
-      || isInterruptResponseRoute(pathSegments)
+      || isInterruptRespondAllRoute(pathSegments)
     )
   ) {
     const idempotencyKey = request.headers.get("idempotency-key");

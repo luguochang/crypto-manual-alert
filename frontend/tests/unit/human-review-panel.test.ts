@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -6,13 +6,14 @@ import {
   HumanReviewPanel,
   isReviewActionAvailable,
   isServerExpiredReviewConflict,
+  reviewItemIdentity,
   resolveAvailableReviewActions,
   resolveReviewDeadlineHint,
   resolveReviewInteractionState,
   resolveReviewStateAnnouncement,
   resolveReviewSourceReference,
 } from "../../src/features/work/human-review-panel";
-import type { PendingInterrupt, ProductTask } from "../../src/lib/schemas/product-api";
+import type { PendingInterrupt } from "../../src/lib/schemas/product-api";
 
 const allReviewActions = ["approve", "reject", "edit"] as const;
 
@@ -75,6 +76,8 @@ describe("human review panel", () => {
       "conflict",
       "expired",
       "network_error",
+      "auth_error",
+      "invalid_request",
     ] as const)("keeps %s available as a polite status announcement", (state) => {
       expect(resolveReviewStateAnnouncement(state)).toEqual({
         role: "status",
@@ -92,6 +95,37 @@ describe("human review panel", () => {
       expect(badge).toContain('role="status"');
       expect(badge).toContain('aria-live="polite"');
       expect(badge).toContain('aria-atomic="true"');
+    });
+
+    it("renders a controlled member decision without raw contract coordinates", () => {
+      const html = renderReview(reviewInterrupt({ riskAllowed: true }), {
+        decision: { action: "approve", comment: null, edits: null },
+        deferSubmission: true,
+        announceSubmissionState: false,
+      });
+
+      expect(html).toContain("已在本页选择批准，尚未提交到服务端");
+      expect(html).not.toMatch(
+        /(?:interrupt-review|response_version|pause_id|namespace|checkpoint_id)/,
+      );
+      expect(stateBadgeTag(html)).toContain('aria-live="off"');
+    });
+
+    it("gives every aggregate review control a unique business-facing name", () => {
+      const interrupt = reviewInterrupt({ riskAllowed: true });
+      const identity = reviewItemIdentity(interrupt, { index: 2, total: 3 });
+      const html = renderReview(interrupt, {
+        deferSubmission: true,
+        reviewPosition: { index: 2, total: 3 },
+      });
+
+      expect(identity).toBe("审核项 2/3，BTC-USDT-SWAP，4h，第 1 轮");
+      expect(html).toContain(`分析草稿待人工确认：${identity}`);
+      expect(html).toContain(`aria-label="${identity}的审核决定"`);
+      expect(html).toContain(`aria-label="${identity}：批准"`);
+      expect(html).toContain(`aria-label="${identity}：拒绝"`);
+      expect(html).toContain(`aria-label="${identity}：修改后重审"`);
+      expect(html).not.toMatch(/(?:namespace|checkpoint_id|checkpoint_map|projection_id)/);
     });
   });
 
@@ -185,11 +219,15 @@ describe("human review panel", () => {
   });
 });
 
-function renderReview(interrupt: PendingInterrupt) {
+function renderReview(
+  interrupt: PendingInterrupt,
+  overrides: Partial<ComponentProps<typeof HumanReviewPanel>> = {},
+) {
   return renderToStaticMarkup(createElement(HumanReviewPanel, {
     interrupt,
-    onRespond: async () => ({}) as ProductTask,
-    onConflict: () => undefined,
+    expiresAt: "2026-07-15T10:05:00Z",
+    onDecide: () => undefined,
+    ...overrides,
   }));
 }
 
@@ -207,7 +245,6 @@ function reviewInterrupt({
   sources?: string[];
 }): PendingInterrupt {
   return {
-    task_id: "22222222-2222-4222-8222-222222222222",
     interrupt_id: "interrupt-review-1",
     response_version: 1,
     status: "pending",
@@ -261,7 +298,6 @@ function reviewInterrupt({
       },
     },
     response: null,
-    expires_at: "2026-07-15T10:05:00Z",
     responded_at: null,
   };
 }

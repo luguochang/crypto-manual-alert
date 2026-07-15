@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   analysisSubmissionSchema,
+  inboxItemSchema,
+  inboxQueryStatusSchema,
   interruptResponseSchema,
   productRunListSchema,
   productTaskSchema,
+  respondAllInterruptsSchema,
   runStatusSchema,
 } from "../../src/lib/schemas/product-api";
 
@@ -252,7 +255,7 @@ describe("Product API schemas", () => {
     expect(() => productTaskSchema.parse({ ...successTask(), artifact: null })).toThrow();
   });
 
-  it.each(["queued", "running", "waiting_human", "blocked", "failed", "cancelled"] as const)(
+  it.each(["queued", "running", "blocked", "failed", "cancelled"] as const)(
     "keeps a previously committed artifact readable while the latest run is %s",
     (taskStatus) => {
       const task = successTask();
@@ -261,6 +264,13 @@ describe("Product API schemas", () => {
       expect(productTaskSchema.parse(task).artifact?.status).toBe("committed");
     },
   );
+
+  it("keeps a previous committed artifact readable while a new draft waits for review", () => {
+    const task = waitingHumanTask("pending");
+    task.artifact = successTask().artifact;
+
+    expect(productTaskSchema.parse(task).artifact?.status).toBe("committed");
+  });
 
   it("accepts a reviewable draft artifact on a blocked task", () => {
     const task = blockedDraftTask();
@@ -336,28 +346,47 @@ describe("Product API schemas", () => {
     const task = waitingHumanTask("pending");
     const parsed = productTaskSchema.parse(task);
 
-    expect(parsed.pending_interrupts).toEqual([
-      expect.objectContaining({
-        task_id: task.task_id,
+    expect(parsed.pending_interrupts).toMatchObject({
+      pause_id: "33333333-3333-4333-8333-333333333331",
+      pause_version: 2,
+      status: "pending",
+      expires_at: "2026-07-15T18:30:00+08:00",
+      members: [expect.objectContaining({
         interrupt_id: "interrupt-review-1",
         response_version: 3,
         status: "pending",
         response: null,
-        expires_at: "2026-07-15T18:30:00+08:00",
-      }),
-    ]);
-    expect(parsed.pending_interrupts[0]?.payload.artifact.status).toBe("draft");
+      })],
+    });
+    expect(parsed.pending_interrupts?.members[0]?.payload.artifact.status).toBe("draft");
 
     const withRawPayload = waitingHumanTask("pending");
-    Object.assign(withRawPayload.pending_interrupts[0].payload, {
+    Object.assign(withRawPayload.pending_interrupts.members[0].payload, {
       raw_agent_interrupt: { resumable: true },
     });
     expect(() => productTaskSchema.parse(withRawPayload)).toThrow();
+
+    const withRuntimeCoordinates = waitingHumanTask("pending");
+    Object.assign(withRuntimeCoordinates.pending_interrupts.members[0], {
+      namespace: "tenant/private/runtime",
+      checkpoint_id: "checkpoint-secret",
+    });
+    expect(() => productTaskSchema.parse(withRuntimeCoordinates)).toThrow();
+
+    const withRedundantMemberTaskId = waitingHumanTask("pending");
+    Object.assign(withRedundantMemberTaskId.pending_interrupts.members[0], {
+      task_id: task.task_id,
+    });
+    expect(() => productTaskSchema.parse(withRedundantMemberTaskId)).toThrow();
+    expect(() => productTaskSchema.parse({
+      ...task,
+      pending_interrupts: task.pending_interrupts.members,
+    })).toThrow();
   });
 
   it("parses a responding projection whose persisted response has no response_version", () => {
     const task = waitingHumanTask("responding");
-    task.pending_interrupts[0].response = {
+    task.pending_interrupts.members[0].response = {
       action: "edit",
       comment: "Reduce risk before the next gate.",
       edits: {
@@ -382,35 +411,68 @@ describe("Product API schemas", () => {
         expires_in_seconds: null,
       },
     };
-    task.pending_interrupts[0].responded_at = "2026-07-15T10:20:00Z";
+    task.pending_interrupts.members[0].responded_at = "2026-07-15T10:20:00Z";
 
     const parsed = productTaskSchema.parse(task);
 
-    expect(parsed.pending_interrupts[0]?.response).toMatchObject({
+    expect(parsed.pending_interrupts?.members[0]?.response).toMatchObject({
       action: "edit",
       edits: { risk_pct: 0.005 },
     });
   });
 
+  it.each([
+    ["instrument", "ETH-USDT-SWAP"],
+    ["horizon", "1d"],
+  ] as const)(
+    "rejects a pending review whose artifact %s does not match its parent task",
+    (field, value) => {
+      const task = waitingHumanTask("pending");
+      task.pending_interrupts.members[0].payload.artifact.analysis[field] = value;
+
+      expect(() => productTaskSchema.parse(task)).toThrow();
+    },
+  );
+
+  it("requires waiting_human and an aggregate pause to agree in both directions", () => {
+    const waitingWithoutPause = waitingHumanTask("pending");
+    waitingWithoutPause.pending_interrupts = null as never;
+
+    const runningWithPause = waitingHumanTask("pending");
+    runningWithPause.status = "running";
+
+    const succeededWithPause = waitingHumanTask("pending");
+    succeededWithPause.status = "succeeded";
+    succeededWithPause.artifact = successTask().artifact;
+
+    expect(() => productTaskSchema.parse(waitingWithoutPause)).toThrow();
+    expect(() => productTaskSchema.parse(runningWithPause)).toThrow();
+    expect(() => productTaskSchema.parse(succeededWithPause)).toThrow();
+    const responding = waitingHumanTask("responding");
+    responding.pending_interrupts.members[0].response = {
+      action: "approve",
+      comment: null,
+      edits: null,
+    };
+    responding.pending_interrupts.members[0].responded_at = "2026-07-15T10:20:00Z";
+    expect(productTaskSchema.parse(responding).status).toBe("waiting_human");
+  });
+
   it("strictly validates approve, reject, and controlled edit submissions", () => {
     expect(interruptResponseSchema.parse({
-      response_version: 3,
       action: "approve",
       comment: null,
     })).toEqual({
-      response_version: 3,
       action: "approve",
       comment: null,
     });
     expect(interruptResponseSchema.parse({
-      response_version: 3,
       action: "reject",
       edits: null,
       comment: "Evidence quality is too low.",
     }).action).toBe("reject");
 
     const edited = interruptResponseSchema.parse({
-      response_version: 3,
       action: "edit",
       comment: "Use a smaller position.",
       edits: {
@@ -430,28 +492,55 @@ describe("Product API schemas", () => {
     });
 
     expect(() => interruptResponseSchema.parse({
-      response_version: 3,
       action: "edit",
       edits: {},
     })).toThrow();
     expect(() => interruptResponseSchema.parse({
-      response_version: 3,
       action: "approve",
       edits: { main_action: "open_long" },
     })).toThrow();
     expect(() => interruptResponseSchema.parse({
-      response_version: 3,
       action: "edit",
       edits: { main_action: "open_long", raw_agent_state: true },
     })).toThrow();
   });
 
+  it("strictly validates the aggregate respond-all command without Runtime coordinates", () => {
+    const submission = {
+      pause_id: "33333333-3333-4333-8333-333333333331",
+      pause_version: 2,
+      responses: [{
+        interrupt_id: "interrupt-review-1",
+        response_version: 3,
+        response: { action: "approve" as const, comment: null, edits: null },
+      }],
+    };
+
+    expect(respondAllInterruptsSchema.parse(submission)).toEqual(submission);
+    expect(() => respondAllInterruptsSchema.parse({
+      ...submission,
+      checkpoint_id: "checkpoint-secret",
+    })).toThrow();
+    expect(() => respondAllInterruptsSchema.parse({
+      ...submission,
+      responses: [{ ...submission.responses[0], namespace: "runtime/private" }],
+    })).toThrow();
+    expect(() => respondAllInterruptsSchema.parse({
+      ...submission,
+      responses: [...submission.responses, submission.responses[0]],
+    })).toThrow();
+    expect(() => respondAllInterruptsSchema.parse({
+      ...submission,
+      pause_id: "not-a-pause-uuid",
+    })).toThrow();
+  });
+
   it("requires absolute server timestamps and coherent pending/responding states", () => {
     const localTimestamp = waitingHumanTask("pending");
-    localTimestamp.pending_interrupts[0].expires_at = "2026-07-15T18:30:00";
+    localTimestamp.pending_interrupts.expires_at = "2026-07-15T18:30:00";
 
     const pendingWithResponse = waitingHumanTask("pending");
-    pendingWithResponse.pending_interrupts[0].response = {
+    pendingWithResponse.pending_interrupts.members[0].response = {
       action: "approve",
       comment: null,
       edits: null,
@@ -462,6 +551,49 @@ describe("Product API schemas", () => {
     expect(() => productTaskSchema.parse(localTimestamp)).toThrow();
     expect(() => productTaskSchema.parse(pendingWithResponse)).toThrow();
     expect(() => productTaskSchema.parse(respondingWithoutResponse)).toThrow();
+  });
+
+  it("strictly parses the aggregate Inbox DTO without legacy member responses", () => {
+    const pending = aggregateInboxItem("pending");
+    const parsed = inboxItemSchema.parse(pending);
+
+    expect(parsed).toMatchObject({
+      task_id: pending.task_id,
+      pause_id: pending.pause_id,
+      pause_version: 2,
+      status: "pending",
+      member_count: 2,
+      responded_at: null,
+    });
+    expect(inboxQueryStatusSchema.parse("resume_failed")).toBe("resume_failed");
+    expect(() => inboxItemSchema.parse({
+      ...pending,
+      response: { action: "approve" },
+    })).toThrow();
+  });
+
+  it("enforces aggregate Inbox status timestamps and task identity", () => {
+    const pendingWithResponseTime = aggregateInboxItem("pending");
+    pendingWithResponseTime.responded_at = "2026-07-15T10:20:00Z";
+
+    for (const status of ["responding", "resolved", "resume_failed"] as const) {
+      expect(() => inboxItemSchema.parse(aggregateInboxItem(status))).toThrow();
+      const responded = aggregateInboxItem(status);
+      responded.responded_at = "2026-07-15T10:20:00Z";
+      expect(inboxItemSchema.parse(responded).status).toBe(status);
+    }
+
+    const expiredWithoutDeadline = aggregateInboxItem("expired");
+    expiredWithoutDeadline.expires_at = null;
+    const wrongInstrument = aggregateInboxItem("pending");
+    wrongInstrument.payload.artifact.analysis.instrument = "ETH-USDT-SWAP";
+    const wrongHorizon = aggregateInboxItem("pending");
+    wrongHorizon.payload.artifact.analysis.horizon = "1d";
+
+    expect(() => inboxItemSchema.parse(pendingWithResponseTime)).toThrow();
+    expect(() => inboxItemSchema.parse(expiredWithoutDeadline)).toThrow();
+    expect(() => inboxItemSchema.parse(wrongInstrument)).toThrow();
+    expect(() => inboxItemSchema.parse(wrongHorizon)).toThrow();
   });
 });
 
@@ -540,22 +672,47 @@ function waitingHumanTask(status: "pending" | "responding") {
   return {
     ...task,
     status: "waiting_human",
-    pending_interrupts: [{
-      task_id: task.task_id,
-      interrupt_id: "interrupt-review-1",
-      response_version: 3,
+    pending_interrupts: {
+      pause_id: "33333333-3333-4333-8333-333333333331",
+      pause_version: 2,
       status,
-      payload: {
-        kind: "artifact_review",
-        schema_version: "1.0",
-        allowed_actions: ["approve", "reject", "edit"],
-        review_iteration: 2,
-        artifact: structuredClone(task.artifact),
-      },
-      response: null as null | Record<string, unknown>,
       expires_at: "2026-07-15T18:30:00+08:00",
-      responded_at: null as string | null,
-    }],
+      members: [{
+        interrupt_id: "interrupt-review-1",
+        response_version: 3,
+        status,
+        payload: {
+          kind: "artifact_review",
+          schema_version: "1.0",
+          allowed_actions: ["approve", "reject", "edit"],
+          review_iteration: 2,
+          artifact: structuredClone(task.artifact),
+        },
+        response: null as null | Record<string, unknown>,
+        responded_at: null as string | null,
+      }],
+    },
+  };
+}
+
+function aggregateInboxItem(
+  status: "pending" | "responding" | "resolved" | "expired" | "resume_failed" | "cancelled",
+) {
+  const review = waitingHumanTask("pending");
+  return {
+    task_id: review.task_id,
+    pause_id: review.pending_interrupts.pause_id,
+    pause_version: review.pending_interrupts.pause_version,
+    status,
+    member_count: 2,
+    payload: structuredClone(review.pending_interrupts.members[0].payload),
+    expires_at: "2026-07-15T18:30:00+08:00" as string | null,
+    responded_at: null as string | null,
+    created_at: "2026-07-15T10:00:00Z",
+    updated_at: "2026-07-15T10:05:00Z",
+    symbol: review.symbol,
+    horizon: review.horizon,
+    query_text: "Review the aggregate BTC decision.",
   };
 }
 

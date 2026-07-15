@@ -13,7 +13,12 @@ describe("analysis view model", () => {
     ["succeeded", "分析完成", "success"],
     ["cancelled", "已取消", "neutral"],
   ] as const)("maps %s into a readable status", (status, label, tone) => {
-    const task = productTaskSchema.parse(status === "succeeded" ? successTask() : baseTask(status));
+    const projection = status === "succeeded"
+      ? successTask()
+      : status === "waiting_human"
+        ? waitingTask()
+        : baseTask(status);
+    const task = productTaskSchema.parse(projection);
     const viewModel = toAnalysisViewModel(task, new Date("2026-07-13T09:00:00Z"));
 
     expect(viewModel.status.label).toBe(label);
@@ -337,6 +342,34 @@ function successTask() {
         "https://example.com/market/btc",
         "https://example.com/macro/fed",
       ],
+    },
+  };
+}
+
+function waitingTask() {
+  const artifact = successTask().artifact;
+  artifact.status = "draft";
+  return {
+    ...baseTask("waiting_human"),
+    pending_interrupts: {
+      pause_id: "33333333-3333-4333-8333-333333333333",
+      pause_version: 1,
+      status: "pending",
+      expires_at: "2026-07-13T10:00:00Z",
+      members: [{
+        interrupt_id: "review-waiting-human",
+        response_version: 1,
+        status: "pending",
+        payload: {
+          kind: "artifact_review",
+          schema_version: "1.0",
+          allowed_actions: ["approve", "reject", "edit"],
+          review_iteration: 1,
+          artifact,
+        },
+        response: null,
+        responded_at: null,
+      }],
     },
   };
 }

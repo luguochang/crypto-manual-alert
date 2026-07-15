@@ -13,7 +13,7 @@ describe("Inbox Product schema", () => {
       status: "pending",
       symbol: "BTC-USDT-SWAP",
       horizon: "4h",
-      response: null,
+      member_count: 2,
     });
     expect(parsed.items[0]?.payload.artifact.analysis.reference_price).toBe(67250.5);
   });
@@ -36,11 +36,6 @@ describe("Inbox Product schema", () => {
     resolvedWithoutResponse.status = "resolved";
 
     const pendingWithResponse = inboxItem();
-    pendingWithResponse.response = {
-      action: "approve",
-      comment: null,
-      edits: null,
-    };
     pendingWithResponse.responded_at = "2026-07-15T10:10:00Z";
 
     expect(() => inboxViewSchema.parse({
@@ -61,7 +56,6 @@ describe("Inbox Product schema", () => {
 
     expect(parsed.items[0]).toMatchObject({
       status: "expired",
-      response: null,
       responded_at: null,
     });
   });
@@ -82,7 +76,16 @@ describe("Inbox Product schema", () => {
 function inboxItem() {
   return {
     task_id: "22222222-2222-4222-8222-222222222222",
-    status: "pending" as "pending" | "responding" | "resolved" | "expired" | "cancelled",
+    pause_id: "33333333-3333-4333-8333-333333333333",
+    pause_version: 1,
+    status: "pending" as
+      | "pending"
+      | "responding"
+      | "resolved"
+      | "expired"
+      | "resume_failed"
+      | "cancelled",
+    member_count: 2,
     payload: {
       kind: "artifact_review",
       schema_version: "1.0",
@@ -131,11 +134,6 @@ function inboxItem() {
         },
         source_references: [],
       },
-    },
-    response: null as null | {
-      action: "approve";
-      comment: null;
-      edits: null;
     },
     expires_at: "2026-07-15T18:30:00+08:00",
     responded_at: null as string | null,

@@ -35,6 +35,7 @@ const statusLabels: Record<InboxItemStatus, string> = {
   responding: "处理中",
   resolved: "已解决",
   expired: "已过期",
+  resume_failed: "恢复失败",
   cancelled: "已取消",
 };
 
@@ -289,7 +290,9 @@ function InboxCard({ item }: Readonly<{ item: InboxItem }>) {
           <span className="inbox-symbol">{shortSymbol}</span>
           <div>
             <h2>{shortSymbol} / USDT 永续</h2>
-            <p>第 {item.payload.review_iteration} 轮人工审核</p>
+            <p>
+              第 {item.payload.review_iteration} 轮人工审核 · {item.member_count} 个审核项
+            </p>
           </div>
         </div>
         <span className="inbox-status" data-status={item.status}>
@@ -299,8 +302,8 @@ function InboxCard({ item }: Readonly<{ item: InboxItem }>) {
 
       <dl className="inbox-facts">
         <div>
-          <dt>状态</dt>
-          <dd>{statusLabels[item.status]}</dd>
+          <dt>审核项</dt>
+          <dd>{item.member_count} 项</dd>
         </div>
         <div>
           <dt>标的</dt>

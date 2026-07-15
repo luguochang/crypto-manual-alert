@@ -23,13 +23,11 @@ import {
   useState,
 } from "react";
 
-import { ProductApiError } from "@/lib/api/product-client";
 import {
   interruptResponseSchema,
   type InterruptResponse,
   type OfficialReviewPayload,
   type PendingInterrupt,
-  type ProductTask,
 } from "@/lib/schemas/product-api";
 
 export type ReviewAction = "approve" | "reject" | "edit";
@@ -40,7 +38,9 @@ export type ReviewSubmissionPhase =
   | "accepted"
   | "conflict"
   | "expired"
-  | "network_error";
+  | "network_error"
+  | "auth_error"
+  | "invalid_request";
 export type ReviewInteractionState =
   | "pending"
   | "responding"
@@ -48,7 +48,9 @@ export type ReviewInteractionState =
   | "accepted"
   | "conflict"
   | "expired"
-  | "network_error";
+  | "network_error"
+  | "auth_error"
+  | "invalid_request";
 
 export type ReviewEditFormValues = {
   mainAction: string;
@@ -63,17 +65,16 @@ export type ReviewEditFormValues = {
 
 type HumanReviewPanelProps = {
   interrupt: PendingInterrupt;
+  expiresAt: string | null;
   disabled?: boolean;
-  onRespond: (
-    response: InterruptResponse,
-    idempotencyKey: string,
-  ) => Promise<ProductTask>;
-  onConflict: () => void;
-};
-
-export type ReviewRequestIdentity = {
-  fingerprint: string;
-  idempotencyKey: string;
+  phase?: ReviewSubmissionPhase;
+  failureMessage?: string | null;
+  decision?: InterruptResponse | null;
+  deferSubmission?: boolean;
+  announceSubmissionState?: boolean;
+  showSubmissionNotice?: boolean;
+  reviewPosition?: { index: number; total: number };
+  onDecide: (response: InterruptResponse) => void;
 };
 
 export type ReviewSourceReference = {
@@ -86,6 +87,19 @@ export type ReviewDeadlineHint = {
   countdown: string | null;
   locallyElapsed: boolean;
 };
+
+export function reviewItemIdentity(
+  interrupt: Pick<PendingInterrupt, "payload">,
+  position: { index: number; total: number },
+): string {
+  const analysis = interrupt.payload.artifact.analysis;
+  return [
+    `审核项 ${position.index}/${position.total}`,
+    analysis.instrument,
+    analysis.horizon,
+    `第 ${interrupt.payload.review_iteration} 轮`,
+  ].join("，");
+}
 
 const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 const integerPattern = /^(?:0|[1-9]\d*)$/;
@@ -121,6 +135,8 @@ export function resolveReviewInteractionState(
   if (phase === "conflict") return "conflict";
   if (phase === "submitting") return "submitting";
   if (phase === "network_error") return "network_error";
+  if (phase === "auth_error") return "auth_error";
+  if (phase === "invalid_request") return "invalid_request";
   return "pending";
 }
 
@@ -197,21 +213,9 @@ export function isServerExpiredReviewConflict(status: number, message: string) {
   return status === 409 && /(?:expir|过期)/i.test(message);
 }
 
-export function resolveReviewRequestIdentity(
-  response: InterruptResponse,
-  previous: ReviewRequestIdentity | null,
-  createIdempotencyKey: () => string = () => crypto.randomUUID(),
-): ReviewRequestIdentity {
-  const fingerprint = JSON.stringify(interruptResponseSchema.parse(response));
-  return previous?.fingerprint === fingerprint
-    ? previous
-    : { fingerprint, idempotencyKey: createIdempotencyKey() };
-}
-
 export function buildEditResponse(
   values: ReviewEditFormValues,
   payload: OfficialReviewPayload,
-  responseVersion: number,
   comment: string,
 ): InterruptResponse {
   const rootCauseChain = values.rootCauseChain
@@ -229,7 +233,6 @@ export function buildEditResponse(
     invalidation: values.invalidation.trim(),
   };
   const response = interruptResponseSchema.parse({
-    response_version: responseVersion,
     action: "edit",
     comment: normalizedComment(comment),
     edits,
@@ -253,9 +256,16 @@ export function buildEditResponse(
 
 export function HumanReviewPanel({
   interrupt,
+  expiresAt,
   disabled = false,
-  onRespond,
-  onConflict,
+  phase = "idle",
+  failureMessage = null,
+  decision = null,
+  deferSubmission = false,
+  announceSubmissionState = true,
+  showSubmissionNotice = true,
+  reviewPosition,
+  onDecide,
 }: HumanReviewPanelProps) {
   const analysis = interrupt.payload.artifact.analysis;
   const evidence = interrupt.payload.artifact.evidence_verdict;
@@ -271,19 +281,18 @@ export function HumanReviewPanel({
   const editTitleId = `hitl-edit-title-${generatedId}`;
   const [mode, setMode] = useState<ReviewMode>(null);
   const [comment, setComment] = useState("");
-  const [phase, setPhase] = useState<ReviewSubmissionPhase>("idle");
-  const [failureMessage, setFailureMessage] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [now, setNow] = useState<number | null>(null);
   const [editValues, setEditValues] = useState<ReviewEditFormValues>(() =>
     editValuesFromPayload(interrupt.payload)
   );
-  const submissionLock = useRef(false);
-  const retryRequest = useRef<ReviewRequestIdentity | null>(null);
   const returnFocusTarget = useRef<HTMLButtonElement | null>(null);
   const returnFocusRequested = useRef(false);
   const confirmationHeading = useRef<HTMLHeadingElement | null>(null);
   const editHeading = useRef<HTMLHeadingElement | null>(null);
+  const reviewIdentity = reviewPosition === undefined
+    ? null
+    : reviewItemIdentity(interrupt, reviewPosition);
 
   const availableActions = useMemo(
     () => resolveAvailableReviewActions(interrupt.payload.allowed_actions, risk.allowed),
@@ -295,7 +304,7 @@ export function HumanReviewPanel({
 
   useEffect(() => {
     const initialTick = window.setTimeout(() => setNow(Date.now()), 0);
-    if (interrupt.expires_at === null || interrupt.status === "responding") {
+    if (expiresAt === null || interrupt.status === "responding") {
       return () => window.clearTimeout(initialTick);
     }
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -303,15 +312,15 @@ export function HumanReviewPanel({
       window.clearTimeout(initialTick);
       window.clearInterval(timer);
     };
-  }, [interrupt.expires_at, interrupt.status]);
+  }, [expiresAt, interrupt.status]);
 
   const interactionState = resolveReviewInteractionState(interrupt, phase);
   const actionDisabled = disabled
     || (interactionState !== "pending" && interactionState !== "network_error");
   const interactive = interactionState === "pending" || interactionState === "network_error";
   const deadline = useMemo(
-    () => resolveReviewDeadlineHint(interrupt.expires_at, now),
-    [interrupt.expires_at, now],
+    () => resolveReviewDeadlineHint(expiresAt, now),
+    [expiresAt, now],
   );
   const activeMode = mode !== null && availableActions.includes(mode) ? mode : null;
 
@@ -331,43 +340,19 @@ export function HumanReviewPanel({
     }
   }, [activeMode]);
 
-  async function submitResponse(response: InterruptResponse) {
-    if (submissionLock.current || actionDisabled) return;
+  function saveResponse(response: InterruptResponse) {
+    if (actionDisabled) return;
     const validated = interruptResponseSchema.parse(response);
     if (!isReviewActionAvailable(
       interrupt.payload.allowed_actions,
       risk.allowed,
       validated.action,
     )) return;
-    const request = resolveReviewRequestIdentity(validated, retryRequest.current);
-    retryRequest.current = request;
-    submissionLock.current = true;
-    setPhase("submitting");
-    setFailureMessage(null);
     setFormError(null);
-    try {
-      await onRespond(validated, request.idempotencyKey);
-      retryRequest.current = null;
-      setPhase("accepted");
+    onDecide(validated);
+    if (deferSubmission) {
+      returnFocusRequested.current = true;
       setMode(null);
-    } catch (error) {
-      if (error instanceof ProductApiError && error.status === 409) {
-        const expired = isServerExpiredReviewConflict(error.status, error.message);
-        setPhase(expired ? "expired" : "conflict");
-        setFailureMessage(expired
-          ? "服务端已关闭本次审核窗口，正在读取任务的最终状态。"
-          : "该审核请求已被处理或版本已更新，正在重新读取服务端状态。");
-        onConflict();
-      } else {
-        setPhase("network_error");
-        setFailureMessage(
-          error instanceof ProductApiError
-            ? error.message
-            : "网络连接中断，本次响应尚未得到服务端确认。",
-        );
-      }
-    } finally {
-      submissionLock.current = false;
     }
   }
 
@@ -378,12 +363,11 @@ export function HumanReviewPanel({
       action,
     )) return;
     const response = interruptResponseSchema.parse({
-      response_version: interrupt.response_version,
       action,
       comment: normalizedComment(comment),
       edits: null,
     });
-    void submitResponse(response);
+    saveResponse(response);
   }
 
   function submitEdits(event: FormEvent<HTMLFormElement>) {
@@ -393,10 +377,9 @@ export function HumanReviewPanel({
       const response = buildEditResponse(
         editValues,
         interrupt.payload,
-        interrupt.response_version,
         comment,
       );
-      void submitResponse(response);
+      saveResponse(response);
     } catch (error) {
       setFormError(error instanceof Error ? error.message.trim() : "请检查修改内容。");
     }
@@ -421,13 +404,23 @@ export function HumanReviewPanel({
           <span className="hitl-review-icon" aria-hidden="true"><ShieldCheck size={20} /></span>
           <div>
             <p className="section-kicker">Human review</p>
-            <h2 id={reviewTitleId}>分析草稿待人工确认</h2>
+            <h2 id={reviewTitleId}>
+              分析草稿待人工确认
+              {reviewIdentity ? `：${reviewIdentity}` : ""}
+            </h2>
           </div>
         </div>
-        <ReviewStateBadge state={interactionState} deadline={deadline} />
+        <ReviewStateBadge
+          state={interactionState}
+          deadline={deadline}
+          announce={announceSubmissionState}
+        />
       </header>
 
-      <div className="hitl-review-summary" aria-label="待审核决策摘要">
+      <div
+        className="hitl-review-summary"
+        aria-label={reviewIdentity ? `${reviewIdentity}的待审核决策摘要` : "待审核决策摘要"}
+      >
         <ReviewMetric label="建议动作" value={actionLabels[analysis.main_action] ?? analysis.main_action} />
         <ReviewMetric label="主观概率" value={`${Math.round(analysis.probability * 100)}%`} />
         <ReviewMetric label="仓位等级" value={positionLabels[analysis.position_size_class] ?? analysis.position_size_class} />
@@ -436,7 +429,7 @@ export function HumanReviewPanel({
       </div>
 
       <div className="hitl-review-detail-grid">
-        <section className="hitl-review-detail" aria-labelledby={rationaleId}>
+        <section className="hitl-review-detail" aria-labelledby={`${reviewTitleId} ${rationaleId}`}>
           <h3 id={rationaleId}>判断依据</h3>
           <ol className="hitl-cause-list">
             {analysis.root_cause_chain.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
@@ -447,7 +440,7 @@ export function HumanReviewPanel({
           </dl>
         </section>
 
-        <section className="hitl-review-detail" aria-labelledby={gateId}>
+        <section className="hitl-review-detail" aria-labelledby={`${reviewTitleId} ${gateId}`}>
           <h3 id={gateId}>证据与风险门禁</h3>
           <div className="hitl-gate-row" data-tone={evidence.sufficient ? "positive" : "danger"}>
             {evidence.sufficient ? <CheckCircle2 size={17} /> : <CircleAlert size={17} />}
@@ -471,6 +464,7 @@ export function HumanReviewPanel({
       </div>
 
       <ReviewSources
+        contextHeadingId={reviewTitleId}
         headingId={sourcesId}
         references={interrupt.payload.artifact.source_references}
       />
@@ -482,7 +476,15 @@ export function HumanReviewPanel({
         </p>
       ) : null}
 
-      <ReviewStateNotice state={interactionState} message={failureMessage} />
+      {showSubmissionNotice ? (
+        <ReviewStateNotice state={interactionState} message={failureMessage} />
+      ) : null}
+
+      {interactive && deferSubmission && decision !== null ? (
+        <p className="hitl-state-notice" role="note">
+          已在本页选择{reviewActionLabel(decision.action)}，尚未提交到服务端；可继续修改。
+        </p>
+      ) : null}
 
       {interactive && !risk.allowed ? (
         <p className="hitl-approval-blocked" role="note">
@@ -492,7 +494,11 @@ export function HumanReviewPanel({
       ) : null}
 
       {interactive ? (
-        <div className="hitl-review-actions" role="group" aria-label="审核决定">
+        <div
+          className="hitl-review-actions"
+          role="group"
+          aria-label={reviewIdentity ? `${reviewIdentity}的审核决定` : "审核决定"}
+        >
           {approveAvailable ? (
             <button
               type="button"
@@ -501,6 +507,7 @@ export function HumanReviewPanel({
               disabled={actionDisabled}
               aria-expanded={activeMode === "approve"}
               aria-controls={confirmationId}
+              aria-label={reviewIdentity ? `${reviewIdentity}：批准` : undefined}
             >
               <Check size={17} aria-hidden="true" />批准
             </button>
@@ -513,6 +520,7 @@ export function HumanReviewPanel({
               disabled={actionDisabled}
               aria-expanded={activeMode === "reject"}
               aria-controls={confirmationId}
+              aria-label={reviewIdentity ? `${reviewIdentity}：拒绝` : undefined}
             >
               <CircleX size={17} aria-hidden="true" />拒绝
             </button>
@@ -525,6 +533,7 @@ export function HumanReviewPanel({
               disabled={actionDisabled}
               aria-expanded={activeMode === "edit"}
               aria-controls={editFormId}
+              aria-label={reviewIdentity ? `${reviewIdentity}：修改后重审` : undefined}
             >
               <FilePenLine size={17} aria-hidden="true" />修改后重审
             </button>
@@ -539,31 +548,54 @@ export function HumanReviewPanel({
           className="hitl-confirmation"
           data-tone={activeMode === "approve" ? "positive" : "danger"}
           role="region"
-          aria-labelledby={confirmationTitleId}
+          aria-label={reviewIdentity
+            ? `${reviewIdentity}：${activeMode === "approve" ? "确认批准" : "确认拒绝"}`
+            : undefined}
+          aria-labelledby={reviewIdentity ? undefined : confirmationTitleId}
         >
           <div>
             <h3 id={confirmationTitleId} ref={confirmationHeading} tabIndex={-1}>
               {activeMode === "approve" ? "确认批准这份分析？" : "确认拒绝这份分析？"}
             </h3>
             <p>{activeMode === "approve"
-              ? "批准后，Agent 将恢复运行并提交最终报告。"
-              : "拒绝后，本次分析将进入明确的阻断终态。"}</p>
+              ? deferSubmission
+                ? "在本页选择后仍需提交整组决定，Agent 才会恢复运行。"
+                : "批准后，Agent 将恢复运行并提交最终报告。"
+              : deferSubmission
+                ? "在本页选择后仍需提交整组决定，当前任务状态不会立即改变。"
+                : "拒绝后，本次分析将进入明确的阻断终态。"}</p>
           </div>
           <label className="hitl-comment-field">
             <span>审核备注（可选）</span>
-            <textarea value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} rows={2} />
+            <textarea
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              maxLength={1000}
+              rows={2}
+              aria-label={reviewIdentity ? `${reviewIdentity}：审核备注（可选）` : undefined}
+            />
           </label>
           <div className="hitl-confirmation-actions">
-            <button type="button" className="hitl-secondary-button" onClick={returnToReviewActions}>
+            <button
+              type="button"
+              className="hitl-secondary-button"
+              onClick={returnToReviewActions}
+              aria-label={reviewIdentity ? `${reviewIdentity}：返回审核操作` : undefined}
+            >
               <ArrowLeft size={16} aria-hidden="true" />返回
             </button>
             <button
               type="button"
               className={`hitl-action-button ${activeMode === "approve" ? "is-approve" : "is-reject"}`}
               onClick={() => submitDecision(activeMode)}
+              aria-label={reviewIdentity
+                ? `${reviewIdentity}：${activeMode === "approve" ? "在本页选择批准" : "在本页选择拒绝"}`
+                : undefined}
             >
               {activeMode === "approve" ? <Check size={17} aria-hidden="true" /> : <CircleX size={17} aria-hidden="true" />}
-              {activeMode === "approve" ? "确认批准" : "确认拒绝"}
+              {deferSubmission
+                ? activeMode === "approve" ? "在本页选择批准" : "在本页选择拒绝"
+                : activeMode === "approve" ? "确认批准" : "确认拒绝"}
             </button>
           </div>
         </div>
@@ -573,7 +605,8 @@ export function HumanReviewPanel({
         <form
           id={editFormId}
           className="hitl-edit-form"
-          aria-labelledby={editTitleId}
+          aria-label={reviewIdentity ? `${reviewIdentity}：修改分析草稿` : undefined}
+          aria-labelledby={reviewIdentity ? undefined : editTitleId}
           onSubmit={submitEdits}
         >
           <div className="hitl-edit-heading">
@@ -581,7 +614,12 @@ export function HumanReviewPanel({
               <h3 id={editTitleId} ref={editHeading} tabIndex={-1}>修改分析草稿</h3>
               <p>提交后将重新执行证据、风险与人工审核门禁。</p>
             </div>
-            <button type="button" className="hitl-secondary-button" onClick={returnToReviewActions}>
+            <button
+              type="button"
+              className="hitl-secondary-button"
+              onClick={returnToReviewActions}
+              aria-label={reviewIdentity ? `${reviewIdentity}：返回审核操作` : undefined}
+            >
               <ArrowLeft size={16} aria-hidden="true" />返回
             </button>
           </div>
@@ -605,8 +643,13 @@ export function HumanReviewPanel({
             <button type="button" className="hitl-secondary-button" onClick={() => setEditValues(editValuesFromPayload(interrupt.payload))}>
               <RotateCcw size={16} aria-hidden="true" />恢复草稿值
             </button>
-            <button type="submit" className="hitl-action-button is-edit">
-              <FilePenLine size={17} aria-hidden="true" />提交修改并重审
+            <button
+              type="submit"
+              className="hitl-action-button is-edit"
+              aria-label={reviewIdentity ? `${reviewIdentity}：在本页选择修改后重审` : undefined}
+            >
+              <FilePenLine size={17} aria-hidden="true" />
+              {deferSubmission ? "在本页选择修改后重审" : "提交修改并重审"}
             </button>
           </div>
         </form>
@@ -635,15 +678,20 @@ function ReviewNotices({ missing, warnings }: { missing: string[]; warnings: str
 }
 
 function ReviewSources({
+  contextHeadingId,
   headingId,
   references,
 }: {
+  contextHeadingId: string;
   headingId: string;
   references: readonly string[];
 }) {
   const sources = references.map(resolveReviewSourceReference);
   return (
-    <section className="hitl-review-sources" aria-labelledby={headingId}>
+    <section
+      className="hitl-review-sources"
+      aria-labelledby={`${contextHeadingId} ${headingId}`}
+    >
       <div className="hitl-review-sources-heading">
         <h3 id={headingId}>分析来源</h3>
         <span>{sources.length} 条</span>
@@ -680,9 +728,11 @@ function ReviewSources({
 function ReviewStateBadge({
   state,
   deadline,
+  announce,
 }: {
   state: ReviewInteractionState;
   deadline: ReviewDeadlineHint;
+  announce: boolean;
 }) {
   const content: Record<ReviewInteractionState, { icon: typeof Clock3; label: string; tone: string }> = {
     pending: {
@@ -700,9 +750,13 @@ function ReviewStateBadge({
     conflict: { icon: CircleAlert, label: "状态已更新", tone: "danger" },
     expired: { icon: Clock3, label: "操作已过期", tone: "danger" },
     network_error: { icon: CircleAlert, label: "响应未确认", tone: "danger" },
+    auth_error: { icon: CircleAlert, label: "认证失败", tone: "danger" },
+    invalid_request: { icon: CircleAlert, label: "请求已拒绝", tone: "danger" },
   };
   const current = content[state];
-  const announcement = resolveReviewStateAnnouncement(state);
+  const announcement = announce
+    ? resolveReviewStateAnnouncement(state)
+    : { role: undefined, ariaLive: "off" as const };
   const Icon = current.icon;
   return (
     <span
@@ -730,6 +784,8 @@ function ReviewStateNotice({ state, message }: { state: ReviewInteractionState; 
     conflict: message ?? "该审核请求已经被其他响应处理。",
     expired: "已到达服务端给出的截止时间，客户端操作已禁用；最终状态仍以服务端确认为准。",
     network_error: message ?? "本次响应尚未得到服务端确认，可以重试相同决定。",
+    auth_error: message ?? "登录状态或当前账号权限不足，不能提交审核决定。",
+    invalid_request: message ?? "服务端未接受这组审核决定，请重新读取任务状态。",
   };
   return <p className="hitl-state-notice" data-state={state} role={state === "conflict" || state === "network_error" ? "alert" : "status"}>{copy[state]}</p>;
 }
@@ -771,6 +827,12 @@ function parsePositiveInteger(value: string, label: string): number {
 function normalizedComment(comment: string): string | null {
   const normalized = comment.trim();
   return normalized || null;
+}
+
+function reviewActionLabel(action: InterruptResponse["action"]): string {
+  if (action === "approve") return "批准";
+  if (action === "reject") return "拒绝";
+  return "修改";
 }
 
 function formatPercent(value: number): string {
