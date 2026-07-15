@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import os
 from typing import AsyncIterator
@@ -18,10 +19,15 @@ from sqlalchemy.ext.asyncio import (
 
 from crypto_alert_v2.api.agent_server import (
     RemoteCancelResult,
+    RemoteInterrupt,
     RemoteRunHandle,
     RemoteRunState,
 )
-from crypto_alert_v2.api.schemas import AnalysisSubmission, TerminalGraphOutput
+from crypto_alert_v2.api.schemas import (
+    AnalysisSubmission,
+    InterruptResponseSubmission,
+    TerminalGraphOutput,
+)
 from crypto_alert_v2.api.service import ProductAnalysisService, TaskNotCancellableError
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.commands.dispatcher import CommandDispatcher
@@ -30,13 +36,16 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    InterruptProjection,
     MarketSnapshot,
+    Membership,
     Run,
     Task,
     TaskCommand,
     Tenant,
     Thread,
     WebEvidence,
+    Workspace,
 )
 from tests.fixtures.golden_cases import complete_market_snapshot, valid_market_analysis
 
@@ -81,9 +90,12 @@ class InspectingRunner:
         self.task_id: UUID | None = None
         self.registered_handle: tuple[str | None, str | None, str | None] | None = None
         self.remote_status = "success"
+        self.start_requests: list[dict[str, object]] = []
+        self.resume_requests: list[dict[str, object]] = []
 
     async def start(self, **kwargs: object) -> RemoteRunHandle:
         self.events.append("start")
+        self.start_requests.append(dict(kwargs))
         self.task_id = UUID(str(kwargs["task_id"]))
         return RemoteRunHandle(
             assistant_id="official-assistant",
@@ -93,11 +105,6 @@ class InspectingRunner:
 
     async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
         self.events.append("join")
-        run_filter = (
-            Run.task_id == self.task_id
-            if self.task_id is not None
-            else Run.official_run_id == handle.run_id
-        )
         async with self._session_factory() as session:
             registered = (
                 await session.execute(
@@ -108,7 +115,7 @@ class InspectingRunner:
                         Run.official_run_id,
                     )
                     .join(Thread, Thread.id == Run.thread_id)
-                    .where(run_filter)
+                    .where(Run.official_run_id == handle.run_id)
                 )
             ).one()
         self.task_id = registered[0]
@@ -128,6 +135,38 @@ class InspectingRunner:
         return RemoteCancelResult(
             outcome="confirmed",
             state=RemoteRunState(status="interrupted"),
+        )
+
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> tuple[RemoteInterrupt, ...]:
+        self.events.append("get_interrupts")
+        return (
+            RemoteInterrupt(
+                interrupt_id=f"interrupt-{handle.run_id}",
+                namespace="",
+                checkpoint_id=f"checkpoint-{handle.run_id}",
+                value={
+                    "kind": "artifact_review",
+                    "schema_version": "1.0",
+                    "allowed_actions": ["approve", "reject", "edit"],
+                    "review_iteration": 2 if handle.run_id.startswith("resumed-") else 1,
+                    "artifact": successful_terminal_output()["artifact"],
+                },
+            ),
+        )
+
+    async def resume(self, **kwargs: object) -> RemoteRunHandle:
+        self.events.append("resume")
+        self.resume_requests.append(dict(kwargs))
+        handle = kwargs["handle"]
+        assert isinstance(handle, RemoteRunHandle)
+        self.task_id = UUID(str(kwargs["task_id"]))
+        return RemoteRunHandle(
+            assistant_id=handle.assistant_id,
+            thread_id=handle.thread_id,
+            run_id=f"resumed-{kwargs['product_run_id']}",
         )
 
 
@@ -189,6 +228,15 @@ class SuccessfulJoinRunner(InspectingRunner):
     async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
         await super().join(handle)
         return successful_terminal_output()
+
+
+class ReviewAwareRunner(SuccessfulJoinRunner):
+    async def join(self, handle: RemoteRunHandle) -> dict[str, object]:
+        output = await super().join(handle)
+        response = self.resume_requests[-1]["response"] if self.resume_requests else None
+        if isinstance(response, dict) and response.get("action") == "reject":
+            return blocked_terminal_output()
+        return output
 
 
 class TerminalCancelRaceRunner(SuccessfulJoinRunner):
@@ -314,6 +362,92 @@ async def queue_task(
     return service, queued
 
 
+async def queue_review_response(
+    session_factory: async_sessionmaker[AsyncSession],
+    task_id: UUID,
+    response: dict[str, object],
+) -> tuple[UUID, UUID]:
+    async with session_factory() as session, session.begin():
+        task = await session.scalar(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        assert task is not None
+        assert task.status == "waiting_human"
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand)
+                    .where(TaskCommand.task_id == task_id)
+                    .order_by(TaskCommand.sequence)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        parent_run = await session.scalar(
+            select(Run)
+            .where(Run.task_id == task_id)
+            .order_by(Run.attempt.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        assert parent_run is not None
+        assert parent_run.status == "waiting_human"
+        projection = await session.scalar(
+            select(InterruptProjection)
+            .where(
+                InterruptProjection.task_id == task_id,
+                InterruptProjection.status == "pending",
+            )
+            .with_for_update()
+        )
+        assert projection is not None
+        projection.status = "responding"
+        projection.response = response
+        projection.responded_at = datetime.now(UTC)
+        resumed_run_id = uuid4()
+        session.add(
+            Run(
+                id=resumed_run_id,
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                owner_user_id=task.owner_user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=parent_run.attempt + 1,
+                status="queued",
+                input_payload=task.request_payload,
+                resume_of_run_id=parent_run.id,
+            )
+        )
+        command_payload = {
+            "projection_id": str(projection.id),
+            "interrupt_id": projection.official_interrupt_id,
+            "checkpoint_id": projection.checkpoint_id,
+            "response_version": projection.response_version,
+            "response": response,
+            "expired": False,
+        }
+        session.add(
+            TaskCommand(
+                id=uuid4(),
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                actor_user_id=task.owner_user_id,
+                task_id=task.id,
+                thread_id=task.thread_id,
+                command_type="respond",
+                payload=command_payload,
+                payload_hash="e" * 64,
+                sequence=max(command.sequence for command in commands) + 1,
+                status="pending",
+                attempt=0,
+                idempotency_key=f"respond:{projection.id}",
+            )
+        )
+        await session.flush()
+        return resumed_run_id, projection.id
+
+
 def successful_terminal_output() -> dict[str, object]:
     source_url = "https://www.reuters.com/markets/currencies/"
     return {
@@ -341,6 +475,20 @@ def successful_terminal_output() -> dict[str, object]:
         },
         "errors": [],
     }
+
+
+def blocked_terminal_output() -> dict[str, object]:
+    output = deepcopy(successful_terminal_output())
+    output["terminal_status"] = "blocked"
+    artifact = output["artifact"]
+    assert isinstance(artifact, dict)
+    artifact["status"] = "draft"
+    risk_verdict = artifact["risk_verdict"]
+    assert isinstance(risk_verdict, dict)
+    risk_verdict["allowed"] = False
+    risk_verdict["blocked_reasons"] = ["Rejected during required human review."]
+    risk_verdict["confidence_cap"] = "0"
+    return output
 
 
 async def persisted_output_counts(
@@ -456,7 +604,7 @@ async def test_expired_command_lease_is_reclaimed_and_old_owner_is_fenced(
 
 
 @pytest.mark.asyncio
-async def test_remote_run_is_cancelled_when_registration_loses_lease(
+async def test_lost_registration_lease_is_recovered_without_cancelling_remote(
     connection: AsyncConnection,
 ) -> None:
     session_factory = async_sessionmaker(
@@ -464,7 +612,7 @@ async def test_remote_run_is_cancelled_when_registration_loses_lease(
         expire_on_commit=False,
         join_transaction_mode="create_savepoint",
     )
-    _, _ = await queue_task(session_factory)
+    service, queued = await queue_task(session_factory)
     clock = MutableClock()
     runner = LeaseExpiringRunner(session_factory, clock)
     dispatcher = CommandDispatcher(
@@ -478,13 +626,22 @@ async def test_remote_run_is_cancelled_when_registration_loses_lease(
     assert await dispatcher.dispatch_once() is False
 
     assert runner.events == ["start"]
-    assert runner.cancelled == [
-        RemoteRunHandle(
-            assistant_id="official-assistant",
-            thread_id="official-thread",
-            run_id="official-run",
-        )
-    ]
+    assert runner.cancelled == []
+
+    recovery_runner = InspectingRunner(session_factory)
+    recovery_dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=recovery_runner,
+        worker_id="worker-b",
+        clock=clock,
+        lease_seconds=30,
+    )
+    assert await recovery_dispatcher.dispatch_once() is True
+    view = await service.get_task(actor(), str(queued["task_id"]))
+    assert view is not None
+    assert view["status"] == "failed"
+    assert recovery_runner.events == ["start", "get", "join"]
+    assert recovery_runner.cancelled == []
 
 
 @pytest.mark.asyncio
@@ -930,7 +1087,354 @@ async def test_interrupted_remote_projects_waiting_human_without_join(
     view = await service.get_task(actor(), str(queued["task_id"]))
     assert view is not None
     assert view["status"] == "waiting_human"
-    assert runner.events == ["start", "get"]
+    assert runner.events == ["start", "get", "get_interrupts"]
+    async with session_factory() as session:
+        projection = await session.scalar(
+            select(InterruptProjection).where(
+                InterruptProjection.task_id == UUID(str(queued["task_id"]))
+            )
+        )
+    assert projection is not None
+    assert projection.status == "pending"
+    assert projection.official_interrupt_id == "interrupt-official-run"
+    assert projection.checkpoint_id == "checkpoint-official-run"
+    assert projection.payload["kind"] == "artifact_review"
+    assert projection.expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_required_review_resumes_official_run_and_projects_approval(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    async with session_factory() as session, session.begin():
+        workspace = await session.scalar(select(Workspace).with_for_update())
+        assert workspace is not None
+        workspace.review_policy = "required"
+
+    runner = ReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="review-approval-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    assert runner.start_requests[0]["review_policy"] == "required"
+
+    task_id = UUID(str(queued["task_id"]))
+    responding = await service.respond_interrupt(
+        actor(),
+        str(task_id),
+        "interrupt-official-run",
+        InterruptResponseSubmission(
+            response_version=1,
+            action="approve",
+            comment="Evidence and risk are acceptable.",
+        ),
+        "approve-required-review",
+    )
+    assert responding is not None
+    assert responding["status"] == "waiting_human"
+    async with session_factory() as session:
+        resumed_run_id = await session.scalar(
+            select(Run.id).where(
+                Run.task_id == task_id,
+                Run.resume_of_run_id.is_not(None),
+            )
+        )
+        projection_id = await session.scalar(
+            select(InterruptProjection.id).where(
+                InterruptProjection.task_id == task_id
+            )
+        )
+    assert resumed_run_id is not None
+    assert projection_id is not None
+    runner.remote_status = "success"
+    assert await dispatcher.dispatch_once() is True
+
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "succeeded"
+    assert view["artifact"]["status"] == "committed"
+    assert runner.events == [
+        "start",
+        "get",
+        "get_interrupts",
+        "resume",
+        "get",
+        "join",
+    ]
+    assert runner.resume_requests[0]["checkpoint_id"] == "checkpoint-official-run"
+    assert runner.resume_requests[0]["response"] == {
+        "action": "approve",
+        "comment": "Evidence and risk are acceptable.",
+    }
+    async with session_factory() as session:
+        resumed_run = await session.get(Run, resumed_run_id)
+        projection = await session.get(InterruptProjection, projection_id)
+    assert resumed_run is not None
+    assert resumed_run.status == "succeeded"
+    assert resumed_run.official_run_id == f"resumed-{resumed_run_id}"
+    assert resumed_run.resume_of_run_id is not None
+    assert projection is not None
+    assert projection.status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_review_edit_resumes_then_projects_a_new_interrupt(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    runner = ReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="review-edit-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    resumed_run_id, first_projection_id = await queue_review_response(
+        session_factory,
+        task_id,
+        {
+            "action": "edit",
+            "comment": "Use the confirmed trigger.",
+            "edits": {"entry_trigger": "65200"},
+        },
+    )
+
+    assert await dispatcher.dispatch_once() is True
+
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "waiting_human"
+    async with session_factory() as session:
+        projections = list(
+            (
+                await session.scalars(
+                    select(InterruptProjection)
+                    .where(InterruptProjection.task_id == task_id)
+                    .order_by(InterruptProjection.created_at)
+                )
+            ).all()
+        )
+    assert len(projections) == 2
+    assert projections[0].id == first_projection_id
+    assert projections[0].status == "resolved"
+    assert projections[1].status == "pending"
+    assert projections[1].run_id == resumed_run_id
+    assert projections[1].payload["review_iteration"] == 2
+    assert runner.events.count("start") == 1
+    assert runner.events.count("resume") == 1
+    assert runner.events.count("get_interrupts") == 2
+
+
+@pytest.mark.asyncio
+async def test_expired_review_creates_durable_rejection_and_finishes_blocked(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = ReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="review-expiry-worker",
+        clock=clock,
+        interrupt_ttl_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+
+    clock.now += timedelta(seconds=3)
+    runner.remote_status = "success"
+    assert await dispatcher.dispatch_once() is True
+    async with session_factory() as session:
+        projection = await session.scalar(
+            select(InterruptProjection).where(
+                InterruptProjection.task_id == task_id
+            )
+        )
+        respond_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert projection is not None
+    assert projection.status == "expired"
+    assert projection.response == {
+        "action": "reject",
+        "comment": "The review window expired before a decision was submitted.",
+    }
+    assert respond_command is not None
+    assert respond_command.status == "pending"
+    assert respond_command.payload["expired"] is True
+
+    assert await dispatcher.dispatch_once() is True
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "blocked"
+    assert view["artifact"]["status"] == "draft"
+    assert runner.resume_requests[0]["response"] == projection.response
+    async with session_factory() as session:
+        persisted_projection = await session.get(InterruptProjection, projection.id)
+    assert persisted_projection is not None
+    assert persisted_projection.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_admitted_review_response_survives_write_permission_revocation(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    runner = ReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="revoked-member-response-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    accepted = await service.respond_interrupt(
+        actor(),
+        str(task_id),
+        "interrupt-official-run",
+        InterruptResponseSubmission(response_version=1, action="approve"),
+        "accepted-before-membership-revocation",
+    )
+    assert accepted is not None
+
+    async with session_factory() as session, session.begin():
+        task = await session.get(Task, task_id)
+        assert task is not None
+        membership = await session.scalar(
+            select(Membership)
+            .where(
+                Membership.workspace_id == task.workspace_id,
+                Membership.user_id == task.owner_user_id,
+            )
+            .with_for_update()
+        )
+        assert membership is not None
+        membership.permissions = ["analysis:read"]
+
+    runner.remote_status = "success"
+    assert await dispatcher.dispatch_once() is True
+
+    async with session_factory() as session:
+        task = await session.get(Task, task_id)
+        resumed_run = await session.scalar(
+            select(Run)
+            .where(Run.task_id == task_id)
+            .order_by(Run.attempt.desc())
+            .limit(1)
+        )
+        projection = await session.scalar(
+            select(InterruptProjection).where(
+                InterruptProjection.task_id == task_id
+            )
+        )
+        respond_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert task is not None
+    assert task.status == "succeeded"
+    assert resumed_run is not None
+    assert resumed_run.status == "succeeded"
+    assert projection is not None
+    assert projection.status == "resolved"
+    assert respond_command is not None
+    assert respond_command.status == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_expiry_rejection_survives_membership_deactivation(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    _, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = ReviewAwareRunner(session_factory)
+    runner.remote_status = "interrupted"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="revoked-member-expiry-worker",
+        clock=clock,
+        interrupt_ttl_seconds=2,
+    )
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session, session.begin():
+        task = await session.get(Task, task_id)
+        assert task is not None
+        membership = await session.scalar(
+            select(Membership)
+            .where(
+                Membership.workspace_id == task.workspace_id,
+                Membership.user_id == task.owner_user_id,
+            )
+            .with_for_update()
+        )
+        assert membership is not None
+        membership.is_active = False
+
+    clock.now += timedelta(seconds=3)
+    runner.remote_status = "success"
+    assert await dispatcher.dispatch_once() is True
+    assert await dispatcher.dispatch_once() is True
+
+    async with session_factory() as session:
+        task = await session.get(Task, task_id)
+        projection = await session.scalar(
+            select(InterruptProjection).where(
+                InterruptProjection.task_id == task_id
+            )
+        )
+        respond_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert task is not None
+    assert task.status == "blocked"
+    assert projection is not None
+    assert projection.status == "expired"
+    assert respond_command is not None
+    assert respond_command.status == "dispatched"
 
 
 @pytest.mark.asyncio

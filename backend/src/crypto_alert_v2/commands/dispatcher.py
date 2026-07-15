@@ -9,20 +9,25 @@ import json
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from crypto_alert_v2.api.agent_server import (
     RemoteCancelResult,
+    RemoteInterrupt,
     RemoteRunHandle,
     RemoteRunState,
 )
 from crypto_alert_v2.api.schemas import AnalysisSubmission, TerminalGraphOutput
 from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.graph.request import ReviewResponse
 from crypto_alert_v2.persistence.models import (
     Artifact,
+    ArtifactVersion,
+    Decision,
+    InterruptProjection,
     MarketSnapshot,
     Membership,
     Run,
@@ -34,7 +39,6 @@ from crypto_alert_v2.persistence.models import (
     WebEvidence,
     Workspace,
 )
-from crypto_alert_v2.persistence.repositories import ArtifactRepository
 
 
 class RemoteRunner(Protocol):
@@ -46,6 +50,7 @@ class RemoteRunner(Protocol):
         product_thread_id: str,
         product_run_id: str,
         submission: AnalysisSubmission,
+        review_policy: Literal["bypass", "required"] = "bypass",
     ) -> RemoteRunHandle: ...
 
     async def join(self, handle: RemoteRunHandle) -> dict[str, Any]: ...
@@ -63,8 +68,36 @@ class RemoteRunner(Protocol):
 
     async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult: ...
 
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> tuple[RemoteInterrupt, ...]: ...
+
+    async def resume(
+        self,
+        *,
+        actor: ActorContext,
+        handle: RemoteRunHandle,
+        task_id: str,
+        product_run_id: str,
+        response: dict[str, Any],
+        checkpoint_id: str,
+    ) -> RemoteRunHandle: ...
+
 
 ObservedTerminalStatus = Literal["error", "success", "timeout"]
+ReviewPolicy = Literal["bypass", "required"]
+
+
+class RespondCommandPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    projection_id: UUID
+    interrupt_id: str = Field(min_length=1, max_length=255)
+    checkpoint_id: str = Field(min_length=1, max_length=255)
+    response_version: int = Field(ge=1)
+    response: ReviewResponse
+    expired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +113,9 @@ class CommandLease:
     actor: ActorContext
     submission: AnalysisSubmission | None
     remote_handle: RemoteRunHandle | None = None
+    resume_handle: RemoteRunHandle | None = None
+    respond_payload: RespondCommandPayload | None = None
+    review_policy: ReviewPolicy = "bypass"
     observed_terminal_status: ObservedTerminalStatus | None = None
 
 
@@ -98,6 +134,7 @@ class CommandDispatcher:
         remote_operation_timeout_seconds: float = 20.0,
         reconciliation_interval_seconds: float = 2.0,
         max_run_seconds: int = 900,
+        interrupt_ttl_seconds: int = 3_600,
     ) -> None:
         if not worker_id.strip():
             raise ValueError("worker_id is required")
@@ -115,6 +152,8 @@ class CommandDispatcher:
             raise ValueError("reconciliation_interval_seconds must be positive")
         if max_run_seconds < 1:
             raise ValueError("max_run_seconds must be positive")
+        if interrupt_ttl_seconds < 1:
+            raise ValueError("interrupt_ttl_seconds must be positive")
         self._session_factory = session_factory
         self._runner = runner
         self._worker_id = worker_id
@@ -126,12 +165,139 @@ class CommandDispatcher:
         self._remote_operation_timeout_seconds = remote_operation_timeout_seconds
         self._reconciliation_interval_seconds = reconciliation_interval_seconds
         self._max_run_seconds = max_run_seconds
+        self._interrupt_ttl_seconds = interrupt_ttl_seconds
 
     async def dispatch_once(self) -> bool:
+        if await self._expire_due_interrupt_once():
+            return True
         lease = await self.claim_next()
         if lease is None:
             return False
         return await self.execute(lease)
+
+    async def _expire_due_interrupt_once(self) -> bool:
+        now = self._clock()
+        async with self._session_factory() as session, session.begin():
+            row = (
+                await session.execute(
+                    select(InterruptProjection, Task)
+                    .join(Task, Task.id == InterruptProjection.task_id)
+                    .where(
+                        InterruptProjection.status == "pending",
+                        InterruptProjection.expires_at.is_not(None),
+                        InterruptProjection.expires_at <= now,
+                        Task.status == "waiting_human",
+                    )
+                    .order_by(InterruptProjection.expires_at, InterruptProjection.id)
+                    .limit(1)
+                    .with_for_update(of=Task, skip_locked=True)
+                )
+            ).one_or_none()
+            if row is None:
+                return False
+            interrupt, task = row
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(TaskCommand.task_id == task.id)
+                        .order_by(TaskCommand.sequence)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if any(
+                command.command_type == "respond"
+                and command.status in {"pending", "dispatching"}
+                for command in commands
+            ):
+                return False
+            parent_run = await session.scalar(
+                select(Run)
+                .where(
+                    Run.id == interrupt.run_id,
+                    Run.task_id == task.id,
+                    Run.status == "waiting_human",
+                )
+                .with_for_update()
+            )
+            interrupt = await session.scalar(
+                select(InterruptProjection)
+                .where(
+                    InterruptProjection.id == interrupt.id,
+                    InterruptProjection.task_id == task.id,
+                )
+                .with_for_update()
+            )
+            if (
+                parent_run is None
+                or interrupt is None
+                or interrupt.status != "pending"
+                or interrupt.expires_at is None
+                or interrupt.expires_at > now
+            ):
+                return False
+
+            response = {
+                "action": "reject",
+                "comment": "The review window expired before a decision was submitted.",
+            }
+            command_payload = {
+                "projection_id": str(interrupt.id),
+                "interrupt_id": interrupt.official_interrupt_id,
+                "checkpoint_id": interrupt.checkpoint_id,
+                "response_version": interrupt.response_version,
+                "response": response,
+                "expired": True,
+            }
+            command_hash = sha256(
+                json.dumps(
+                    command_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            resumed_run = Run(
+                id=uuid4(),
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                owner_user_id=task.owner_user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=parent_run.attempt + 1,
+                status="queued",
+                input_payload=task.request_payload,
+                resume_of_run_id=parent_run.id,
+            )
+            session.add(resumed_run)
+            session.add(
+                TaskCommand(
+                    id=uuid4(),
+                    tenant_id=task.tenant_id,
+                    workspace_id=task.workspace_id,
+                    actor_user_id=task.owner_user_id,
+                    task_id=task.id,
+                    thread_id=task.thread_id,
+                    command_type="respond",
+                    payload=command_payload,
+                    payload_hash=command_hash,
+                    sequence=max(
+                        (command.sequence for command in commands),
+                        default=0,
+                    )
+                    + 1,
+                    status="pending",
+                    attempt=0,
+                    idempotency_key=(
+                        f"expire:{interrupt.id}:{interrupt.response_version}"
+                    ),
+                )
+            )
+            interrupt.status = "expired"
+            interrupt.response = response
+            interrupt.responded_at = now
+            await session.flush()
+            return True
 
     async def claim_next(self) -> CommandLease | None:
         now = self._clock()
@@ -152,6 +318,7 @@ class CommandDispatcher:
                         Thread,
                         Tenant.external_id,
                         Workspace.external_id,
+                        Workspace.review_policy,
                         User.external_subject,
                         Membership.role,
                         Membership.permissions,
@@ -161,17 +328,16 @@ class CommandDispatcher:
                     .join(Tenant, Tenant.id == TaskCommand.tenant_id)
                     .join(Workspace, Workspace.id == TaskCommand.workspace_id)
                     .join(User, User.id == TaskCommand.actor_user_id)
-                    .join(
+                    .outerjoin(
                         Membership,
                         and_(
                             Membership.tenant_id == TaskCommand.tenant_id,
                             Membership.workspace_id == TaskCommand.workspace_id,
                             Membership.user_id == TaskCommand.actor_user_id,
-                            Membership.is_active.is_(True),
                         ),
                     )
                     .where(
-                        TaskCommand.command_type.in_(("submit", "cancel_task")),
+                        TaskCommand.command_type.in_(("submit", "respond", "cancel_task")),
                         Task.status.in_(("queued", "running", "waiting_human")),
                         or_(
                             TaskCommand.status == "pending",
@@ -199,20 +365,18 @@ class CommandDispatcher:
             )
             if command is None:
                 return None
+            admitted_permissions = tuple(row[8] or ())
             actor = ActorContext(
                 tenant_id=row[3],
                 workspace_id=row[4],
-                user_id=row[5],
-                roles=(row[6],),
-                permissions=tuple(row[7]),
+                user_id=row[6],
+                roles=(row[7] or "member",),
+                permissions=tuple(
+                    dict.fromkeys(
+                        (*admitted_permissions, "analysis:read", "analysis:write")
+                    )
+                ),
             )
-            if "analysis:write" not in actor.permissions:
-                command.status = "rejected"
-                command.lease_owner = None
-                command.lease_expires_at = None
-                task.status = "blocked"
-                task.completed_at = now
-                return None
 
             product_run = await session.scalar(
                 select(Run)
@@ -225,6 +389,22 @@ class CommandDispatcher:
                 .limit(1)
                 .with_for_update()
             )
+            respond_payload = None
+            if command.command_type == "respond":
+                try:
+                    respond_payload = RespondCommandPayload.model_validate(command.payload)
+                except ValidationError as exc:
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    task.status = "failed"
+                    task.completed_at = now
+                    if product_run is not None:
+                        product_run.status = "failed"
+                        product_run.failure_code = "invalid_respond_command"
+                        product_run.failure_message = str(exc)
+                        product_run.finished_at = now
+                    return None
             if command.command_type == "submit" and product_run is None:
                 previous_attempt = await session.scalar(
                     select(func.coalesce(func.max(Run.attempt), 0)).where(
@@ -273,7 +453,7 @@ class CommandDispatcher:
             command.lease_owner = self._worker_id
             command.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
             command.attempt += 1
-            if command.command_type == "submit":
+            if command.command_type in {"submit", "respond"}:
                 task.status = "running"
                 assert product_run is not None
                 product_run.status = "running"
@@ -295,6 +475,28 @@ class CommandDispatcher:
                     thread_id=thread.official_thread_id,
                     run_id=product_run.official_run_id,
                 )
+            resume_handle = None
+            if (
+                command.command_type == "respond"
+                and product_run is not None
+                and product_run.resume_of_run_id is not None
+                and thread.official_thread_id
+            ):
+                resume_run = await session.scalar(
+                    select(Run)
+                    .where(Run.id == product_run.resume_of_run_id)
+                    .with_for_update()
+                )
+                if (
+                    resume_run is not None
+                    and resume_run.official_assistant_id
+                    and resume_run.official_run_id
+                ):
+                    resume_handle = RemoteRunHandle(
+                        assistant_id=resume_run.official_assistant_id,
+                        thread_id=thread.official_thread_id,
+                        run_id=resume_run.official_run_id,
+                    )
             return CommandLease(
                 command_id=command.id,
                 task_id=task.id,
@@ -311,6 +513,9 @@ class CommandDispatcher:
                     else None
                 ),
                 remote_handle=remote_handle,
+                resume_handle=resume_handle,
+                respond_payload=respond_payload,
+                review_policy=cast(ReviewPolicy, row[5]),
                 observed_terminal_status=(
                     cast(
                         ObservedTerminalStatus | None,
@@ -327,7 +532,11 @@ class CommandDispatcher:
 
         if lease.command_type == "cancel_task":
             return await self._execute_cancel(lease)
-        if lease.product_run_id is None or lease.submission is None:
+        if lease.product_run_id is None:
+            return False
+        if lease.command_type == "submit" and lease.submission is None:
+            return False
+        if lease.command_type == "respond" and lease.respond_payload is None:
             return False
 
         handle = lease.remote_handle
@@ -337,14 +546,34 @@ class CommandDispatcher:
                 handle = authorize(handle, lease.actor)
         if handle is None:
             try:
-                handle = await self._start_with_heartbeat(
-                    lease,
-                    actor=lease.actor,
-                    task_id=str(lease.task_id),
-                    product_thread_id=str(lease.product_thread_id),
-                    product_run_id=str(lease.product_run_id),
-                    submission=lease.submission,
-                )
+                if lease.command_type == "respond":
+                    if lease.resume_handle is None or lease.respond_payload is None:
+                        raise RuntimeError(
+                            "Respond command has no registered interrupted Run"
+                        )
+                    handle = await self._resume_with_heartbeat(
+                        lease,
+                        actor=lease.actor,
+                        handle=lease.resume_handle,
+                        task_id=str(lease.task_id),
+                        product_run_id=str(lease.product_run_id),
+                        response=lease.respond_payload.response.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        ),
+                        checkpoint_id=lease.respond_payload.checkpoint_id,
+                    )
+                else:
+                    assert lease.submission is not None
+                    handle = await self._start_with_heartbeat(
+                        lease,
+                        actor=lease.actor,
+                        task_id=str(lease.task_id),
+                        product_thread_id=str(lease.product_thread_id),
+                        product_run_id=str(lease.product_run_id),
+                        submission=lease.submission,
+                        review_policy=lease.review_policy,
+                    )
             except Exception as exc:
                 await self._record_remote_error(lease, exc)
                 return False
@@ -354,10 +583,6 @@ class CommandDispatcher:
             if registration == "cancel_requested":
                 return True
             if registration == "lost":
-                try:
-                    await self._cancel_remote(handle)
-                except Exception:
-                    pass
                 return False
 
         if lease.observed_terminal_status is not None:
@@ -375,7 +600,12 @@ class CommandDispatcher:
         if remote_state.status in {"pending", "running"}:
             return await self._reconcile_or_timeout(lease, handle)
         if remote_state.status == "interrupted":
-            return await self._mark_waiting_human(lease)
+            try:
+                async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                    interrupts = await self._runner.get_interrupts(handle)
+            except Exception as exc:
+                return await self._schedule_interrupt_projection_retry(lease, exc)
+            return await self._mark_waiting_human(lease, interrupts)
         return await self._project_remote_terminal(
             lease,
             handle,
@@ -769,6 +999,20 @@ class CommandDispatcher:
                     command.lease_owner = None
                     command.lease_expires_at = None
                     return False
+            active_interrupts = list(
+                (
+                    await session.scalars(
+                        select(InterruptProjection)
+                        .where(
+                            InterruptProjection.task_id == lease.task_id,
+                            InterruptProjection.status.in_(("pending", "responding")),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            for interrupt in active_interrupts:
+                interrupt.status = "cancelled"
             task.status = "cancelled"
             task.completed_at = now
             command.status = "dispatched"
@@ -796,6 +1040,22 @@ class CommandDispatcher:
             if not await self._renew_lease(lease):
                 start_task.cancel()
                 await asyncio.gather(start_task, return_exceptions=True)
+                return None
+
+    async def _resume_with_heartbeat(
+        self,
+        lease: CommandLease,
+        **kwargs: object,
+    ) -> RemoteRunHandle | None:
+        resume_task = asyncio.create_task(self._runner.resume(**kwargs))
+        interval = max(1.0, self._lease_seconds / 3)
+        while True:
+            done, _ = await asyncio.wait({resume_task}, timeout=interval)
+            if resume_task in done:
+                return await resume_task
+            if not await self._renew_lease(lease):
+                resume_task.cancel()
+                await asyncio.gather(resume_task, return_exceptions=True)
                 return None
 
     async def _renew_lease(self, lease: CommandLease) -> bool:
@@ -949,8 +1209,36 @@ class CommandDispatcher:
             )
             return True
 
-    async def _mark_waiting_human(self, lease: CommandLease) -> bool:
+    async def _schedule_interrupt_projection_retry(
+        self,
+        lease: CommandLease,
+        exc: Exception,
+    ) -> bool:
+        if lease.fence_token >= self._max_attempts:
+            return await self._finalize(
+                lease,
+                TerminalGraphOutput(
+                    terminal_status="failed",
+                    errors=[
+                        {
+                            "code": "interrupt_projection_unavailable",
+                            "error_type": type(exc).__name__,
+                            "retryable": False,
+                            "attempt": max(1, min(lease.fence_token, 100)),
+                        }
+                    ],
+                ),
+            )
+        return await self._schedule_reconciliation(lease)
+
+    async def _mark_waiting_human(
+        self,
+        lease: CommandLease,
+        interrupts: tuple[RemoteInterrupt, ...],
+    ) -> bool:
         if lease.product_run_id is None:
+            return False
+        if not interrupts:
             return False
         now = self._clock()
         async with self._session_factory() as session, session.begin():
@@ -970,6 +1258,50 @@ class CommandDispatcher:
             )
             if task is None or task.status != "running" or product_run is None:
                 return False
+            await self._resolve_responding_interrupt(session, lease, now)
+            for remote_interrupt in interrupts:
+                projection = await session.scalar(
+                    select(InterruptProjection)
+                    .where(
+                        InterruptProjection.tenant_id == task.tenant_id,
+                        InterruptProjection.workspace_id == task.workspace_id,
+                        InterruptProjection.owner_user_id == task.owner_user_id,
+                        InterruptProjection.task_id == task.id,
+                        InterruptProjection.official_interrupt_id
+                        == remote_interrupt.interrupt_id,
+                        InterruptProjection.checkpoint_id
+                        == remote_interrupt.checkpoint_id,
+                        InterruptProjection.response_version == 1,
+                    )
+                    .with_for_update()
+                )
+                if projection is None:
+                    session.add(
+                        InterruptProjection(
+                            id=uuid4(),
+                            tenant_id=task.tenant_id,
+                            workspace_id=task.workspace_id,
+                            owner_user_id=task.owner_user_id,
+                            task_id=task.id,
+                            run_id=product_run.id,
+                            official_interrupt_id=remote_interrupt.interrupt_id,
+                            namespace=remote_interrupt.namespace,
+                            checkpoint_id=remote_interrupt.checkpoint_id,
+                            response_version=1,
+                            status="pending",
+                            payload=remote_interrupt.value,
+                            expires_at=now
+                            + timedelta(seconds=self._interrupt_ttl_seconds),
+                        )
+                    )
+                    continue
+                if projection.run_id != product_run.id:
+                    raise RuntimeError(
+                        "Official interrupt identity was reused by another Product Run"
+                    )
+                if projection.status == "pending":
+                    projection.namespace = remote_interrupt.namespace
+                    projection.payload = remote_interrupt.value
             task.status = "waiting_human"
             product_run.status = "waiting_human"
             product_run.last_heartbeat_at = now
@@ -977,6 +1309,29 @@ class CommandDispatcher:
             command.lease_owner = None
             command.lease_expires_at = None
             return True
+
+    async def _resolve_responding_interrupt(
+        self,
+        session: AsyncSession,
+        lease: CommandLease,
+        now: datetime,
+    ) -> None:
+        payload = lease.respond_payload
+        if payload is None:
+            return
+        projection = await session.scalar(
+            select(InterruptProjection)
+            .where(
+                InterruptProjection.id == payload.projection_id,
+                InterruptProjection.task_id == lease.task_id,
+            )
+            .with_for_update()
+        )
+        if projection is None:
+            raise RuntimeError("Respond command interrupt projection is missing")
+        if projection.status == "responding":
+            projection.status = "resolved"
+            projection.responded_at = projection.responded_at or now
 
     async def _record_remote_error(self, lease: CommandLease, exc: Exception) -> None:
         if lease.product_run_id is None:
@@ -1004,6 +1359,7 @@ class CommandDispatcher:
             )
             if task is None:
                 return
+            await self._resolve_responding_interrupt(session, lease, now)
             output = {
                 "terminal_status": "failed",
                 "errors": [
@@ -1052,6 +1408,7 @@ class CommandDispatcher:
                 command.lease_owner = None
                 command.lease_expires_at = None
                 return False
+            await self._resolve_responding_interrupt(session, lease, now)
             if product_run.projection_fence > lease.command_sequence:
                 command.status = "cancelled"
                 command.lease_owner = None
@@ -1140,15 +1497,36 @@ class CommandDispatcher:
                 session.add(artifact)
                 await session.flush()
                 artifact_payload = terminal.artifact.model_dump(mode="json")
-                repository = ArtifactRepository(session, lease.actor)
-                await repository.commit_version_and_decision(
+                artifact_version = ArtifactVersion(
+                    id=uuid4(),
+                    tenant_id=artifact.tenant_id,
+                    workspace_id=artifact.workspace_id,
+                    owner_user_id=artifact.owner_user_id,
                     artifact_id=artifact.id,
+                    task_id=artifact.task_id,
                     run_id=product_run.id,
-                    content=artifact_payload,
-                    decision=artifact_payload["analysis"],
-                    evidence_verdict=artifact_payload["evidence_verdict"],
-                    risk_verdict=artifact_payload["risk_verdict"],
+                    version_number=1,
                     schema_version=terminal.artifact.schema_version,
+                    status="committed",
+                    content=artifact_payload,
+                )
+                artifact.latest_version_number = 1
+                session.add(artifact_version)
+                session.add(
+                    Decision(
+                        id=uuid4(),
+                        tenant_id=artifact.tenant_id,
+                        workspace_id=artifact.workspace_id,
+                        owner_user_id=artifact.owner_user_id,
+                        artifact_id=artifact.id,
+                        artifact_version_id=artifact_version.id,
+                        task_id=artifact.task_id,
+                        run_id=product_run.id,
+                        decision_version=1,
+                        decision=artifact_payload["analysis"],
+                        evidence_verdict=artifact_payload["evidence_verdict"],
+                        risk_verdict=artifact_payload["risk_verdict"],
+                    )
                 )
             return True
 
