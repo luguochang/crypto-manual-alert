@@ -322,6 +322,16 @@ class AgentServerRunner:
             "interrupted",
         }:
             raise RuntimeError("Agent Server returned an unknown status")
+        if status == "success":
+            thread_state = await self._client.threads.get_state(
+                handle.thread_id,
+                subgraphs=True,
+                **_authorization_options(handle),
+            )
+            if not isinstance(thread_state, dict):
+                raise RuntimeError("Agent Server returned an invalid Thread state")
+            if _snapshot_has_interrupts(thread_state):
+                return RemoteRunState(status="interrupted")
         return RemoteRunState(status=status)
 
     async def cancel(self, handle: RemoteRunHandle) -> RemoteCancelResult:
@@ -413,6 +423,20 @@ def _collect_remote_interrupts(state: dict[str, Any]) -> tuple[RemoteInterrupt, 
 
     visit(state)
     return tuple(collected.values())
+
+
+def _snapshot_has_interrupts(snapshot: dict[str, Any]) -> bool:
+    if snapshot.get("interrupts"):
+        return True
+    for task in snapshot.get("tasks") or ():
+        if not isinstance(task, dict):
+            continue
+        if task.get("interrupts"):
+            return True
+        task_state = task.get("state")
+        if isinstance(task_state, dict) and _snapshot_has_interrupts(task_state):
+            return True
+    return False
 
 
 def _checkpoint_value(

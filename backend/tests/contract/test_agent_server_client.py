@@ -12,7 +12,14 @@ from crypto_alert_v2.auth.context import ActorContext
 class RecordingThreads:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] | None = None
-        self.state_result: dict[str, Any] = {}
+        self.state_result: dict[str, Any] = {
+            "checkpoint": {
+                "checkpoint_ns": "",
+                "checkpoint_id": "checkpoint-1",
+            },
+            "interrupts": [],
+            "tasks": [],
+        }
         self.get_state_args: tuple[Any, ...] | None = None
         self.get_state_kwargs: dict[str, Any] | None = None
 
@@ -200,6 +207,11 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
     assert client.runs.get_kwargs == {
         "headers": {"authorization": "Bearer token-for-user-1"}
     }
+    assert client.threads.get_state_args == ("thread-1",)
+    assert client.threads.get_state_kwargs == {
+        "subgraphs": True,
+        "headers": {"authorization": "Bearer token-for-user-1"},
+    }
 
     output = await runner.join(handle)
     assert output["terminal_status"] == "failed"
@@ -243,6 +255,32 @@ async def test_runner_rejects_an_unknown_official_run_status() -> None:
                 ),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_runner_normalizes_success_with_pending_interrupt() -> None:
+    client = RecordingClient()
+    client.runs.get_status = "success"
+    client.threads.state_result = {
+        "checkpoint": {
+            "checkpoint_ns": "",
+            "checkpoint_id": "checkpoint-review",
+        },
+        "interrupts": [
+            {
+                "id": "interrupt-review",
+                "value": {"kind": "artifact_review", "schema_version": "1.0"},
+            }
+        ],
+        "tasks": [],
+    }
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    state = await runner.get(_remote_handle())
+
+    assert state.status == "interrupted"
+    assert client.threads.get_state_args == ("thread-1",)
+    assert client.threads.get_state_kwargs == {"subgraphs": True}
 
 
 @pytest.mark.asyncio
