@@ -5,9 +5,10 @@ from uuid import UUID
 import httpx
 import pytest
 
-from crypto_alert_v2.api.app import create_app
+from crypto_alert_v2.api.app import UnavailableProductService, create_app
 from crypto_alert_v2.api.service import (
     IdempotencyConflictError,
+    InterruptResponseConflictError,
     ProductAnalysisService,
     _public_error,
 )
@@ -23,6 +24,10 @@ class FakeProductService:
         self.selected_run_id: UUID | None = None
         self.cancelled_task_id: str | None = None
         self.cancel_idempotency_key: str | None = None
+        self.responded_task_id: str | None = None
+        self.responded_interrupt_id: str | None = None
+        self.interrupt_submission: Any = None
+        self.interrupt_idempotency_key: str | None = None
         self.dispatch_calls = 0
 
     async def create_analysis(
@@ -113,6 +118,50 @@ class FakeProductService:
             "errors": [],
         }
 
+    async def respond_interrupt(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        interrupt_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.responded_task_id = task_id
+        self.responded_interrupt_id = interrupt_id
+        self.interrupt_submission = submission
+        self.interrupt_idempotency_key = idempotency_key
+        if task_id != "task-1" or interrupt_id != "interrupt-1":
+            return None
+        return {
+            "task_id": task_id,
+            "status": "waiting_human",
+            "symbol": "BTC-USDT-SWAP",
+            "horizon": "4h",
+            "created_at": datetime(2026, 7, 13, tzinfo=UTC),
+            "completed_at": None,
+            "artifact": None,
+            "errors": [],
+            "pending_interrupts": [
+                {
+                    "task_id": task_id,
+                    "run_id": "run-1",
+                    "interrupt_id": interrupt_id,
+                    "namespace": "review",
+                    "checkpoint_id": "checkpoint-1",
+                    "response_version": submission.response_version,
+                    "status": "responding",
+                    "payload": {"kind": "artifact_review"},
+                    "response": submission.model_dump(
+                        mode="json",
+                        exclude={"response_version"},
+                        exclude_none=True,
+                    ),
+                    "responded_at": datetime(2026, 7, 13, 0, 1, tzinfo=UTC),
+                }
+            ],
+        }
+
     async def dispatch_task(self, actor: ActorContext, task_id: str) -> None:
         del actor, task_id
         self.dispatch_calls += 1
@@ -159,6 +208,34 @@ class UnprovisionedProductService(FakeProductService):
     ) -> dict[str, Any]:
         del actor, submission, idempotency_key
         raise PermissionError("actor membership was not found")
+
+    async def respond_interrupt(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        interrupt_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del actor, task_id, interrupt_id, submission, idempotency_key
+        raise PermissionError("actor membership was not found")
+
+
+class ConflictingInterruptService(FakeProductService):
+    def __init__(self, error: RuntimeError) -> None:
+        super().__init__()
+        self.error = error
+
+    async def respond_interrupt(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        interrupt_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del actor, task_id, interrupt_id, submission, idempotency_key
+        raise self.error
 
 
 def _development_settings(**overrides: object) -> Settings:
@@ -328,6 +405,199 @@ async def test_cancel_task_persists_a_server_owned_product_command() -> None:
     assert service.cancel_idempotency_key == "cancel-task-1"
     assert service.actor is not None
     assert service.actor.tenant_id == "compose-tenant"
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_forwards_strict_review_and_returns_task_view() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers={"idempotency-key": "respond-interrupt-1"},
+            json={
+                "response_version": 3,
+                "action": "edit",
+                "comment": "Reduce risk before approval.",
+                "edits": {
+                    "main_action": "no_trade",
+                    "max_leverage": 1,
+                },
+            },
+        )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "waiting_human"
+    assert body["pending_interrupts"][0]["status"] == "responding"
+    review = body["pending_interrupts"][0]["response"]
+    assert review["action"] == "edit"
+    assert review["comment"] == "Reduce risk before approval."
+    assert review["edits"]["main_action"] == "no_trade"
+    assert review["edits"]["max_leverage"] == 1
+    assert service.responded_task_id == "task-1"
+    assert service.responded_interrupt_id == "interrupt-1"
+    assert service.interrupt_idempotency_key == "respond-interrupt-1"
+    assert service.interrupt_submission.response_version == 3
+    assert service.interrupt_submission.action == "edit"
+    assert service.actor is not None
+    assert service.actor.tenant_id == "compose-tenant"
+    assert service.actor.workspace_id == "compose-workspace"
+    assert service.actor.user_id == "compose-user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"response_version": 0, "action": "approve"},
+        {"response_version": 1, "action": "edit"},
+        {
+            "response_version": 1,
+            "action": "approve",
+            "edits": {"main_action": "no_trade"},
+        },
+        {"response_version": 1, "action": "reject", "comment": ""},
+        {"response_version": 1, "action": "approve", "unexpected": True},
+        {
+            "response_version": 1,
+            "action": "edit",
+            "edits": {"main_action": "no_trade", "unexpected": True},
+        },
+    ),
+)
+async def test_respond_interrupt_reuses_strict_graph_review_validation(
+    payload: dict[str, Any],
+) -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers={"idempotency-key": "respond-invalid-review"},
+            json=payload,
+        )
+
+    assert response.status_code == 422
+    assert service.actor is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    (
+        {},
+        {"idempotency-key": "contains spaces"},
+        {"idempotency-key": "x" * 256},
+    ),
+)
+async def test_respond_interrupt_requires_an_allowed_idempotency_key(
+    headers: dict[str, str],
+) -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers=headers,
+            json={"response_version": 1, "action": "approve"},
+        )
+
+    assert response.status_code == 422
+    assert service.actor is None
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_returns_404_without_leaking_scope() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/not-visible/respond",
+            headers={"idempotency-key": "respond-not-visible"},
+            json={"response_version": 1, "action": "approve"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task or interrupt not found"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    (
+        (
+            IdempotencyConflictError(
+                "Idempotency-Key was already used with a different interrupt "
+                "response payload."
+            ),
+            "Idempotency-Key was already used with a different interrupt "
+            "response payload.",
+        ),
+        (
+            InterruptResponseConflictError("Interrupt response_version is stale."),
+            "Interrupt response_version is stale.",
+        ),
+    ),
+)
+async def test_respond_interrupt_maps_service_conflicts_to_409(
+    error: RuntimeError,
+    detail: str,
+) -> None:
+    transport = httpx.ASGITransport(
+        app=_development_app(ConflictingInterruptService(error))
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers={"idempotency-key": "respond-conflict"},
+            json={"response_version": 1, "action": "approve"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": detail}
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_returns_503_when_persistence_is_unavailable() -> None:
+    transport = httpx.ASGITransport(app=_development_app(UnavailableProductService()))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers={"idempotency-key": "respond-unavailable"},
+            json={"response_version": 1, "action": "approve"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Product persistence is not configured"}
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_returns_403_for_an_unprovisioned_actor() -> None:
+    transport = httpx.ASGITransport(app=_development_app(UnprovisionedProductService()))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/tasks/task-1/interrupts/interrupt-1/respond",
+            headers={"idempotency-key": "respond-unprovisioned"},
+            json={"response_version": 1, "action": "approve"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Actor is not provisioned for this workspace."}
 
 
 @pytest.mark.asyncio

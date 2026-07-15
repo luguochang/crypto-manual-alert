@@ -9,11 +9,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from crypto_alert_v2.api.schemas import AnalysisSubmission
+from crypto_alert_v2.api.schemas import AnalysisSubmission, InterruptResponseSubmission
 from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.graph.request import ReviewResponse
 from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
+    InterruptProjection,
     Membership,
     Run,
     Task,
@@ -36,6 +38,10 @@ class IdempotencyConflictError(RuntimeError):
 
 
 class TaskNotCancellableError(RuntimeError):
+    pass
+
+
+class InterruptResponseConflictError(RuntimeError):
     pass
 
 
@@ -235,6 +241,14 @@ async def _task_view(
     ).one_or_none()
     latest_run = run_thread[0] if run_thread is not None else None
     official_thread_id = run_thread[1] if run_thread is not None else None
+    effective_status = latest_run.status if latest_run is not None else task.status
+    if (
+        task.status == "waiting_human"
+        and latest_run is not None
+        and latest_run.status == "queued"
+        and latest_run.resume_of_run_id is not None
+    ):
+        effective_status = task.status
     cancel_requested_at = await session.scalar(
         select(TaskCommand.created_at)
         .where(
@@ -295,10 +309,43 @@ async def _task_view(
             "thread_id": official_thread_id,
             "run_id": latest_run.official_run_id,
         }
+    pending_interrupts: list[dict[str, Any]] = []
+    projections = (
+        await session.scalars(
+            select(InterruptProjection)
+            .where(
+                InterruptProjection.task_id == task.id,
+                InterruptProjection.tenant_id == resolved.tenant_id,
+                InterruptProjection.workspace_id == resolved.workspace_id,
+                InterruptProjection.owner_user_id == resolved.user_id,
+                InterruptProjection.status.in_(("pending", "responding")),
+            )
+            .order_by(
+                InterruptProjection.created_at,
+                InterruptProjection.id,
+            )
+        )
+    ).all()
+    pending_interrupts = [
+        {
+            "task_id": str(projection.task_id),
+            "run_id": str(projection.run_id),
+            "interrupt_id": projection.official_interrupt_id,
+            "namespace": projection.namespace,
+            "checkpoint_id": projection.checkpoint_id,
+            "response_version": projection.response_version,
+            "status": projection.status,
+            "payload": projection.payload,
+            "response": projection.response,
+            "expires_at": projection.expires_at,
+            "responded_at": projection.responded_at,
+        }
+        for projection in projections
+    ]
     request_payload = task.request_payload
     return {
         "task_id": str(task.id),
-        "status": latest_run.status if latest_run is not None else task.status,
+        "status": effective_status,
         "symbol": request_payload["symbol"],
         "horizon": request_payload["horizon"],
         "query_text": request_payload.get("query_text"),
@@ -314,6 +361,7 @@ async def _task_view(
             latest_run.output_payload if latest_run is not None else None
         ),
         "agent_stream": agent_stream,
+        "pending_interrupts": pending_interrupts,
     }
 
 
@@ -618,6 +666,201 @@ class ProductAnalysisService:
                     command_type="cancel_task",
                     payload=payload,
                     payload_hash=payload_hash,
+                    sequence=max(
+                        (command.sequence for command in commands),
+                        default=0,
+                    )
+                    + 1,
+                    status="pending",
+                    attempt=0,
+                    idempotency_key=command_idempotency_key,
+                )
+            )
+            await session.flush()
+            return await _task_view(session, resolved, task)
+
+    async def respond_interrupt(
+        self,
+        actor: ActorContext,
+        task_id: str,
+        interrupt_id: str,
+        submission: InterruptResponseSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        try:
+            task_uuid = UUID(task_id)
+        except ValueError:
+            return None
+
+        review_response = ReviewResponse.model_validate(
+            submission.model_dump(exclude={"response_version"})
+        )
+        response = review_response.model_dump(mode="json", exclude_none=True)
+        request_identity = {
+            "task_id": str(task_uuid),
+            "interrupt_id": interrupt_id,
+            "response_version": submission.response_version,
+            "response": response,
+        }
+        request_hash = _payload_hash(request_identity)
+        command_idempotency_key = (
+            "respond:"
+            + sha256(
+                f"{task_uuid}:{interrupt_id}:{idempotency_key}".encode()
+            ).hexdigest()
+        )
+
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(actor, resolved)
+            task = await session.scalar(
+                select(Task)
+                .where(
+                    Task.id == task_uuid,
+                    Task.tenant_id == resolved.tenant_id,
+                    Task.workspace_id == resolved.workspace_id,
+                    Task.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if task is None:
+                return None
+
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(
+                            TaskCommand.task_id == task.id,
+                            TaskCommand.tenant_id == resolved.tenant_id,
+                            TaskCommand.workspace_id == resolved.workspace_id,
+                        )
+                        .order_by(TaskCommand.sequence)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            replay = next(
+                (
+                    command
+                    for command in commands
+                    if command.idempotency_key == command_idempotency_key
+                ),
+                None,
+            )
+            if replay is not None:
+                if replay.payload_hash != request_hash:
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used with a different "
+                        "interrupt response payload."
+                    )
+                return await _task_view(session, resolved, task)
+
+            waiting_run = await session.scalar(
+                select(Run)
+                .where(
+                    Run.task_id == task.id,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                    Run.status == "waiting_human",
+                )
+                .order_by(Run.attempt.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if waiting_run is None or task.status != "waiting_human":
+                raise InterruptResponseConflictError(
+                    "Task is not waiting for this interrupt."
+                )
+
+            projections = list(
+                (
+                    await session.scalars(
+                        select(InterruptProjection)
+                        .where(
+                            InterruptProjection.task_id == task.id,
+                            InterruptProjection.tenant_id == resolved.tenant_id,
+                            InterruptProjection.workspace_id == resolved.workspace_id,
+                            InterruptProjection.owner_user_id == resolved.user_id,
+                            InterruptProjection.official_interrupt_id == interrupt_id,
+                        )
+                        .order_by(
+                            InterruptProjection.response_version.desc(),
+                            InterruptProjection.created_at.desc(),
+                            InterruptProjection.id.desc(),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            if not projections:
+                return None
+            projection = next(
+                (
+                    candidate
+                    for candidate in projections
+                    if candidate.run_id == waiting_run.id
+                ),
+                None,
+            )
+            if projection is None:
+                raise InterruptResponseConflictError(
+                    "Interrupt is stale for the latest waiting run."
+                )
+            if projection.response_version != submission.response_version:
+                raise InterruptResponseConflictError(
+                    "Interrupt response_version is stale."
+                )
+            now = datetime.now(UTC)
+            if projection.status == "expired" or (
+                projection.status == "pending"
+                and projection.expires_at is not None
+                and projection.expires_at <= now
+            ):
+                raise InterruptResponseConflictError(
+                    "Interrupt response window has expired."
+                )
+            if projection.status != "pending":
+                raise InterruptResponseConflictError(
+                    "Interrupt has already been responded to."
+                )
+
+            resume_run = Run(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                thread_id=task.thread_id,
+                task_id=task.id,
+                attempt=waiting_run.attempt + 1,
+                status="queued",
+                input_payload=waiting_run.input_payload,
+                resume_of_run_id=waiting_run.id,
+            )
+            command_payload = {
+                "projection_id": str(projection.id),
+                "interrupt_id": projection.official_interrupt_id,
+                "checkpoint_id": projection.checkpoint_id,
+                "response_version": projection.response_version,
+                "response": response,
+                "expired": False,
+            }
+            projection.status = "responding"
+            projection.response = response
+            projection.responded_at = now
+            session.add(resume_run)
+            session.add(
+                TaskCommand(
+                    id=uuid4(),
+                    tenant_id=resolved.tenant_id,
+                    workspace_id=resolved.workspace_id,
+                    actor_user_id=resolved.user_id,
+                    task_id=task.id,
+                    thread_id=task.thread_id,
+                    command_type="respond",
+                    payload=command_payload,
+                    payload_hash=request_hash,
                     sequence=max(
                         (command.sequence for command in commands),
                         default=0,

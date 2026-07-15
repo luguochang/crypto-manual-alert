@@ -133,6 +133,8 @@ class ScalarSession:
         sql = str(statement)
         if "FROM app.web_evidence" in sql:
             return SimpleNamespace(all=lambda: [])
+        if "FROM app.interrupt_inbox" in sql:
+            return SimpleNamespace(all=lambda: [])
         raise AssertionError(f"unexpected scalars query: {sql}")
 
     async def execute(self, statement: object) -> SimpleNamespace:

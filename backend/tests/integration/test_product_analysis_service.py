@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 import os
 from typing import AsyncIterator
 from uuid import UUID, uuid4
@@ -21,7 +22,7 @@ from crypto_alert_v2.api.agent_server import (
     RemoteRunHandle,
     RemoteRunState,
 )
-from crypto_alert_v2.api.schemas import AnalysisSubmission
+from crypto_alert_v2.api.schemas import AnalysisSubmission, InterruptResponseSubmission
 from crypto_alert_v2.api.service import ProductAnalysisService
 from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.commands.dispatcher import CommandDispatcher
@@ -37,6 +38,7 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     Decision,
+    InterruptProjection,
     MarketSnapshot,
     Run,
     Task,
@@ -68,6 +70,82 @@ def submission(*, query_text: str = "Assess current BTC risk.") -> AnalysisSubmi
         query_text=query_text,
         notify=False,
     )
+
+
+async def seed_waiting_interrupt(
+    session_factory: async_sessionmaker[AsyncSession],
+    service: ProductAnalysisService,
+    actor: ActorContext,
+    *,
+    interrupt_id: str | None = None,
+    response_version: int = 1,
+    status: str = "pending",
+    expires_at: datetime | None = None,
+) -> tuple[dict[str, object], UUID, UUID]:
+    suffix = uuid4().hex
+    queued = await service.create_analysis(
+        actor,
+        submission(),
+        idempotency_key=f"waiting-interrupt-task-{suffix}",
+    )
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session, session.begin():
+        task = await session.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        submit_command = await session.scalar(
+            select(TaskCommand).where(
+                TaskCommand.task_id == task.id,
+                TaskCommand.command_type == "submit",
+            )
+        )
+        assert submit_command is not None
+        submit_command.status = "dispatched"
+        task.status = "waiting_human"
+        waiting_run = Run(
+            id=uuid4(),
+            tenant_id=task.tenant_id,
+            workspace_id=task.workspace_id,
+            owner_user_id=task.owner_user_id,
+            thread_id=task.thread_id,
+            task_id=task.id,
+            attempt=1,
+            status="waiting_human",
+            official_assistant_id="official-assistant-review",
+            official_run_id=f"official-review-run-{suffix}",
+            checkpoint_id=f"checkpoint-{suffix}",
+            input_payload=task.request_payload,
+        )
+        session.add(waiting_run)
+        await session.flush()
+        stored_response = (
+            {"action": "approve", "edits": None, "comment": None}
+            if status in {"responding", "resolved"}
+            else None
+        )
+        projection_values: dict[str, object] = {
+            "id": uuid4(),
+            "tenant_id": task.tenant_id,
+            "workspace_id": task.workspace_id,
+            "owner_user_id": task.owner_user_id,
+            "task_id": task.id,
+            "run_id": waiting_run.id,
+            "official_interrupt_id": interrupt_id or f"interrupt-{suffix}",
+            "namespace": "review",
+            "checkpoint_id": f"checkpoint-{suffix}",
+            "response_version": response_version,
+            "status": status,
+            "payload": {"kind": "artifact_review", "artifact_version": 1},
+            "expires_at": expires_at,
+        }
+        if stored_response is not None:
+            projection_values.update(
+                response=stored_response,
+                responded_at=datetime.now(UTC),
+            )
+        projection = InterruptProjection(**projection_values)
+        session.add(projection)
+        await session.flush()
+        return queued, waiting_run.id, projection.id
 
 
 @pytest_asyncio.fixture
@@ -164,6 +242,483 @@ class SuccessfulRemoteRunner:
             outcome="confirmed",
             state=RemoteRunState(status="interrupted"),
         )
+
+
+@pytest.mark.asyncio
+async def test_interrupt_view_and_response_are_actor_scoped(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="interrupt-scope-tenant",
+        workspace_id="interrupt-scope-workspace",
+        user_id="oidc|interrupt-scope-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    other_actors = (
+        owner.model_copy(update={"user_id": "oidc|interrupt-scope-other-owner"}),
+        owner.model_copy(update={"workspace_id": "interrupt-scope-other-workspace"}),
+        owner.model_copy(update={"tenant_id": "interrupt-scope-other-tenant"}),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(owner)
+    for other_actor in other_actors:
+        await service.bootstrap_actor(other_actor)
+    queued, waiting_run_id, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        owner,
+        interrupt_id="scoped-interrupt",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    owner_view = await service.get_task(owner, str(queued["task_id"]))
+
+    assert owner_view is not None
+    assert owner_view["status"] == "waiting_human"
+    assert owner_view["pending_interrupts"] == [
+        {
+            "task_id": str(queued["task_id"]),
+            "run_id": str(waiting_run_id),
+            "interrupt_id": "scoped-interrupt",
+            "namespace": "review",
+            "checkpoint_id": owner_view["pending_interrupts"][0]["checkpoint_id"],
+            "response_version": 1,
+            "status": "pending",
+            "payload": {"kind": "artifact_review", "artifact_version": 1},
+            "response": None,
+            "expires_at": owner_view["pending_interrupts"][0]["expires_at"],
+            "responded_at": None,
+        }
+    ]
+    review = InterruptResponseSubmission(response_version=1, action="approve")
+    for other_actor in other_actors:
+        assert await service.get_task(other_actor, str(queued["task_id"])) is None
+        assert (
+            await service.respond_interrupt(
+                other_actor,
+                str(queued["task_id"]),
+                "scoped-interrupt",
+                review,
+                f"scoped-response-{other_actor.tenant_id}-{other_actor.workspace_id}",
+            )
+            is None
+        )
+
+    async with session_factory() as session:
+        projection = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.id == projection_id)
+        )
+        respond_count = await session.scalar(
+            select(func.count())
+            .select_from(TaskCommand)
+            .where(
+                TaskCommand.task_id == UUID(str(queued["task_id"])),
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert projection is not None
+    assert projection.status == "pending"
+    assert projection.response is None
+    assert respond_count == 0
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_persists_lineage_command_and_idempotent_view(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="interrupt-success-tenant",
+        workspace_id="interrupt-success-workspace",
+        user_id="oidc|interrupt-success-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, waiting_run_id, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="successful-interrupt",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    review = InterruptResponseSubmission(
+        response_version=1,
+        action="approve",
+        comment="Reviewed and approved.",
+    )
+
+    first = await service.respond_interrupt(
+        actor,
+        str(queued["task_id"]),
+        "successful-interrupt",
+        review,
+        "successful-interrupt-response",
+    )
+    replay = await service.respond_interrupt(
+        actor,
+        str(queued["task_id"]),
+        "successful-interrupt",
+        review,
+        "successful-interrupt-response",
+    )
+
+    assert first is not None
+    assert replay is not None
+    assert first["status"] == "waiting_human"
+    assert replay["status"] == "waiting_human"
+    assert replay["pending_interrupts"] == first["pending_interrupts"]
+    assert first["pending_interrupts"][0]["status"] == "responding"
+    assert first["pending_interrupts"][0]["response"] == {
+        "action": "approve",
+        "comment": "Reviewed and approved.",
+    }
+    assert first["pending_interrupts"][0]["responded_at"] is not None
+
+    with pytest.raises(service_module.IdempotencyConflictError):
+        await service.respond_interrupt(
+            actor,
+            str(queued["task_id"]),
+            "successful-interrupt",
+            InterruptResponseSubmission(response_version=1, action="reject"),
+            "successful-interrupt-response",
+        )
+    with pytest.raises(service_module.InterruptResponseConflictError):
+        await service.respond_interrupt(
+            actor,
+            str(queued["task_id"]),
+            "successful-interrupt",
+            InterruptResponseSubmission(response_version=1, action="reject"),
+            "different-interrupt-response-key",
+        )
+
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        task = await session.scalar(select(Task).where(Task.id == task_id))
+        projection = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.id == projection_id)
+        )
+        runs = list(
+            (
+                await session.scalars(
+                    select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                )
+            ).all()
+        )
+        commands = list(
+            (
+                await session.scalars(
+                    select(TaskCommand)
+                    .where(TaskCommand.task_id == task_id)
+                    .order_by(TaskCommand.sequence)
+                )
+            ).all()
+        )
+    assert task is not None
+    assert task.status == "waiting_human"
+    assert projection is not None
+    assert projection.status == "responding"
+    assert projection.responded_at is not None
+    assert projection.response == {
+        "action": "approve",
+        "comment": "Reviewed and approved.",
+    }
+    assert [run.attempt for run in runs] == [1, 2]
+    assert runs[0].id == waiting_run_id
+    assert runs[0].status == "waiting_human"
+    assert runs[1].status == "queued"
+    assert runs[1].resume_of_run_id == waiting_run_id
+    assert runs[1].input_payload == runs[0].input_payload
+    assert [(command.command_type, command.status) for command in commands] == [
+        ("submit", "dispatched"),
+        ("respond", "pending"),
+    ]
+    assert [command.sequence for command in commands] == [1, 2]
+    assert commands[1].payload == {
+        "projection_id": str(projection_id),
+        "interrupt_id": "successful-interrupt",
+        "checkpoint_id": projection.checkpoint_id,
+        "response_version": 1,
+        "response": projection.response,
+        "expired": False,
+    }
+
+    async with session_factory() as session, session.begin():
+        persisted_task = await session.scalar(select(Task).where(Task.id == task_id))
+        resumed_run = await session.scalar(
+            select(Run).where(Run.task_id == task_id, Run.attempt == 2)
+        )
+        assert persisted_task is not None
+        assert resumed_run is not None
+        persisted_task.status = "running"
+        resumed_run.status = "running"
+
+    running_view = await service.get_task(actor, str(task_id))
+
+    assert running_view is not None
+    assert running_view["status"] == "running"
+    assert running_view["pending_interrupts"][0]["status"] == "responding"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("projection_status", "projection_version", "expires_in_seconds", "message"),
+    (
+        ("pending", 2, 300, "Interrupt response_version is stale."),
+        ("resolved", 1, 300, "Interrupt has already been responded to."),
+        ("expired", 1, -1, "Interrupt response window has expired."),
+        ("pending", 1, -1, "Interrupt response window has expired."),
+    ),
+)
+async def test_respond_interrupt_rejects_stale_resolved_and_expired_projection(
+    connection: AsyncConnection,
+    projection_status: str,
+    projection_version: int,
+    expires_in_seconds: int,
+    message: str,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id=f"interrupt-conflict-{projection_status}-{projection_version}",
+        workspace_id=f"interrupt-conflict-workspace-{expires_in_seconds}",
+        user_id=f"oidc|interrupt-conflict-{uuid4().hex}",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, _, projection_id = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="conflicting-interrupt",
+        response_version=projection_version,
+        status=projection_status,
+        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_seconds),
+    )
+
+    with pytest.raises(service_module.InterruptResponseConflictError) as error:
+        await service.respond_interrupt(
+            actor,
+            str(queued["task_id"]),
+            "conflicting-interrupt",
+            InterruptResponseSubmission(response_version=1, action="approve"),
+            "conflicting-interrupt-response",
+        )
+
+    assert str(error.value) == message
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        projection = await session.scalar(
+            select(InterruptProjection).where(InterruptProjection.id == projection_id)
+        )
+        run_count = await session.scalar(
+            select(func.count()).select_from(Run).where(Run.task_id == task_id)
+        )
+        respond_count = await session.scalar(
+            select(func.count())
+            .select_from(TaskCommand)
+            .where(
+                TaskCommand.task_id == task_id,
+                TaskCommand.command_type == "respond",
+            )
+        )
+    assert projection is not None
+    assert projection.status == projection_status
+    assert run_count == 1
+    assert respond_count == 0
+
+
+@pytest.mark.asyncio
+async def test_respond_interrupt_rejects_projection_from_an_older_waiting_run(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="interrupt-stale-run-tenant",
+        workspace_id="interrupt-stale-run-workspace",
+        user_id="oidc|interrupt-stale-run-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    queued, waiting_run_id, _ = await seed_waiting_interrupt(
+        session_factory,
+        service,
+        actor,
+        interrupt_id="old-run-interrupt",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session, session.begin():
+        first_run = await session.scalar(select(Run).where(Run.id == waiting_run_id))
+        assert first_run is not None
+        session.add(
+            Run(
+                id=uuid4(),
+                tenant_id=first_run.tenant_id,
+                workspace_id=first_run.workspace_id,
+                owner_user_id=first_run.owner_user_id,
+                thread_id=first_run.thread_id,
+                task_id=first_run.task_id,
+                attempt=2,
+                status="waiting_human",
+                official_assistant_id="official-assistant-review",
+                official_run_id=f"newer-waiting-run-{uuid4().hex}",
+                checkpoint_id=f"newer-checkpoint-{uuid4().hex}",
+                input_payload=first_run.input_payload,
+            )
+        )
+
+    with pytest.raises(service_module.InterruptResponseConflictError) as error:
+        await service.respond_interrupt(
+            actor,
+            str(task_id),
+            "old-run-interrupt",
+            InterruptResponseSubmission(response_version=1, action="approve"),
+            "old-run-interrupt-response",
+        )
+
+    assert str(error.value) == "Interrupt is stale for the latest waiting run."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_request", (True, False))
+async def test_concurrent_interrupt_responses_have_one_database_writer(
+    same_request: bool,
+) -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    suffix = uuid4().hex
+    actor = ActorContext(
+        tenant_id=f"concurrent-interrupt-tenant-{suffix}",
+        workspace_id=f"concurrent-interrupt-workspace-{suffix}",
+        user_id=f"oidc|concurrent-interrupt-owner-{suffix}",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    try:
+        await service.bootstrap_actor(actor)
+        queued, waiting_run_id, projection_id = await seed_waiting_interrupt(
+            session_factory,
+            service,
+            actor,
+            interrupt_id=f"concurrent-interrupt-{suffix}",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        first_review = InterruptResponseSubmission(
+            response_version=1,
+            action="approve",
+            comment="First concurrent response.",
+        )
+        second_review = (
+            first_review
+            if same_request
+            else InterruptResponseSubmission(
+                response_version=1,
+                action="reject",
+                comment="Competing concurrent response.",
+            )
+        )
+        first_key = f"concurrent-response-{suffix}"
+        second_key = first_key if same_request else f"competing-response-{suffix}"
+
+        results = await asyncio.gather(
+            service.respond_interrupt(
+                actor,
+                str(queued["task_id"]),
+                f"concurrent-interrupt-{suffix}",
+                first_review,
+                first_key,
+            ),
+            service.respond_interrupt(
+                actor,
+                str(queued["task_id"]),
+                f"concurrent-interrupt-{suffix}",
+                second_review,
+                second_key,
+            ),
+            return_exceptions=True,
+        )
+
+        successes = [result for result in results if isinstance(result, dict)]
+        conflicts = [
+            result
+            for result in results
+            if isinstance(result, service_module.InterruptResponseConflictError)
+        ]
+        if same_request:
+            assert len(successes) == 2
+            assert conflicts == []
+            assert (
+                successes[0]["pending_interrupts"] == successes[1]["pending_interrupts"]
+            )
+        else:
+            assert len(successes) == 1
+            assert len(conflicts) == 1
+        assert all(
+            isinstance(result, (dict, service_module.InterruptResponseConflictError))
+            for result in results
+        )
+
+        task_id = UUID(str(queued["task_id"]))
+        async with session_factory() as session:
+            projection = await session.scalar(
+                select(InterruptProjection).where(
+                    InterruptProjection.id == projection_id
+                )
+            )
+            runs = list(
+                (
+                    await session.scalars(
+                        select(Run).where(Run.task_id == task_id).order_by(Run.attempt)
+                    )
+                ).all()
+            )
+            respond_commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand).where(
+                            TaskCommand.task_id == task_id,
+                            TaskCommand.command_type == "respond",
+                        )
+                    )
+                ).all()
+            )
+        assert projection is not None
+        assert projection.status == "responding"
+        assert projection.responded_at is not None
+        assert [run.attempt for run in runs] == [1, 2]
+        assert runs[1].resume_of_run_id == waiting_run_id
+        assert len(respond_commands) == 1
+    finally:
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                delete(Tenant).where(Tenant.external_id == actor.tenant_id)
+            )
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

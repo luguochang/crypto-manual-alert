@@ -125,6 +125,11 @@ class _TaskViewSession(_RunSourceSession):
         )
         return SimpleNamespace(one_or_none=lambda: joined)
 
+    async def scalars(self, statement: Any) -> _ScalarRows:
+        if "FROM app.interrupt_inbox" in str(statement):
+            return _ScalarRows([])
+        return await super().scalars(statement)
+
 
 def _resolved_actor() -> ResolvedActor:
     return ResolvedActor(

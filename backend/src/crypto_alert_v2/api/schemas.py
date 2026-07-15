@@ -4,6 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from crypto_alert_v2.domain.models import Artifact, MarketSnapshot, Symbol
+from crypto_alert_v2.graph.request import ReviewResponse
 from crypto_alert_v2.providers.search import WebEvidence
 
 
@@ -61,6 +62,10 @@ class PendingInterruptView(BaseModel):
     response: dict[str, Any] | None = None
     expires_at: datetime | None = None
     responded_at: datetime | None = None
+
+
+class InterruptResponseSubmission(ReviewResponse):
+    response_version: int = Field(ge=1)
 
 
 class TaskView(BaseModel):
