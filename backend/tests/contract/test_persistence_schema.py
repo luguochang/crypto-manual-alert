@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -30,13 +31,31 @@ from crypto_alert_v2.persistence.base import Base, PRODUCT_SCHEMA
 from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
+    DataDeletionJob,
+    DataExportJob,
+    DataLifecyclePolicy,
     Decision,
+    DomainEvent,
+    Feedback,
     INTERRUPT_PAUSE_STATUSES,
     INTERRUPT_STATUSES,
     InterruptPause,
     InterruptProjection,
     MarketSnapshot,
     Membership,
+    MonitorCronCommand,
+    MonitorDefinition,
+    MonitorDestination,
+    MonitorTrigger,
+    NOTIFICATION_ATTEMPT_RESULTS,
+    NOTIFICATION_ATTEMPT_TRIGGERS,
+    NOTIFICATION_OUTBOX_STATUSES,
+    NotificationAttempt,
+    NotificationDestination,
+    NotificationOutbox,
+    OBSERVABILITY_DELIVERY_PROVIDERS,
+    OBSERVABILITY_DELIVERY_STATUSES,
+    ObservabilityDelivery,
     OBSERVED_TERMINAL_STATUSES,
     REVIEW_POLICIES,
     Run,
@@ -45,8 +64,11 @@ from crypto_alert_v2.persistence.models import (
     Tenant,
     Thread,
     User,
+    WatchlistItem,
     WebEvidence,
     Workspace,
+    WorkspaceEntitlement,
+    UsageLedgerEntry,
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
@@ -88,7 +110,26 @@ INITIAL_TABLES = {
     "decisions",
     "task_commands",
 }
-EXPECTED_TABLES = INITIAL_TABLES | {"interrupt_inbox", "interrupt_pauses"}
+EXPECTED_TABLES = INITIAL_TABLES | {
+    "feedback",
+    "interrupt_inbox",
+    "interrupt_pauses",
+    "notification_outbox",
+    "notification_attempts",
+    "notification_destinations",
+    "watchlist_items",
+    "observability_deliveries",
+    "domain_events",
+    "workspace_entitlements",
+    "usage_ledger_entries",
+    "monitor_definitions",
+    "monitor_destinations",
+    "monitor_cron_commands",
+    "monitor_triggers",
+    "data_lifecycle_policies",
+    "data_export_jobs",
+    "data_deletion_jobs",
+}
 
 TABLE_MODELS = (
     Tenant,
@@ -103,9 +144,25 @@ TABLE_MODELS = (
     Artifact,
     ArtifactVersion,
     Decision,
+    Feedback,
     TaskCommand,
     InterruptPause,
     InterruptProjection,
+    NotificationOutbox,
+    NotificationAttempt,
+    NotificationDestination,
+    WatchlistItem,
+    ObservabilityDelivery,
+    DomainEvent,
+    WorkspaceEntitlement,
+    UsageLedgerEntry,
+    MonitorDefinition,
+    MonitorDestination,
+    MonitorCronCommand,
+    MonitorTrigger,
+    DataLifecyclePolicy,
+    DataExportJob,
+    DataDeletionJob,
 )
 
 WORKSPACE_SCOPED_TABLES = EXPECTED_TABLES - {"tenants", "users", "workspaces"}
@@ -126,6 +183,17 @@ EXPECTED_JSONB_COLUMNS = {
     ("interrupt_inbox", "payload"),
     ("interrupt_inbox", "response"),
     ("interrupt_pauses", "root_checkpoint_map"),
+    ("notification_outbox", "payload"),
+    ("domain_events", "payload"),
+    ("usage_ledger_entries", "metadata"),
+    ("monitor_definitions", "condition"),
+    ("monitor_definitions", "task_template"),
+    ("monitor_definitions", "quiet_hours"),
+    ("monitor_cron_commands", "payload"),
+    ("data_export_jobs", "manifest"),
+    ("data_export_jobs", "bundle"),
+    ("data_deletion_jobs", "system_status"),
+    ("data_deletion_jobs", "external_deletion_reference"),
 }
 
 RUN_STATUSES = {
@@ -225,6 +293,18 @@ def test_actor_external_identifiers_and_lineage_keys_are_unique() -> None:
     assert frozenset({"workspace_id", "idempotency_key"}) in _unique_column_sets(
         "task_commands"
     )
+    assert frozenset(
+        {"workspace_id", "task_id", "channel", "type", "decision_version"}
+    ) in _unique_column_sets("notification_outbox")
+    assert frozenset({"outbox_id", "attempt_number"}) in _unique_column_sets(
+        "notification_attempts"
+    )
+    assert frozenset({"workspace_id", "idempotency_key"}) in _unique_column_sets(
+        "feedback"
+    )
+    assert frozenset(
+        {"tenant_id", "workspace_id", "owner_user_id", "run_id"}
+    ) in _unique_column_sets("feedback")
 
 
 def test_analysis_admission_is_persisted_and_actor_workspace_unique() -> None:
@@ -601,6 +681,264 @@ def test_interrupt_projection_membership_is_optional_unique_and_bidirectional() 
     assert InterruptProjection.pause.property.uselist is False
 
 
+def test_notification_outbox_has_durable_delivery_and_lease_contracts() -> None:
+    table = NotificationOutbox.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    assert {
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+        "artifact_id",
+        "artifact_version_id",
+        "decision_id",
+        "channel",
+        "type",
+        "decision_version",
+        "payload",
+        "payload_hash",
+        "status",
+        "available_at",
+        "attempt_count",
+        "lease_owner",
+        "lease_expires_at",
+        "fence_token",
+        "delivered_at",
+        "terminal_at",
+        "created_at",
+        "updated_at",
+    } <= set(table.c.keys())
+    assert isinstance(table.c.payload.type, JSONB)
+    assert isinstance(table.c.payload_hash.type, String)
+    assert table.c.payload_hash.type.length == 64
+    assert table.c.payload_hash.nullable is False
+    assert table.c.status.default.arg == "planned"
+    assert str(table.c.status.server_default.arg) == "'planned'"
+    assert table.c.attempt_count.default.arg == 0
+    assert str(table.c.attempt_count.server_default.arg) == "0"
+    assert table.c.fence_token.default.arg == 0
+    assert str(table.c.fence_token.server_default.arg) == "0"
+    assert table.c.lease_owner.nullable is True
+    assert table.c.lease_expires_at.nullable is True
+    assert table.c.delivered_at.nullable is True
+    assert table.c.terminal_at.nullable is True
+
+    status_constraint = constraints["ck_notification_outbox_status"]
+    assert isinstance(status_constraint, CheckConstraint)
+    status_sql = str(status_constraint.sqltext)
+    assert {
+        value for value in NOTIFICATION_OUTBOX_STATUSES if f"'{value}'" in status_sql
+    } == set(NOTIFICATION_OUTBOX_STATUSES)
+    assert "attempt_count BETWEEN 0 AND 5" in str(
+        constraints["ck_notification_outbox_attempt_count"].sqltext
+    )
+    assert "fence_token >= 0" in str(
+        constraints["ck_notification_outbox_fence_token"].sqltext
+    )
+    active_lease_sql = str(constraints["ck_notification_outbox_active_lease"].sqltext)
+    assert "status IN ('leased', 'sending')" in active_lease_sql
+    assert "lease_owner IS NOT NULL" in active_lease_sql
+    assert "lease_expires_at IS NOT NULL" in active_lease_sql
+
+    indexes = _index_column_sets("notification_outbox")
+    assert ("status", "available_at", "created_at") in indexes
+    assert ("status", "lease_expires_at") in indexes
+    assert ("tenant_id", "workspace_id", "task_id") in indexes
+
+
+def test_notification_attempts_form_an_append_only_delivery_audit_ledger() -> None:
+    table = NotificationAttempt.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    assert {
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "outbox_id",
+        "attempt_number",
+        "owner",
+        "fence_token",
+        "trigger",
+        "requested_by",
+        "reason",
+        "delay_seconds",
+        "retry_after_seconds",
+        "cost_units",
+        "result",
+        "provider_receipt",
+        "error_code",
+        "created_at",
+        "finished_at",
+    } <= set(table.c.keys())
+    assert table.c.delay_seconds.default.arg == 0
+    assert str(table.c.delay_seconds.server_default.arg) == "0"
+    assert isinstance(table.c.cost_units.type, Numeric)
+    assert table.c.cost_units.type.precision == 18
+    assert table.c.cost_units.type.scale == 6
+    assert str(table.c.cost_units.server_default.arg) == "0"
+    assert table.c.result.default.arg == "leased"
+    assert str(table.c.result.server_default.arg) == "'leased'"
+    assert table.c.requested_by.nullable is True
+    assert table.c.retry_after_seconds.nullable is True
+    assert table.c.finished_at.nullable is True
+
+    outbox_fk = next(iter(table.c.outbox_id.foreign_keys))
+    assert outbox_fk.target_fullname == f"{PRODUCT_SCHEMA}.notification_outbox.id"
+    assert outbox_fk.ondelete == "CASCADE"
+
+    trigger_sql = str(constraints["ck_notification_attempts_trigger"].sqltext)
+    assert {
+        value for value in NOTIFICATION_ATTEMPT_TRIGGERS if f"'{value}'" in trigger_sql
+    } == set(NOTIFICATION_ATTEMPT_TRIGGERS)
+    result_sql = str(constraints["ck_notification_attempts_result"].sqltext)
+    assert {
+        value for value in NOTIFICATION_ATTEMPT_RESULTS if f"'{value}'" in result_sql
+    } == set(NOTIFICATION_ATTEMPT_RESULTS)
+    assert "attempt_number BETWEEN 1 AND 5" in str(
+        constraints["ck_notification_attempts_attempt_number"].sqltext
+    )
+    assert "fence_token >= 1" in str(
+        constraints["ck_notification_attempts_fence_token"].sqltext
+    )
+    metrics_sql = str(
+        constraints["ck_notification_attempts_nonnegative_metrics"].sqltext
+    )
+    assert "delay_seconds >= 0" in metrics_sql
+    assert "retry_after_seconds IS NULL OR retry_after_seconds >= 0" in metrics_sql
+    assert "cost_units >= 0" in metrics_sql
+    manual_actor_sql = str(constraints["ck_notification_attempts_manual_actor"].sqltext)
+    assert "trigger = 'automatic' AND requested_by IS NULL" in manual_actor_sql
+    assert "trigger = 'manual' AND requested_by IS NOT NULL" in manual_actor_sql
+
+    indexes = _index_column_sets("notification_attempts")
+    assert ("tenant_id", "workspace_id", "task_id", "created_at") in indexes
+    assert ("outbox_id", "created_at") in indexes
+
+
+def test_observability_deliveries_have_scoped_idempotency_and_fenced_state() -> None:
+    table = ObservabilityDelivery.__table__
+    constraints = {constraint.name: constraint for constraint in table.constraints}
+
+    assert {
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+        "provider",
+        "event_type",
+        "event_version",
+        "delivery_key",
+        "correlation_id",
+        "status",
+        "sampled",
+        "skip_reason",
+        "attempt_count",
+        "fence_token",
+        "lease_owner",
+        "lease_expires_at",
+        "next_attempt_at",
+        "verification_deadline",
+        "provider_trace_id",
+        "last_stage",
+        "last_retry_state",
+        "last_error_code",
+        "last_error_type",
+        "last_error_summary",
+        "last_error_at",
+        "verified_at",
+        "terminal_at",
+        "created_at",
+        "updated_at",
+    } <= set(table.c.keys())
+    assert table.c.status.default.arg == "planned"
+    assert str(table.c.status.server_default.arg) == "'planned'"
+    assert table.c.sampled.default.arg is True
+    assert str(table.c.sampled.server_default.arg) == "true"
+    assert table.c.attempt_count.default.arg == 0
+    assert table.c.fence_token.default.arg == 0
+
+    provider_sql = str(constraints["ck_observability_deliveries_provider"].sqltext)
+    assert {
+        value
+        for value in OBSERVABILITY_DELIVERY_PROVIDERS
+        if f"'{value}'" in provider_sql
+    } == set(OBSERVABILITY_DELIVERY_PROVIDERS)
+    status_sql = str(constraints["ck_observability_deliveries_status"].sqltext)
+    assert {
+        value for value in OBSERVABILITY_DELIVERY_STATUSES if f"'{value}'" in status_sql
+    } == set(OBSERVABILITY_DELIVERY_STATUSES)
+    assert "event_version >= 1" in str(
+        constraints["ck_observability_deliveries_event_version"].sqltext
+    )
+    assert "attempt_count >= 0" in str(
+        constraints["ck_observability_deliveries_attempt_count"].sqltext
+    )
+    assert "fence_token >= 0" in str(
+        constraints["ck_observability_deliveries_fence_token"].sqltext
+    )
+    active_lease_sql = str(
+        constraints["ck_observability_deliveries_active_lease"].sqltext
+    )
+    assert "status IN ('leased', 'verifying')" in active_lease_sql
+    assert "lease_owner IS NOT NULL" in active_lease_sql
+    assert "lease_expires_at IS NOT NULL" in active_lease_sql
+    assert "status = 'not_requested'" in str(
+        constraints["ck_observability_deliveries_skip_reason"].sqltext
+    )
+    assert "provider_trace_id IS NOT NULL" in str(
+        constraints["ck_observability_deliveries_verified_receipt"].sqltext
+    )
+
+    unique_sets = _unique_column_sets("observability_deliveries")
+    assert (
+        frozenset(
+            {
+                "tenant_id",
+                "workspace_id",
+                "task_id",
+                "run_id",
+                "provider",
+                "event_type",
+                "event_version",
+            }
+        )
+        in unique_sets
+    )
+    assert frozenset({"tenant_id", "workspace_id", "delivery_key"}) in unique_sets
+    indexes = _index_column_sets("observability_deliveries")
+    assert ("tenant_id", "workspace_id", "task_id", "run_id") in indexes
+    assert ("status", "next_attempt_at", "created_at") in indexes
+    assert ("status", "lease_expires_at") in indexes
+
+    task_scope = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "fk_observability_deliveries_task_scope"
+    )
+    run_scope = next(
+        constraint
+        for constraint in table.constraints
+        if constraint.name == "fk_observability_deliveries_run_scope"
+    )
+    assert tuple(element.parent.name for element in task_scope.elements) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+    )
+    assert tuple(element.parent.name for element in run_scope.elements) == (
+        "tenant_id",
+        "workspace_id",
+        "owner_user_id",
+        "task_id",
+        "run_id",
+    )
+
+
 def test_task_view_exposes_only_typed_pending_interrupts() -> None:
     now = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
     payload = ArtifactReviewPayload(
@@ -746,6 +1084,13 @@ async def test_repository_reads_resolve_actor_scope_inside_the_resource_query(
     assert "app.memberships.tenant_id = app.tenants.id" in sql
     assert "app.memberships.workspace_id = app.workspaces.id" in sql
     assert "app.memberships.user_id = app.users.id" in sql
+    actor_column = (
+        "actor_user_id" if repository_type is TaskCommandRepository else "owner_user_id"
+    )
+    assert (
+        f"app.{repository_type.model.__tablename__}.{actor_column} = app.users.id"
+        in sql
+    )
 
 
 class _MigrationOperations:
@@ -929,6 +1274,70 @@ def _load_run_fork_revision() -> Any:
     assert revision_path.is_file()
     spec = importlib.util.spec_from_file_location(
         "product_run_fork_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_notification_outbox_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT / "alembic" / "versions" / "0010_notification_outbox.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_notification_outbox_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_retry_lineage_revision() -> Any:
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0012_run_retry_lineage.py"
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_retry_lineage_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_feedback_revision() -> Any:
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0013_feedback.py"
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_feedback_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_watchlist_revision() -> Any:
+    revision_path = BACKEND_ROOT / "alembic" / "versions" / "0014_watchlist.py"
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_watchlist_revision", revision_path
+    )
+    assert spec is not None and spec.loader is not None
+    revision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revision)
+    return revision
+
+
+def _load_observability_delivery_revision() -> Any:
+    revision_path = (
+        BACKEND_ROOT / "alembic" / "versions" / "0015_observability_delivery.py"
+    )
+    assert revision_path.is_file()
+    spec = importlib.util.spec_from_file_location(
+        "product_observability_delivery_revision", revision_path
     )
     assert spec is not None and spec.loader is not None
     revision = importlib.util.module_from_spec(spec)
@@ -1191,6 +1600,235 @@ def test_run_fork_revision_compiles_auditable_scoped_lineage() -> None:
     assert "ix_runs_tenant_workspace_fork_source" in upgrade_sql
     assert "DROP COLUMN forked_from_checkpoint_id" in downgrade_sql
     assert "DROP COLUMN forked_from_run_id" in downgrade_sql
+
+
+def _render_notification_outbox_sql(method_name: str) -> str:
+    revision = _load_notification_outbox_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_notification_outbox_revision_compiles_complete_delivery_schema() -> None:
+    revision = _load_notification_outbox_revision()
+
+    assert revision.revision == "0010_notification_outbox"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0009_run_fork_lineage"
+
+    upgrade_sql = _render_notification_outbox_sql("upgrade")
+    downgrade_sql = _render_notification_outbox_sql("downgrade")
+
+    required_upgrade_statements = (
+        "CREATE TABLE app.notification_outbox (",
+        "payload JSONB NOT NULL",
+        "CONSTRAINT uq_notification_outbox_logical_key UNIQUE "
+        "(workspace_id, task_id, channel, type, decision_version)",
+        "CONSTRAINT ck_notification_outbox_active_lease CHECK "
+        "((status IN ('leased', 'sending')) = "
+        "(lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL))",
+        "CREATE INDEX ix_notification_outbox_status_available ON "
+        "app.notification_outbox (status, available_at, created_at);",
+        "CREATE TABLE app.notification_attempts (",
+        "cost_units NUMERIC(18, 6) DEFAULT 0 NOT NULL",
+        "CONSTRAINT fk_notification_attempts_outbox_id_notification_outbox "
+        "FOREIGN KEY(outbox_id) REFERENCES app.notification_outbox (id) "
+        "ON DELETE CASCADE",
+        "CONSTRAINT uq_notification_attempts_outbox_number UNIQUE "
+        "(outbox_id, attempt_number)",
+        "CONSTRAINT ck_notification_attempts_manual_actor CHECK "
+        "((trigger = 'automatic' AND requested_by IS NULL) OR "
+        "(trigger = 'manual' AND requested_by IS NOT NULL))",
+        "CREATE INDEX ix_notification_attempts_outbox_created ON "
+        "app.notification_attempts (outbox_id, created_at);",
+    )
+    for statement in required_upgrade_statements:
+        assert statement in upgrade_sql
+
+    downgrade_statements = (
+        "DROP INDEX app.ix_notification_attempts_outbox_created;",
+        "DROP INDEX app.ix_notification_attempts_scope_task;",
+        "DROP TABLE app.notification_attempts;",
+        "DROP INDEX app.ix_notification_outbox_scope_task;",
+        "DROP INDEX app.ix_notification_outbox_lease_expiry;",
+        "DROP INDEX app.ix_notification_outbox_status_available;",
+        "DROP TABLE app.notification_outbox;",
+    )
+    positions = [downgrade_sql.index(statement) for statement in downgrade_statements]
+    assert positions == sorted(positions)
+
+
+def _render_retry_lineage_sql(method_name: str) -> str:
+    revision = _load_retry_lineage_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_retry_lineage_revision_compiles_scoped_retry_constraints() -> None:
+    revision = _load_retry_lineage_revision()
+
+    assert revision.revision == "0012_run_retry_lineage"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0011_notification_destinations"
+
+    upgrade_sql = _render_retry_lineage_sql("upgrade")
+    downgrade_sql = _render_retry_lineage_sql("downgrade")
+
+    required_upgrade_statements = (
+        "ALTER TABLE app.runs ADD COLUMN retry_of_run_id UUID;",
+        "CONSTRAINT uq_runs_retry_of_run UNIQUE (retry_of_run_id)",
+        "CONSTRAINT fk_runs_retry_scope FOREIGN KEY(tenant_id, workspace_id, "
+        "owner_user_id, task_id, retry_of_run_id) REFERENCES app.runs",
+        "ON DELETE RESTRICT",
+        "CONSTRAINT ck_runs_retry_not_self CHECK (retry_of_run_id IS NULL OR "
+        "retry_of_run_id <> id)",
+        "CREATE INDEX ix_runs_tenant_workspace_retry ON app.runs "
+        "(tenant_id, workspace_id, retry_of_run_id);",
+    )
+    for statement in required_upgrade_statements:
+        assert statement in upgrade_sql
+
+    downgrade_statements = (
+        "DROP INDEX app.ix_runs_tenant_workspace_retry;",
+        "ALTER TABLE app.runs DROP CONSTRAINT ck_runs_retry_not_self;",
+        "ALTER TABLE app.runs DROP CONSTRAINT fk_runs_retry_scope;",
+        "ALTER TABLE app.runs DROP CONSTRAINT uq_runs_retry_of_run;",
+        "ALTER TABLE app.runs DROP COLUMN retry_of_run_id;",
+    )
+    positions = [downgrade_sql.index(statement) for statement in downgrade_statements]
+    assert positions == sorted(positions)
+
+
+def _render_feedback_sql(method_name: str) -> str:
+    revision = _load_feedback_revision()
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    getattr(revision, method_name)()
+    return output.getvalue()
+
+
+def test_feedback_revision_compiles_owner_scoped_idempotent_schema() -> None:
+    revision = _load_feedback_revision()
+
+    assert revision.revision == "0013_feedback"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0012_run_retry_lineage"
+
+    upgrade_sql = _render_feedback_sql("upgrade")
+    downgrade_sql = _render_feedback_sql("downgrade")
+    for statement in (
+        "CREATE TABLE app.feedback (",
+        "rating VARCHAR(16) NOT NULL",
+        "CONSTRAINT ck_feedback_rating CHECK (rating IN ('positive', 'negative'))",
+        "CONSTRAINT uq_feedback_workspace_idempotency UNIQUE "
+        "(workspace_id, idempotency_key)",
+        "CONSTRAINT uq_feedback_owner_run UNIQUE "
+        "(tenant_id, workspace_id, owner_user_id, run_id)",
+        "CREATE INDEX ix_feedback_tenant_workspace_run ON app.feedback "
+        "(tenant_id, workspace_id, run_id);",
+    ):
+        assert statement in upgrade_sql
+    assert "DROP INDEX app.ix_feedback_tenant_workspace_run;" in downgrade_sql
+    assert "DROP TABLE app.feedback;" in downgrade_sql
+
+
+def test_watchlist_revision_compiles_owner_scoped_symbol_schema() -> None:
+    revision = _load_watchlist_revision()
+
+    assert revision.revision == "0014_watchlist"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0013_feedback"
+
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    revision.upgrade()
+    upgrade_sql = output.getvalue()
+
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    revision.downgrade()
+    downgrade_sql = output.getvalue()
+
+    for statement in (
+        "CREATE TABLE app.watchlist_items (",
+        "symbol VARCHAR(64) NOT NULL",
+        "CONSTRAINT uq_watchlist_owner_symbol UNIQUE "
+        "(tenant_id, workspace_id, owner_user_id, symbol)",
+        "CREATE INDEX ix_watchlist_tenant_workspace_owner ON app.watchlist_items "
+        "(tenant_id, workspace_id, owner_user_id);",
+    ):
+        assert statement in upgrade_sql
+    assert "DROP INDEX app.ix_watchlist_tenant_workspace_owner;" in downgrade_sql
+    assert "DROP TABLE app.watchlist_items;" in downgrade_sql
+
+
+def test_observability_delivery_revision_compiles_durable_scoped_ledger() -> None:
+    revision = _load_observability_delivery_revision()
+
+    assert revision.revision == "0015_observability_delivery"
+    assert len(revision.revision) <= 32
+    assert revision.down_revision == "0014_watchlist"
+
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    revision.upgrade()
+    upgrade_sql = output.getvalue()
+
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    revision.op = Operations(context)
+    revision.downgrade()
+    downgrade_sql = output.getvalue()
+
+    for statement in (
+        "CREATE TABLE app.observability_deliveries (",
+        "correlation_id VARCHAR(255) NOT NULL",
+        "verification_deadline TIMESTAMP WITH TIME ZONE",
+        "CONSTRAINT uq_observability_deliveries_logical_key UNIQUE "
+        "(tenant_id, workspace_id, task_id, run_id, provider, event_type, "
+        "event_version)",
+        "CONSTRAINT fk_observability_deliveries_task_scope FOREIGN KEY(tenant_id, "
+        "workspace_id, owner_user_id, task_id) REFERENCES app.tasks",
+        "CONSTRAINT fk_observability_deliveries_run_scope FOREIGN KEY(tenant_id, "
+        "workspace_id, owner_user_id, task_id, run_id) REFERENCES app.runs",
+        "CREATE INDEX ix_observability_deliveries_due ON "
+        "app.observability_deliveries (status, next_attempt_at, created_at);",
+    ):
+        assert statement in upgrade_sql
+    assert (
+        "DROP INDEX app.ix_observability_deliveries_provider_status;" in downgrade_sql
+    )
+    assert "DROP TABLE app.observability_deliveries;" in downgrade_sql
 
 
 def _render_interrupt_projection_sql(method_name: str) -> str:

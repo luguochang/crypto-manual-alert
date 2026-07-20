@@ -43,12 +43,16 @@ def _development_app(service: object) -> object:
 
 
 class AgentStreamProductService:
+    def __init__(self) -> None:
+        self.create_calls = 0
+
     async def create_analysis(
         self,
         actor: ActorContext,
         submission: Any,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        self.create_calls += 1
         del actor, idempotency_key
         return {
             "task_id": "task-1",
@@ -141,7 +145,10 @@ class ScalarSession:
 
     async def execute(self, statement: object) -> SimpleNamespace:
         self.execute_statements.append(statement)
-        return SimpleNamespace(one_or_none=lambda: self.joined_run_thread)
+        return SimpleNamespace(
+            all=lambda: [],
+            one_or_none=lambda: self.joined_run_thread,
+        )
 
 
 def _task() -> SimpleNamespace:
@@ -171,7 +178,8 @@ def _resolved_actor(task: SimpleNamespace) -> ResolvedActor:
 
 @pytest.mark.asyncio
 async def test_queued_submission_does_not_accept_client_agent_stream() -> None:
-    transport = httpx.ASGITransport(app=_development_app(AgentStreamProductService()))
+    service = AgentStreamProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
     async with httpx.AsyncClient(
         transport=transport, base_url="http://127.0.0.1:8011"
     ) as client:
@@ -192,8 +200,8 @@ async def test_queued_submission_does_not_accept_client_agent_stream() -> None:
             },
         )
 
-    assert response.status_code == 202
-    assert response.json()["agent_stream"] is None
+    assert response.status_code == 422
+    assert service.create_calls == 0
 
 
 @pytest.mark.asyncio
@@ -277,6 +285,8 @@ async def test_service_uses_persisted_official_ids_for_agent_stream(
         output_payload=None,
         official_assistant_id="persisted-assistant",
         official_run_id="official-run-latest",
+        official_stream_last_event_id=None,
+        official_stream_last_event_at=None,
     )
     session = ScalarSession(
         task=task,
@@ -312,11 +322,26 @@ async def test_service_uses_persisted_official_ids_for_agent_stream(
         "thread_id": "official-thread-persisted",
         "run_id": "official-run-latest",
     }
-    assert len(session.execute_statements) == 1
+    assert len(session.execute_statements) == 5
     run_thread_query = str(session.execute_statements[0])
+    cancel_query = next(
+        str(statement)
+        for statement in session.execute_statements
+        if "app.task_commands" in str(statement)
+    )
+    stage_history_query = next(
+        str(statement)
+        for statement in session.execute_statements
+        if "app.domain_events" in str(statement)
+    )
+    observability_query = next(
+        str(statement)
+        for statement in session.execute_statements
+        if "app.observability_deliveries" in str(statement)
+    )
     artifact_query = next(
         str(statement)
-        for statement in session.scalar_statements
+        for statement in session.execute_statements
         if "app.artifact_versions" in str(statement)
     )
     assert "JOIN app.threads ON" in run_thread_query
@@ -327,7 +352,18 @@ async def test_service_uses_persisted_official_ids_for_agent_stream(
     assert ".workspace_id = app.threads.workspace_id" in run_thread_query
     assert ".owner_user_id = app.threads.owner_user_id" in run_thread_query
     assert "app.threads.id = :id_1" in run_thread_query
+    assert "app.task_commands.task_id = :task_id_1" in cancel_query
+    assert "app.task_commands.actor_user_id = :actor_user_id_1" in cancel_query
+    assert "app.task_commands.status IN" in cancel_query
+    assert "app.domain_events.payload" not in stage_history_query
+    assert "app.domain_events.run_id = :run_id_1" in stage_history_query
     assert "app.artifacts.owner_user_id = :owner_user_id_1" in artifact_query
+    assert "app.observability_deliveries.task_id = :task_id_1" in observability_query
+    assert "app.observability_deliveries.run_id = :run_id_1" in observability_query
+    assert (
+        "app.observability_deliveries.owner_user_id = :owner_user_id_1"
+        in observability_query
+    )
 
 
 @pytest.mark.asyncio
@@ -353,6 +389,8 @@ async def test_service_requires_all_persisted_official_ids_for_agent_stream(
         output_payload=None,
         official_assistant_id=official_assistant_id,
         official_run_id=official_run_id,
+        official_stream_last_event_id=None,
+        official_stream_last_event_at=None,
     )
     session = ScalarSession(
         task=task,
@@ -420,4 +458,5 @@ def test_default_app_does_not_inject_current_agent_assistant_id(
     assert captured == {
         "session_factory": "session-factory",
         "inbox_cursor_key": None,
+        "notification_credential_cipher": None,
     }

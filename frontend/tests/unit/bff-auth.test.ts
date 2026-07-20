@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import {
+  developmentBootstrapAuthorization,
+  developmentBootstrapIdentityAuthorization,
   resolveIdentityAuthorization,
   resolveInternalAuthorization,
 } from "../../src/lib/auth/bff-auth";
@@ -26,6 +28,8 @@ describe("BFF session boundary", () => {
     delete process.env.DEVELOPMENT_BOOTSTRAP_ENABLED;
     delete process.env.DEVELOPMENT_BOOTSTRAP_PROFILE;
     delete process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT;
+    delete process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER;
+    delete process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_TENANT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_ROLES;
@@ -226,6 +230,56 @@ describe("BFF session boundary", () => {
       aud: "crypto-alert-identity-discovery",
     });
     expect(payload).not.toHaveProperty("context_id");
+  });
+
+  it("issues a server-owned identity token for local Compose bootstrap only", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.APP_ENVIRONMENT = "development";
+    process.env.DEVELOPMENT_BOOTSTRAP_ENABLED = "true";
+    process.env.DEVELOPMENT_BOOTSTRAP_PROFILE = "local-proof";
+    process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT = "dev-user";
+    process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER = "crypto-alert-v2-compose";
+    process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    process.env.INTERNAL_JWT_KID = "compose-ephemeral";
+    process.env.INTERNAL_JWT_ISSUER = "crypto-alert-v2-compose";
+
+    const authorization = developmentBootstrapIdentityAuthorization();
+
+    expect(authorization).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
+    expect(decodePayload(authorization ?? "")).toMatchObject({
+      sub: "dev-user",
+      identity_issuer: "crypto-alert-v2-compose",
+      aud: "crypto-alert-identity-discovery",
+      token_use: "identity_discovery",
+    });
+    expect(decodePayload(authorization ?? "")).not.toHaveProperty("context_id");
+  });
+
+  it("issues a scoped bootstrap token only with a valid selected context", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.APP_ENVIRONMENT = "development";
+    process.env.DEVELOPMENT_BOOTSTRAP_ENABLED = "true";
+    process.env.DEVELOPMENT_BOOTSTRAP_PROFILE = "local-proof";
+    process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT = "dev-user";
+    process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER = "crypto-alert-v2-compose";
+    process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID = "99999999-9999-4999-8999-999999999999";
+    process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    process.env.INTERNAL_JWT_KID = "compose-ephemeral";
+    process.env.INTERNAL_JWT_ISSUER = "crypto-alert-v2-compose";
+
+    const authorization = developmentBootstrapAuthorization("crypto-alert-agent-server");
+
+    expect(decodePayload(authorization ?? "")).toMatchObject({
+      sub: "dev-user",
+      identity_issuer: "crypto-alert-v2-compose",
+      context_id: "99999999-9999-4999-8999-999999999999",
+      aud: "crypto-alert-agent-server",
+      token_use: "user",
+    });
   });
 
   it.each(["staging", "production"])(

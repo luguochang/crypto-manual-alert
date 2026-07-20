@@ -6,12 +6,14 @@ from crypto_alert_v2.auth.agent_healthcheck import (
     validate_product_health_payload,
     validate_search_readiness_payload,
 )
+from crypto_alert_v2.providers.capability_probe import SearchProvider
 
 
-def _payload() -> dict[str, object]:
+def _payload(provider: SearchProvider = SearchProvider.TAVILY) -> dict[str, object]:
+    builtin = provider is SearchProvider.BUILTIN
     return {
         "status": "ready",
-        "selected_provider": "tavily",
+        "selected_provider": provider.value,
         "probed_at": datetime(2026, 7, 14, 9, 0, tzinfo=UTC).isoformat(),
         "model": "capability-test",
         "endpoint": "https://model.example",
@@ -20,20 +22,37 @@ def _payload() -> dict[str, object]:
             "structured_output": True,
             "streaming": True,
             "usage_reporting": True,
-            "builtin_web_search_invoked": False,
-            "builtin_web_search_citation_count": 0,
+            "builtin_web_search_invoked": builtin,
+            "builtin_web_search_citation_count": 1 if builtin else 0,
             "failures": [],
         },
-        "tavily_configured": True,
-        "tavily_connected": True,
+        "tavily_configured": not builtin,
+        "tavily_connected": not builtin,
     }
 
 
-def test_healthcheck_accepts_only_ready_sanitized_selection() -> None:
-    readiness = validate_search_readiness_payload(_payload())
+@pytest.mark.parametrize(
+    "configured_provider",
+    [SearchProvider.BUILTIN, SearchProvider.TAVILY],
+)
+def test_healthcheck_accepts_effective_provider_matching_configuration(
+    configured_provider: SearchProvider,
+) -> None:
+    readiness = validate_search_readiness_payload(
+        _payload(configured_provider),
+        expected_provider=configured_provider,
+    )
 
     assert readiness.status == "ready"
-    assert readiness.selected_provider == "tavily"
+    assert readiness.selected_provider is configured_provider
+
+
+def test_healthcheck_rejects_ready_selection_from_a_different_provider() -> None:
+    with pytest.raises(RuntimeError, match="sanitized search readiness"):
+        validate_search_readiness_payload(
+            _payload(),
+            expected_provider=SearchProvider.BUILTIN,
+        )
 
 
 @pytest.mark.parametrize(

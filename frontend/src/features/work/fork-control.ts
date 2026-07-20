@@ -5,6 +5,7 @@ import {
   type ProductRunSummary,
   type ProductTask,
 } from "@/lib/schemas/product-api";
+import { stableFingerprint } from "@/lib/stable-fingerprint";
 
 export type ForkContext = {
   taskId: string;
@@ -86,7 +87,7 @@ export function resolveForkRequestIdentity(
   previous: ForkRequestIdentity | null,
   createIdempotencyKey: () => string = () => crypto.randomUUID(),
 ): ForkRequestIdentity {
-  const fingerprint = JSON.stringify(forkSubmissionSchema.parse(input));
+  const fingerprint = stableFingerprint(forkSubmissionSchema.parse(input));
   return previous?.fingerprint === fingerprint
     ? previous
     : { fingerprint, idempotencyKey: createIdempotencyKey() };

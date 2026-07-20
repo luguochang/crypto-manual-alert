@@ -46,10 +46,13 @@ describe("authenticated runtime proxy", () => {
 
   it("covers every authenticated product page", () => {
     expect(config.matcher).toEqual([
+      "/home/:path*",
       "/work/:path*",
       "/runs/:path*",
       "/inbox/:path*",
       "/library/:path*",
+      "/artifacts/:path*",
+      "/monitors/:path*",
       "/settings/:path*",
     ]);
   });

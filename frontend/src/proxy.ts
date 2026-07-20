@@ -46,5 +46,14 @@ function canonicalFrontendOrigin(): URL | null {
 }
 
 export const config = {
-  matcher: ["/work/:path*", "/runs/:path*", "/inbox/:path*", "/library/:path*", "/settings/:path*"],
+  matcher: [
+    "/home/:path*",
+    "/work/:path*",
+    "/runs/:path*",
+    "/inbox/:path*",
+    "/library/:path*",
+    "/artifacts/:path*",
+    "/monitors/:path*",
+    "/settings/:path*",
+  ],
 };

@@ -6,11 +6,17 @@ import {
   inboxItemSchema,
   inboxQueryStatusSchema,
   interruptResponseSchema,
+  notificationListSchema,
   productRunListSchema,
   productTaskSchema,
   respondAllInterruptsSchema,
+  runDetailSchema,
   runStatusSchema,
+  taskCompletionScopeSchema,
+  taskStageHistorySchema,
 } from "../../src/lib/schemas/product-api";
+
+const correlationId = "66666666-6666-5666-8666-666666666666";
 
 const allStatuses = [
   "queued",
@@ -49,6 +55,61 @@ describe("Product API schemas", () => {
     expect(() => productRunListSchema.parse({
       items: [{ ...parsed.items[0], browser_owned_actor: "attacker" }],
       limit: 25,
+    })).toThrow();
+  });
+
+  it("rejects incoherent notification ledgers and manual resend state", () => {
+    const notification = {
+      notification_id: "77777777-7777-4777-8777-777777777777",
+      task_id: "22222222-2222-4222-8222-222222222222",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      artifact_id: "44444444-4444-4444-8444-444444444444",
+      artifact_version_id: "55555555-5555-4555-8555-555555555555",
+      decision_id: "66666666-6666-4666-8666-666666666666",
+      decision_version: 1,
+      channel: "bark",
+      type: "analysis_completed",
+      status: "unknown",
+      attempt_count: 1,
+      manual_resend_pending: false,
+      manual_resend_available: true,
+      manual_resend_requested_at: null,
+      available_at: "2026-07-16T08:00:00Z",
+      delivered_at: null,
+      terminal_at: "2026-07-16T08:02:00Z",
+      created_at: "2026-07-16T08:00:00Z",
+      updated_at: "2026-07-16T08:02:00Z",
+      attempts: [{
+        attempt_id: "88888888-8888-4888-8888-888888888888",
+        attempt_number: 1,
+        trigger: "automatic",
+        result: "unknown",
+        reason: "delivery_outcome_uncertain",
+        delay_seconds: 0,
+        retry_after_seconds: null,
+        cost_units: "0.000000",
+        provider_receipt: null,
+        error_code: "delivery_outcome_uncertain",
+        created_at: "2026-07-16T08:01:00Z",
+        finished_at: "2026-07-16T08:02:00Z",
+      }],
+    };
+
+    expect(notificationListSchema.parse({
+      task_id: notification.task_id,
+      items: [notification],
+    }).items[0]?.status).toBe("unknown");
+    expect(() => notificationListSchema.parse({
+      task_id: notification.task_id,
+      items: [{ ...notification, attempt_count: 2 }],
+    })).toThrow();
+    expect(() => notificationListSchema.parse({
+      task_id: notification.task_id,
+      items: [{
+        ...notification,
+        manual_resend_pending: true,
+        manual_resend_requested_at: null,
+      }],
     })).toThrow();
   });
 
@@ -99,6 +160,38 @@ describe("Product API schemas", () => {
     expect(runStatusSchema.parse(status)).toBe(status);
   });
 
+  it("defaults legacy completion payloads to disabled observability", () => {
+    expect(productTaskSchema.parse(taskProjection("running")).completion_scope).toEqual({
+      analysis: "pending",
+      notification: "not_requested",
+      observability: "not_enabled",
+    });
+
+    expect(taskCompletionScopeSchema.parse({
+      analysis: "complete",
+      notification: "complete",
+    }).observability).toBe("not_enabled");
+  });
+
+  it.each(["not_enabled", "pending", "degraded", "complete"] as const)(
+    "accepts the %s observability completion status",
+    (status) => {
+      expect(taskCompletionScopeSchema.parse({
+        analysis: "complete",
+        notification: "not_requested",
+        observability: status,
+      }).observability).toBe(status);
+    },
+  );
+
+  it("rejects an unknown observability completion status", () => {
+    expect(() => taskCompletionScopeSchema.parse({
+      analysis: "complete",
+      notification: "not_requested",
+      observability: "verified",
+    })).toThrow();
+  });
+
   it("persists a pending cancellation timestamp in the task projection", () => {
     const pending = productTaskSchema.parse({
       ...taskProjection("running"),
@@ -146,6 +239,53 @@ describe("Product API schemas", () => {
     })).toThrow();
   });
 
+  it("strictly parses durable stage history without accepting event payloads", () => {
+    const history = durableStageHistory();
+
+    expect(taskStageHistorySchema.parse(history)).toEqual(history);
+    expect(productTaskSchema.parse({
+      ...taskProjection("running"),
+      stage_history: history,
+    }).stage_history).toEqual(history);
+    expect(productTaskSchema.parse(taskProjection("queued")).stage_history).toBeNull();
+
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      stages: [{
+        ...history.stages[0],
+        payload: { provider_response: "must-not-cross-the-Product-API" },
+      }],
+      product_event_cursor: 1,
+    })).toThrow();
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      raw_event_cursor: "private-event-id",
+    })).toThrow();
+  });
+
+  it("rejects incoherent durable stage sequences and cursor pairs", () => {
+    const history = durableStageHistory();
+
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      stages: [history.stages[1], history.stages[0]],
+      product_event_cursor: 1,
+    })).toThrow();
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      stages: [history.stages[0], { ...history.stages[1], sequence: 1 }],
+      product_event_cursor: 1,
+    })).toThrow();
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      product_event_cursor: 1,
+    })).toThrow();
+    expect(() => taskStageHistorySchema.parse({
+      ...history,
+      official_stream_cursor_at: null,
+    })).toThrow();
+  });
+
   it("normalizes a successful Product artifact into typed numeric fields", () => {
     const parsed = productTaskSchema.parse(successTask());
 
@@ -157,6 +297,55 @@ describe("Product API schemas", () => {
       "https://example.com/market/btc",
       "https://example.com/macro/fed",
     ]);
+  });
+
+  it("strictly parses non-sensitive model execution audits in artifact provenance", () => {
+    const task = successTask();
+    const provenance = {
+      market_provider: "okx",
+      search_provider: "builtin_web_search",
+      search_parser_version: "openai-responses-citation-v1",
+      model_provider: "openai-compatible",
+      model_name: "gpt-5.5",
+      model_endpoint_host: "model.example",
+      model_audits: [{
+        prompt_version: "market-analysis-v1",
+        call_count: 1,
+        input_tokens: 100,
+        output_tokens: 20,
+        total_tokens: 120,
+        latency_ms: 500,
+        observation_ids: ["resp_123"],
+      }],
+    };
+    Object.assign(task.artifact, { provenance });
+
+    const parsed = productTaskSchema.parse(task);
+
+    expect(parsed.artifact?.provenance?.model_audits[0]).toMatchObject({
+      prompt_version: "market-analysis-v1",
+      total_tokens: 120,
+      observation_ids: ["resp_123"],
+    });
+    expect(() => productTaskSchema.parse({
+      ...task,
+      artifact: {
+        ...task.artifact,
+        provenance: {
+          ...provenance,
+          model_audits: [{
+            prompt_version: "market-analysis-v1",
+            call_count: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            total_tokens: 120,
+            latency_ms: 500,
+            observation_ids: [],
+            prompt: "secret payload must not cross the BFF",
+          }],
+        },
+      },
+    })).toThrow();
   });
 
   it("strictly parses typed market and Web evidence projections without raw provider payloads", () => {
@@ -197,6 +386,31 @@ describe("Product API schemas", () => {
     expect(() => productTaskSchema.parse(rawSnapshot)).toThrow();
   });
 
+  it("normalizes finite scientific notation emitted by Decimal market fields", () => {
+    const task = successTask();
+    const research = researchProjection();
+    research.market_snapshot.funding_rate = "3.399075660E-7";
+    Object.assign(task, research);
+
+    expect(productTaskSchema.parse(task).market_snapshot?.funding_rate).toBe(
+      3.39907566e-7,
+    );
+
+    for (const invalid of ["NaN", "Infinity", "0x10", "1e"]) {
+      research.market_snapshot.funding_rate = invalid;
+      expect(() => productTaskSchema.parse({ ...task, ...research })).toThrow();
+    }
+  });
+
+  it("accepts the cited Web Search market fallback source level", () => {
+    const task = successTask();
+    const research = researchProjection();
+    research.market_snapshot.source_level = "web_search_verified";
+    Object.assign(task, research);
+
+    expect(productTaskSchema.parse(task).market_snapshot?.source_level).toBe("web_search_verified");
+  });
+
   it("defaults absent research projections for tasks created before typed evidence was added", () => {
     const parsed = productTaskSchema.parse(taskProjection("running"));
 
@@ -211,9 +425,13 @@ describe("Product API schemas", () => {
         code: "research_unavailable",
         message: "检索服务没有返回可验证来源，当前未生成分析结果。",
         retryable: true,
+        correlation_id: correlationId,
         provider: "builtin_web_search",
         error_type: "UnverifiedServerToolCall",
         attempt: 3,
+        endpoint: "responses.create",
+        fallback_from: "okx",
+        primary_attempt: 2,
       }],
     };
 
@@ -222,6 +440,27 @@ describe("Product API schemas", () => {
       ...task,
       errors: [{ ...task.errors[0], raw_response: "must-not-cross-the-BFF" }],
     })).toThrow();
+    expect(() => productTaskSchema.parse({
+      ...task,
+      errors: [{
+        ...task.errors[0],
+        correlation_id: "77777777-7777-5777-8777-777777777777",
+      }],
+    })).toThrow();
+    for (const unsafeDiagnostics of [
+      { endpoint: "https://provider.example/private?token=secret" },
+      { endpoint: "x".repeat(129) },
+      { fallback_from: "okx/provider" },
+      { fallback_from: "x".repeat(65) },
+      { primary_attempt: 0 },
+      { primary_attempt: 101 },
+      { primary_attempt: 1.5 },
+    ]) {
+      expect(() => productTaskSchema.parse({
+        ...task,
+        errors: [{ ...task.errors[0], ...unsafeDiagnostics }],
+      })).toThrow();
+    }
   });
 
   it.each([
@@ -479,6 +718,73 @@ describe("Product API schemas", () => {
     expect(productTaskSchema.parse(responding).status).toBe("waiting_human");
   });
 
+  it("accepts a resolved waiting boundary only for an explicit historical Run projection", () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const historical = waitingHumanTask("pending");
+    historical.pending_interrupts = null as never;
+    Object.assign(historical, {
+      projection_scope: {
+        mode: "selected_run",
+        selected_run_id: runId,
+      },
+    });
+
+    expect(productTaskSchema.parse(historical).projection_scope).toEqual({
+      mode: "selected_run",
+      selected_run_id: runId,
+    });
+    expect(() => productTaskSchema.parse({
+      ...historical,
+      projection_scope: { mode: "selected_run", selected_run_id: null },
+    })).toThrow();
+    expect(() => productTaskSchema.parse({
+      ...historical,
+      projection_scope: { mode: "latest", selected_run_id: runId },
+    })).toThrow();
+  });
+
+  it("keeps current Task authority separate from a historical waiting Run projection", () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const taskId = "22222222-2222-4222-8222-222222222222";
+    const current = {
+      ...successTask(),
+      task_id: taskId,
+      projection_scope: { mode: "latest", selected_run_id: null },
+    };
+    const historical = waitingHumanTask("pending");
+    historical.task_id = taskId;
+    historical.pending_interrupts = null as never;
+    Object.assign(historical, {
+      projection_scope: {
+        mode: "selected_run",
+        selected_run_id: runId,
+      },
+    });
+
+    const detail = runDetailSchema.parse({
+      run: {
+        run_id: runId,
+        task_id: taskId,
+        attempt: 1,
+        status: "waiting_human",
+        symbol: "BTC-USDT-SWAP",
+        horizon: "4h",
+        created_at: "2026-07-15T10:00:00Z",
+        finished_at: null,
+        main_action: null,
+      },
+      task: current,
+      run_projection: historical,
+      is_current_run: false,
+      feedback: null,
+    });
+
+    expect(detail.run.status).toBe("waiting_human");
+    expect(detail.task.status).toBe("succeeded");
+    expect(detail.run_projection.status).toBe("waiting_human");
+    expect(detail.run_projection.pending_interrupts).toBeNull();
+  });
+
   it("strictly validates approve, reject, and controlled edit submissions", () => {
     expect(interruptResponseSchema.parse({
       action: "approve",
@@ -621,6 +927,7 @@ describe("Product API schemas", () => {
 function successTask() {
   return {
     task_id: "task-success",
+    correlation_id: correlationId,
     status: "succeeded",
     symbol: "BTC-USDT-SWAP",
     horizon: "4h",
@@ -737,9 +1044,35 @@ function aggregateInboxItem(
   };
 }
 
+function durableStageHistory() {
+  return {
+    run_id: "11111111-1111-4111-8111-111111111111",
+    stages: [
+      {
+        sequence: 1,
+        stage: "market_snapshot",
+        status: "committed",
+        recorded_at: "2026-07-18T10:00:01+08:00",
+        source: "official_stream",
+      },
+      {
+        sequence: 2,
+        stage: "web_evidence",
+        status: "committed",
+        recorded_at: "2026-07-18T10:00:02+08:00",
+        source: "product_projection",
+      },
+    ],
+    product_event_cursor: 2,
+    official_stream_cursor: "opaque-stream-event-2",
+    official_stream_cursor_at: "2026-07-18T10:00:02+08:00",
+  } as const;
+}
+
 function taskProjection(status: (typeof allStatuses)[number]) {
   return {
     task_id: "task-schema-1",
+    correlation_id: correlationId,
     status,
     symbol: "BTC-USDT-SWAP",
     horizon: "4h",

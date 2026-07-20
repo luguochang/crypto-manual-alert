@@ -8,6 +8,7 @@ import {
 } from "@playwright/test";
 
 import {
+  isAnalysisPendingInterrupt,
   productTaskSchema,
   type PendingInterrupt,
   type PendingInterruptPause,
@@ -189,11 +190,10 @@ function taskIdForProject(page: Page, testInfo: TestInfo) {
   expect(page.viewportSize()).toEqual(project.viewport);
 
   const dedicatedTaskId = process.env[project.taskEnvironmentVariable]?.trim();
-  const fallbackTaskId = process.env.HITL_TASK_ID?.trim();
-  const taskId = dedicatedTaskId || fallbackTaskId;
+  const taskId = dedicatedTaskId;
   if (!taskId) {
     throw new Error(
-      `set ${project.taskEnvironmentVariable} (or fallback HITL_TASK_ID) to a fresh waiting_human task`,
+      `set ${project.taskEnvironmentVariable} to a dedicated fresh waiting_human task`,
     );
   }
   if (!uuidPattern.test(taskId)) {
@@ -287,6 +287,9 @@ function assertWaitingReviewProjection(
   expect(interrupt.response).toBeNull();
   expect(interrupt.responded_at).toBeNull();
   expect(interrupt.payload.kind).toBe("artifact_review");
+  if (!isAnalysisPendingInterrupt(interrupt)) {
+    throw new Error("HITL fixture must expose an analysis review interrupt");
+  }
   expect(interrupt.payload.schema_version).toBe("1.0");
   expect(interrupt.payload.allowed_actions).toEqual(["approve", "reject", "edit"]);
   expect(interrupt.payload.artifact.status).toBe("draft");
@@ -296,6 +299,9 @@ function assertWaitingReviewProjection(
 }
 
 async function assertReadablePendingReview(page: Page, interrupt: PendingInterrupt) {
+  if (!isAnalysisPendingInterrupt(interrupt)) {
+    throw new Error("HITL fixture must expose an analysis review interrupt");
+  }
   const panel = page.locator("section.hitl-review-panel");
   await expect(page.getByTestId("task-status").getByRole("heading")).toHaveText("等待人工确认");
   await expect(panel).toHaveCount(1);
@@ -443,8 +449,8 @@ async function assertReadableCommittedArtifact(page: Page, artifact: AnalysisArt
   await expect(result.locator(".decision-summary strong")).toHaveText(
     resultActionLabels[artifact.analysis.main_action] ?? artifact.analysis.main_action,
   );
-  await expect(result.getByRole("heading", { name: "Evidence", exact: true })).toBeVisible();
-  await expect(result.getByRole("heading", { name: "Risk", exact: true })).toBeVisible();
+  await expect(result.getByRole("heading", { name: "证据门禁", exact: true })).toBeVisible();
+  await expect(result.getByRole("heading", { name: "风险门禁", exact: true })).toBeVisible();
   await expect(result.getByRole("heading", { name: "判断依据", exact: true })).toBeVisible();
   await expect(result.getByRole("heading", { name: "来源链接", exact: true })).toBeVisible();
   expect(await result.locator(".rationale-list li").allTextContents()).toEqual(

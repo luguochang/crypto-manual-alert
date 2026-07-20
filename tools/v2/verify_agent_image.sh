@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  printf 'Usage: %s <locked-base-image> <built-agent-image>\n' "$0" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  printf 'Usage: %s <locked-base-image> <built-agent-image> [--allow-multi-interrupt-fixture]\n' "$0" >&2
   exit 64
 fi
 
 base_image=$1
 agent_image=$2
+allow_fixture=0
+case "${3:-}" in
+  "")
+    ;;
+  --allow-multi-interrupt-fixture)
+    allow_fixture=1
+    ;;
+  *)
+    printf 'Unknown Agent image verifier option: %s\n' "$3" >&2
+    exit 64
+    ;;
+esac
 if [[ ! "$base_image" =~ ^langchain/langgraph-api@sha256:[0-9a-f]{64}$ ]]; then
   printf 'Invalid locked Agent Server base image\n' >&2
   exit 65
@@ -40,12 +52,19 @@ for index in "${!base_layers[@]}"; do
   fi
 done
 
+docker_options=(
+  --rm
+  --network none
+  --read-only
+  --cap-drop ALL
+  --security-opt no-new-privileges
+)
+if [[ "$allow_fixture" == "1" ]]; then
+  docker_options+=(--env TASK8_ALLOW_MULTI_INTERRUPT_FIXTURE=1)
+fi
+
 docker run \
-  --rm \
-  --network none \
-  --read-only \
-  --cap-drop ALL \
-  --security-opt no-new-privileges \
+  "${docker_options[@]}" \
   --entrypoint python \
   "$agent_image" \
   -c '
@@ -53,6 +72,14 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+
+expected_graphs = {
+    "crypto_analysis": "/deps/workspace/src/crypto_alert_v2/graph/__init__.py:graph_factory",
+}
+if os.environ.get("TASK8_ALLOW_MULTI_INTERRUPT_FIXTURE") == "1":
+    expected_graphs["multi_interrupt_fixture"] = (
+        "/deps/workspace/src/crypto_alert_v2/testing/multi_interrupt_fixture.py:graph"
+    )
 
 expected_mappings = {
     "LANGGRAPH_AUTH": {
@@ -63,9 +90,7 @@ expected_mappings = {
         "app": "/deps/workspace/src/crypto_alert_v2/http/app.py:app",
         "enable_custom_route_auth": True,
     },
-    "LANGSERVE_GRAPHS": {
-        "crypto_analysis": "/deps/workspace/src/crypto_alert_v2/graph/__init__.py:graph",
-    },
+    "LANGSERVE_GRAPHS": expected_graphs,
 }
 for name, expected in expected_mappings.items():
     actual = json.loads(os.environ.get(name, "null"))

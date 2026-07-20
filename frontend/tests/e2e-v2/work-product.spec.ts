@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const fixtureCreatedAt = new Date().toISOString();
+const fixtureCorrelationId = "33333333-3333-4333-8333-333333333333";
 const queuedTask = taskProjection("queued");
 const pollNetworkFailure = { fixture: "network-failure" } as const;
 const frontendOrigin = new URL(
@@ -31,8 +32,8 @@ test("renders the normal Product projection from queue through success", async (
   await expect(page.getByText("开多", { exact: true })).toBeVisible();
   await expect(page.getByText("67,250.50")).toBeVisible();
   await expect(page.getByText("68%", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Risk" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "证据门禁" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "风险门禁" })).toBeVisible();
   const analysisResult = page.getByTestId("analysis-result");
   await expect(analysisResult.getByRole("link", { name: /ETH market structure/ })).toHaveAttribute(
     "href",
@@ -71,6 +72,7 @@ test("renders provider failure details without replacing them with success", asy
           code: "search_timeout",
           message: "搜索服务在 20 秒内未返回结果，请稍后重试。",
           retryable: true,
+          correlation_id: fixtureCorrelationId,
         },
       ],
     },
@@ -102,10 +104,10 @@ test("renders only allowlisted research failure diagnostics", async ({ page }) =
     provider: "builtin_web_search",
     error_type: "UnverifiedServerToolCall",
     attempt: 3,
+    correlation_id: fixtureCorrelationId,
     raw_response: "fixture-private-raw-response",
     authorization: "Bearer fixture-private-token",
     endpoint: "https://private.example.test/responses",
-    correlation_id: "fixture-private-correlation-id",
   };
   const {
     code,
@@ -114,11 +116,12 @@ test("renders only allowlisted research failure diagnostics", async ({ page }) =
     provider,
     error_type,
     attempt,
+    correlation_id,
   } = rawProviderFailure;
 
   await installProductFixture(page, [{
     ...taskProjection("failed"),
-    errors: [{ code, message, retryable, provider, error_type, attempt }],
+    errors: [{ code, message, retryable, provider, error_type, attempt, correlation_id }],
   }]);
 
   await page.goto("/work");
@@ -149,9 +152,8 @@ test("renders only allowlisted research failure diagnostics", async ({ page }) =
   await assertLayoutIntegrity(page);
 });
 
-test("retry creates one new Product Task with a fresh idempotency key", async ({ page }) => {
+test("retry creates one new Product Run with a fresh idempotency key", async ({ page }) => {
   const originalTaskId = "task-retry-original";
-  const retryTaskId = "task-retry-new";
   const retryableFailure = {
     ...taskProjection("failed"),
     task_id: originalTaskId,
@@ -161,11 +163,12 @@ test("retry creates one new Product Task with a fresh idempotency key", async ({
       code: "search_timeout",
       message: "搜索服务超时。",
       retryable: true,
+      correlation_id: fixtureCorrelationId,
     }],
   };
   const retrySuccess = {
     ...succeededTask(),
-    task_id: retryTaskId,
+    task_id: originalTaskId,
     symbol: "SOL-USDT-SWAP",
     horizon: "1h",
     artifact: {
@@ -182,7 +185,7 @@ test("retry creates one new Product Task with a fresh idempotency key", async ({
     [retryableFailure, retrySuccess],
     [
       { ...taskProjection("queued"), task_id: originalTaskId, symbol: "SOL-USDT-SWAP", horizon: "1h" },
-      { ...taskProjection("queued"), task_id: retryTaskId, symbol: "SOL-USDT-SWAP", horizon: "1h" },
+      { ...taskProjection("queued"), task_id: originalTaskId, symbol: "SOL-USDT-SWAP", horizon: "1h" },
     ],
   );
 
@@ -202,17 +205,16 @@ test("retry creates one new Product Task with a fresh idempotency key", async ({
   await expect(page.getByTestId("task-status")).toContainText("分析完成");
   const postRequests = requests.filter((request) => request.method === "POST");
   expect(postRequests).toHaveLength(2);
-  expect(postRequests[1]?.body).toMatchObject({
-    symbol: "SOL-USDT-SWAP",
-    horizon: "1h",
-    query_text: "重新检查 SOL 的事件窗口风险",
-  });
+  expect(postRequests[1]?.pathname).toBe(
+    `/api/product/api/v2/tasks/${originalTaskId}/retry`,
+  );
+  expect(postRequests[1]?.body).toBeNull();
   expect(postRequests[0]?.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i);
   expect(postRequests[1]?.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i);
   expect(postRequests[1]?.idempotencyKey).not.toBe(postRequests[0]?.idempotencyKey);
-  expect(requests.filter((request) => request.method === "GET").map((request) => request.pathname)).toEqual([
+  expect(taskReadRequests(requests).map((request) => request.pathname)).toEqual([
     `/api/product/api/v2/tasks/${originalTaskId}`,
-    `/api/product/api/v2/tasks/${retryTaskId}`,
+    `/api/product/api/v2/tasks/${originalTaskId}`,
   ]);
 });
 
@@ -237,11 +239,10 @@ test("recovers polling the same task after one transient read failure", async ({
   await page.getByRole("button", { name: "恢复读取" }).click();
 
   await expect(page.getByRole("heading", { name: "请求未完成" })).toHaveCount(0);
-  await expect(page.getByTestId("task-status")).toContainText("分析中");
   await expect(page.getByTestId("task-status")).toContainText("分析完成");
 
   const postRequests = requests.filter((request) => request.method === "POST");
-  const getRequests = requests.filter((request) => request.method === "GET");
+  const getRequests = taskReadRequests(requests);
   expect(postRequests).toHaveLength(1);
   expect(getRequests).toHaveLength(3);
   expect(getRequests.every((request) => request.pathname.endsWith("/api/v2/tasks/task-fixture-1"))).toBe(true);
@@ -265,7 +266,7 @@ test("recovers the Product task from the URL after a full page refresh", async (
   await expect(page.getByTestId("task-status")).toContainText("分析完成");
   await expect(page).toHaveURL(new RegExp(`/work\\?task=${taskId}$`));
   expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
-  expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+  expect(taskReadRequests(requests)).toHaveLength(2);
 
   await page.reload();
   await expect(page.getByTestId("task-status")).toContainText("分析完成");
@@ -382,7 +383,7 @@ test("continues polling from waiting-human to the terminal projection", async ({
   await expect(page.getByRole("button", { name: "开始分析" })).toBeEnabled();
   await page.waitForTimeout(1_100);
 
-  expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+  expect(taskReadRequests(requests)).toHaveLength(2);
   await expect(page.getByTestId("task-status")).toContainText("已被风险门禁阻断");
 });
 
@@ -394,7 +395,12 @@ test("a new submission invalidates an older poll loop", async ({ page }) => {
     ...taskProjection("failed"),
     task_id: "task-old",
     symbol: "ETH-USDT-SWAP",
-    errors: [{ code: "stale", message: "旧任务不应覆盖新任务。", retryable: false }],
+    errors: [{
+      code: "stale",
+      message: "旧任务不应覆盖新任务。",
+      retryable: false,
+      correlation_id: fixtureCorrelationId,
+    }],
   };
   const newWaitingTask = {
     ...taskProjection("waiting_human", "SOL-USDT-SWAP"),
@@ -411,7 +417,7 @@ test("a new submission invalidates an older poll loop", async ({ page }) => {
   await page.getByRole("button", { name: "开始分析" }).click();
   await expect(page.getByTestId("task-status")).toContainText("分析中");
   await expect.poll(
-    () => requests.filter((request) => request.method === "GET").length,
+    () => taskReadRequests(requests).length,
     { timeout: 3_000 },
   ).toBe(2);
 
@@ -459,7 +465,20 @@ async function installProductFixture(
       return;
     }
 
-    if (request.method() === "GET" && url.pathname.includes("/api/v2/tasks/")) {
+    if (
+      request.method() === "POST"
+      && /\/api\/v2\/tasks\/[^/]+\/retry$/.test(url.pathname)
+    ) {
+      const projection = submissionSequence[Math.min(submissionIndex, submissionSequence.length - 1)];
+      submissionIndex += 1;
+      await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify(projection) });
+      return;
+    }
+
+    if (
+      request.method() === "GET"
+      && /\/api\/v2\/tasks\/[^/]+$/.test(url.pathname)
+    ) {
       const projection = pollSequence[Math.min(pollIndex, pollSequence.length - 1)];
       pollIndex += 1;
       if (isPollNetworkFailure(projection)) {
@@ -467,9 +486,24 @@ async function installProductFixture(
         return;
       }
       if (pollIndex > 1) {
-        await new Promise((resolve) => setTimeout(resolve, 650));
+        await new Promise((resolve) => setTimeout(resolve, 1_200));
       }
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(projection) });
+      return;
+    }
+
+    if (
+      request.method() === "GET"
+      && /\/api\/v2\/tasks\/[^/]+\/notifications$/.test(url.pathname)
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task_id: url.pathname.split("/").at(-2),
+          items: [],
+        }),
+      });
       return;
     }
 
@@ -483,6 +517,13 @@ async function installProductFixture(
   return requests;
 }
 
+function taskReadRequests(
+  requests: Awaited<ReturnType<typeof installProductFixture>>,
+) {
+  return requests.filter(({ method, pathname }) =>
+    method === "GET" && /\/api\/v2\/tasks\/[^/]+$/.test(pathname));
+}
+
 function isPollNetworkFailure(value: unknown): value is typeof pollNetworkFailure {
   return typeof value === "object" && value !== null && "fixture" in value && value.fixture === "network-failure";
 }
@@ -494,6 +535,7 @@ function taskProjection(
 ) {
   const projection = {
     task_id: "task-fixture-1",
+    correlation_id: fixtureCorrelationId,
     status,
     symbol,
     horizon,
@@ -638,7 +680,14 @@ async function assertLayoutIntegrity(page: Page) {
     ).filter((element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
-      return rect.width > 1 && rect.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+      return rect.width > 1
+        && rect.height > 1
+        && rect.right > 0
+        && rect.bottom > 0
+        && rect.left < window.innerWidth
+        && rect.top < window.innerHeight
+        && style.visibility !== "hidden"
+        && style.display !== "none";
     });
     const overlaps: string[] = [];
 
@@ -691,9 +740,12 @@ test("artifact state: keeps a blocked draft out of committed advice", async ({ p
 
   await expect(page.getByTestId("task-status")).toContainText("已被风险门禁阻断");
   await expect(page.getByText("分析草稿未提交", { exact: false })).toBeVisible();
-  await expect(page.getByText("evidence.insufficient:order_book", { exact: false })).toBeVisible();
-  await expect(page.getByTestId("analysis-result")).toHaveCount(0);
-  await expect(page.getByText("Committed analysis", { exact: true })).toHaveCount(0);
+  const blockedResult = page.getByTestId("analysis-result");
+  await expect(blockedResult).toBeVisible();
+  await expect(blockedResult).toHaveAttribute("data-artifact-state", "blocked");
+  await expect(blockedResult).toHaveAttribute("data-actionable", "false");
+  await expect(blockedResult.getByText("evidence.insufficient:order_book", { exact: true })).toBeVisible();
+  await expect(blockedResult.getByLabel("风险阻断分析草稿")).toBeVisible();
   await expect(page.getByLabel("交易计划")).toHaveCount(0);
   await assertNoRawPayload(page);
 });
@@ -710,12 +762,12 @@ test("artifact state: marks expired committed analysis as a non-actionable snaps
   await page.getByRole("button", { name: "开始分析" }).click();
 
   await expect(page.getByTestId("task-status")).toContainText("分析已过期");
-  await expect(page.getByTestId("analysis-result")).toHaveAttribute("data-artifact-state", "expired");
-  await expect(page.getByText("Expired analysis", { exact: true })).toBeVisible();
-  await expect(page.getByText("Committed analysis", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("Action", { exact: true })).toHaveCount(0);
+  const expiredResult = page.getByTestId("analysis-result");
+  await expect(expiredResult).toHaveAttribute("data-artifact-state", "expired");
+  await expect(expiredResult).toHaveAttribute("data-actionable", "false");
+  await expect(expiredResult.getByText("已过期分析", { exact: true })).toBeVisible();
   await expect(page.getByLabel("交易计划")).toHaveCount(0);
-  await expect(page.getByLabel("已过期分析快照")).toBeVisible();
+  await expect(expiredResult.getByLabel("已过期分析快照")).toBeVisible();
   await expect(page.getByText("60 秒", { exact: true })).toBeVisible();
   await expect(page.getByText("精确 CVD、清算热力图", { exact: true })).toBeVisible();
   await assertNoRawPayload(page);

@@ -12,6 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "langgraph-cli==0.4.31",
+  "pathspec>=0.12.1",
   "pytest>=8.0.0",
 ]
 

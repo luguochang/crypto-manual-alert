@@ -8,7 +8,7 @@
     "ENV UV_NO_DEFAULT_GROUPS=1"
   ],
   "graphs": {
-    "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph"
+    "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph_factory"
   },
   "auth": {
     "path": "./src/crypto_alert_v2/auth/agent_server.py:auth",

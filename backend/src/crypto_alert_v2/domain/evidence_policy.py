@@ -11,10 +11,24 @@ from crypto_alert_v2.domain.models import (
 )
 
 
-REQUIRED_MARKET_FIELDS = ("ticker", "mark_price", "index_price", "order_book", "candles")
+REQUIRED_MARKET_FIELDS = (
+    "ticker",
+    "mark_price",
+    "index_price",
+    "order_book",
+    "candles",
+)
 REQUIRED_MACRO_FIELDS = ("vix", "real_yield_10y", "dxy", "macro_event_scan")
 OPTIONAL_MARKET_FIELDS = ("funding_rate", "open_interest")
+DATA_AVAILABILITY_ORDER = (
+    "exchange_native_market_data",
+    *REQUIRED_MARKET_FIELDS,
+    *OPTIONAL_MARKET_FIELDS,
+    *REQUIRED_MACRO_FIELDS,
+    "verified_web_evidence",
+)
 OPTIONAL_EVIDENCE_CAP = 0.70
+WEB_SEARCH_CONTEXT_CAP = 0.50
 
 _ACTION_ADAPTER = TypeAdapter(Action)
 
@@ -30,14 +44,28 @@ def check_evidence_sufficiency(
     research = _validate_research(research_bundle)
 
     missing_required: list[str] = []
+    web_search_market = (
+        snapshot is not None and snapshot.source_level == "web_search_verified"
+    )
+    if web_search_market and action != "no_trade":
+        missing_required.append("exchange_native_market_data")
     if action in OPENING_ACTIONS:
         missing_required.extend(_missing_market_fields(snapshot))
         missing_required.extend(_missing_macro_fields(research))
 
     missing_optional = _missing_optional_fields(snapshot)
     sufficient = not missing_required
-    confidence_cap = 0.0 if not sufficient else (OPTIONAL_EVIDENCE_CAP if missing_optional else 1.0)
+    confidence_cap = (
+        0.0
+        if not sufficient
+        else min(
+            OPTIONAL_EVIDENCE_CAP if missing_optional else 1.0,
+            WEB_SEARCH_CONTEXT_CAP if web_search_market else 1.0,
+        )
+    )
     warnings = [f"evidence.optional_missing:{field}" for field in missing_optional]
+    if web_search_market:
+        warnings.append("evidence.market_source:web_search_verified")
 
     return EvidenceVerdict(
         sufficient=sufficient,
@@ -46,6 +74,32 @@ def check_evidence_sufficiency(
         missing_optional=missing_optional,
         warnings=warnings,
     )
+
+
+def derive_unavailable_data(
+    market_snapshot: MarketSnapshot | Mapping[str, object] | None,
+    research_bundle: ResearchBundle | Mapping[str, object] | None,
+    *,
+    verified_web_evidence_count: int,
+) -> list[str]:
+    """Derive stable availability codes exclusively from validated provider data."""
+    snapshot = _validate_snapshot(market_snapshot)
+    research = _validate_research(research_bundle)
+
+    missing = {
+        *_missing_market_fields(snapshot),
+        *_missing_macro_fields(research),
+    }
+    if snapshot is None:
+        missing.update(OPTIONAL_MARKET_FIELDS)
+    else:
+        missing.update(_missing_optional_fields(snapshot))
+        if snapshot.source_level == "web_search_verified":
+            missing.add("exchange_native_market_data")
+    if verified_web_evidence_count <= 0:
+        missing.add("verified_web_evidence")
+
+    return [field for field in DATA_AVAILABILITY_ORDER if field in missing]
 
 
 def _validate_snapshot(
@@ -90,10 +144,14 @@ def _missing_macro_fields(research: ResearchBundle | None) -> list[str]:
     if research is None:
         return list(REQUIRED_MACRO_FIELDS)
 
-    return [field for field in REQUIRED_MACRO_FIELDS if getattr(research, field) is None]
+    return [
+        field for field in REQUIRED_MACRO_FIELDS if getattr(research, field) is None
+    ]
 
 
 def _missing_optional_fields(snapshot: MarketSnapshot | None) -> list[str]:
     if snapshot is None:
         return []
-    return [field for field in OPTIONAL_MARKET_FIELDS if getattr(snapshot, field) is None]
+    return [
+        field for field in OPTIONAL_MARKET_FIELDS if getattr(snapshot, field) is None
+    ]

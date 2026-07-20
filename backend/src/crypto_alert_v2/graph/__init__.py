@@ -1,3 +1,3 @@
-from crypto_alert_v2.graph.graph import graph
+from crypto_alert_v2.graph.graph import create_graph, graph_factory
 
-__all__ = ["graph"]
+__all__ = ["create_graph", "graph_factory"]

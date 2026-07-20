@@ -1,8 +1,14 @@
 import importlib
+import json
 import os
+import socket
 import subprocess
 import sys
+import time
 from base64 import urlsafe_b64encode
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
+from uuid import UUID
 
 from cryptography.hazmat.primitives import serialization
 import jwt
@@ -95,6 +101,11 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
     monkeypatch.setattr(module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         module,
+        "notification_credential_cipher_from_environment",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        module,
         "create_async_engine",
         lambda *_args, **_kwargs: RecordingEngine(),
     )
@@ -131,9 +142,7 @@ def test_production_inbox_cursor_key_is_independent_and_required() -> None:
         module._configured_inbox_cursor_key(without_product_key)
 
     configured = without_product_key.model_copy(
-        update={
-            "product_inbox_cursor_key": SecretStr(_cursor_key_secret(b"d"))
-        }
+        update={"product_inbox_cursor_key": SecretStr(_cursor_key_secret(b"d"))}
     )
     first = module._configured_inbox_cursor_key(configured)
     second = module._configured_inbox_cursor_key(configured)
@@ -168,6 +177,11 @@ async def _seeded_actors_for_default_app(
             seeded_actors.append(actor)
 
     monkeypatch.setattr(module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        module,
+        "notification_credential_cipher_from_environment",
+        lambda: object(),
+    )
     monkeypatch.setattr(
         module,
         "create_async_engine",
@@ -208,6 +222,69 @@ def test_settings_load_internal_jwt_keys_from_files(
     assert settings.internal_jwt_public_keys == {"compose-ephemeral": "public-key"}
     assert settings.product_inbox_cursor_key is not None
     assert settings.product_inbox_cursor_key.get_secret_value() == "cursor-key-material"
+
+
+def test_settings_merges_public_key_file_into_existing_keyring(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    public_key_file = tmp_path / "public.pem"
+    public_key_file.write_text("new-public-key")
+    monkeypatch.setenv(
+        "INTERNAL_JWT_PUBLIC_KEYS",
+        json.dumps({"old": "old-public-key"}),
+    )
+    monkeypatch.setenv("INTERNAL_JWT_KID", "new")
+    monkeypatch.setenv("INTERNAL_JWT_PUBLIC_KEY_FILE", str(public_key_file))
+
+    settings = Settings(
+        _env_file=None,
+        app_environment="test",
+    )
+
+    assert settings.internal_jwt_public_keys == {
+        "old": "old-public-key",
+        "new": "new-public-key",
+    }
+
+
+def test_settings_accepts_matching_public_key_file_for_existing_kid(
+    tmp_path,
+) -> None:
+    public_key_file = tmp_path / "public.pem"
+    public_key_file.write_text("same-public-key")
+
+    settings = Settings(
+        _env_file=None,
+        app_environment="test",
+        internal_jwt_public_keys={"new": "same-public-key", "old": "old-key"},
+        INTERNAL_JWT_KID="new",
+        internal_jwt_public_key_file=str(public_key_file),
+    )
+
+    assert settings.internal_jwt_public_keys == {
+        "new": "same-public-key",
+        "old": "old-key",
+    }
+
+
+def test_settings_rejects_conflicting_public_key_file_for_existing_kid(
+    tmp_path,
+) -> None:
+    public_key_file = tmp_path / "public.pem"
+    public_key_file.write_text("file-key-material")
+
+    with pytest.raises(
+        ValueError,
+        match="INTERNAL_JWT_PUBLIC_KEYS contains conflicting key material",
+    ):
+        Settings(
+            _env_file=None,
+            app_environment="test",
+            internal_jwt_public_keys={"new": "configured-key-material"},
+            INTERNAL_JWT_KID="new",
+            internal_jwt_public_key_file=str(public_key_file),
+        )
 
 
 def test_development_key_pair_is_matching_and_stable(tmp_path) -> None:
@@ -302,6 +379,8 @@ def test_explicit_development_bootstrap_builds_server_owned_actor() -> None:
         development_bootstrap_enabled=True,
         development_bootstrap_profile="local-proof",
         development_bootstrap_subject="compose-user",
+        development_bootstrap_identity_issuer="crypto-alert-v2-compose",
+        development_bootstrap_context_id="99999999-9999-4999-8999-999999999999",
         development_bootstrap_tenant_id="compose-tenant",
         development_bootstrap_workspace_id="compose-workspace",
         development_bootstrap_roles=("member",),
@@ -317,8 +396,8 @@ def test_explicit_development_bootstrap_builds_server_owned_actor() -> None:
         "tenant_id": "compose-tenant",
         "workspace_id": "compose-workspace",
         "user_id": "compose-user",
-        "identity_issuer": "legacy",
-        "context_id": None,
+        "identity_issuer": "crypto-alert-v2-compose",
+        "context_id": UUID("99999999-9999-4999-8999-999999999999"),
         "roles": ("member",),
         "permissions": ("analysis:read", "analysis:write"),
     }
@@ -374,11 +453,11 @@ async def test_default_app_seeds_complete_local_proof_identity(
     assert [actor.model_dump() for actor in seeded_actors] == [
         {
             "tenant_id": "compose-tenant",
-                "workspace_id": "compose-workspace",
-                "user_id": "compose-user",
-                "identity_issuer": "legacy",
-                "context_id": None,
-                "roles": ("member",),
+            "workspace_id": "compose-workspace",
+            "user_id": "compose-user",
+            "identity_issuer": "crypto-alert-v2-development",
+            "context_id": None,
+            "roles": ("member",),
             "permissions": ("analysis:read",),
         }
     ]
@@ -661,7 +740,10 @@ async def test_agent_healthcheck_requires_an_explicit_probe_principal(
         )
 
 
-def test_agent_healthcheck_module_never_exits_healthy_without_signer() -> None:
+def test_agent_readiness_monitor_stays_unready_without_signer() -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = int(listener.getsockname()[1])
     env = {
         "APP_ENVIRONMENT": "production",
         "AGENT_HEALTHCHECK_SUBJECT": "probe-user",
@@ -669,20 +751,59 @@ def test_agent_healthcheck_module_never_exits_healthy_without_signer() -> None:
         "AGENT_HEALTHCHECK_WORKSPACE_ID": "probe-workspace",
         "AGENT_HEALTHCHECK_ROLES": '["operator"]',
         "AGENT_HEALTHCHECK_PERMISSIONS": '["analysis:read"]',
+        "AGENT_READINESS_HOST": "127.0.0.1",
+        "AGENT_READINESS_PORT": str(port),
+        "AGENT_READINESS_INTERVAL_SECONDS": "0.05",
+        "AGENT_READINESS_PROBE_TIMEOUT_SECONDS": "0.05",
+        "AGENT_READINESS_FAILURE_THRESHOLD": "1",
+        "AGENT_READINESS_STALE_AFTER_SECONDS": "1",
         "PATH": os.environ["PATH"],
     }
 
-    result = subprocess.run(
+    process = subprocess.Popen(
         [
             sys.executable,
             "-m",
             "crypto_alert_v2.auth.agent_healthcheck",
         ],
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
     )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            if process.poll() is not None:
+                _, stderr = process.communicate()
+                raise AssertionError(
+                    f"readiness monitor exited before serving health: {stderr}"
+                )
+            try:
+                with urlopen(
+                    f"http://127.0.0.1:{port}/livez",
+                    timeout=0.2,
+                ) as response:
+                    assert response.status == 200
+                    break
+            except (HTTPError, URLError, TimeoutError):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "readiness monitor did not expose liveness"
+                    ) from None
+                time.sleep(0.02)
 
-    assert result.returncode != 0
-    assert "healthcheck signing is not configured" in result.stderr
+        with pytest.raises(HTTPError) as raised:
+            urlopen(f"http://127.0.0.1:{port}/readyz", timeout=0.2)
+        assert raised.value.code == 503
+        assert json.loads(raised.value.read()) == {"live": True, "ready": False}
+        assert process.poll() is None
+    finally:
+        process.terminate()
+        try:
+            process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=3)
+
+    assert process.returncode == 0

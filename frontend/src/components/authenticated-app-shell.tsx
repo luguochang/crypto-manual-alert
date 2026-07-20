@@ -1,10 +1,13 @@
 "use client";
 
-import { LogIn, LogOut, Radar, ShieldAlert, ShieldCheck } from "lucide-react";
+import { LogIn, LogOut, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
 import { signIn, signOut, useSession, SessionProvider } from "next-auth/react";
+import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { BrandLockup } from "@/components/brand-lockup";
 import { PrimaryNavigation } from "@/components/primary-navigation";
+import { ShellTopbar } from "@/components/shell-topbar";
 import {
   authContextListSchema,
   type AuthContext,
@@ -43,7 +46,7 @@ function AuthenticatedShellContent({ children }: Readonly<{ children: ReactNode 
         setSelectedContextId((current) => current || session.contextId || next[0]?.context_id || "");
       } catch (error) {
         if (!controller.signal.aborted) {
-          setContexts([]);
+          setContexts((current) => current ?? []);
           setContextError(error instanceof Error ? "工作区暂时不可用" : "无法读取工作区");
         }
       }
@@ -82,8 +85,13 @@ function AuthenticatedShellContent({ children }: Readonly<{ children: ReactNode 
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <aside className="sidebar">
-        <Brand />
+        <BrandLockup />
+        <Link className="sidebar-primary-action" href="/work" prefetch={false}>
+          <Plus size={17} aria-hidden="true" />
+          新建分析
+        </Link>
         <PrimaryNavigation />
         {status === "authenticated" ? (
           <div className="workspace-account">
@@ -115,6 +123,9 @@ function AuthenticatedShellContent({ children }: Readonly<{ children: ReactNode 
             >
               <LogOut size={16} aria-hidden="true" />
             </button>
+            {contextError && hasActiveContext ? (
+              <p className="workspace-account-error" role="alert">{contextError}</p>
+            ) : null}
           </div>
         ) : null}
         <div className="environment-note">
@@ -125,47 +136,36 @@ function AuthenticatedShellContent({ children }: Readonly<{ children: ReactNode 
           </span>
         </div>
       </aside>
-      <main className="main-content">
-        {status === "loading" ? <AccessState title="正在验证会话" /> : null}
-        {status === "unauthenticated" ? (
-          <AccessState
-            title="登录 Signal Desk"
-            action={(
-              <button type="button" onClick={() => signIn("oidc")}>
-                <LogIn size={17} aria-hidden="true" />
-                登录
-              </button>
-            )}
-          />
-        ) : null}
-        {status === "authenticated" && !hasActiveContext ? (
-          <AccessState
-            title={contexts?.length ? "选择工作区" : "没有可用工作区"}
-            error={contextError || session.authContextError}
-            action={contexts?.length ? (
-              <button type="button" onClick={switchContext} disabled={!selectedContextId || switching}>
-                <ShieldCheck size={17} aria-hidden="true" />
-                {switching ? "正在进入" : "进入工作区"}
-              </button>
-            ) : undefined}
-          />
-        ) : null}
-        {hasActiveContext ? <div key={session?.contextVersion}>{children}</div> : null}
-      </main>
-    </div>
-  );
-}
-
-function Brand() {
-  return (
-    <div className="brand-lockup" aria-label="Signal Desk">
-      <span className="brand-mark" aria-hidden="true">
-        <Radar size={22} strokeWidth={1.8} />
-      </span>
-      <span className="brand-copy">
-        <strong>Signal Desk</strong>
-        <span>Decision workspace</span>
-      </span>
+      <div className="app-frame">
+        <ShellTopbar />
+        <main className="main-content" id="main-content" tabIndex={-1}>
+          {status === "loading" ? <AccessState title="正在验证会话" /> : null}
+          {status === "unauthenticated" ? (
+            <AccessState
+              title="登录 Signal Desk"
+              action={(
+                <button type="button" onClick={() => signIn("oidc")}>
+                  <LogIn size={17} aria-hidden="true" />
+                  登录
+                </button>
+              )}
+            />
+          ) : null}
+          {status === "authenticated" && !hasActiveContext ? (
+            <AccessState
+              title={contexts?.length ? "选择工作区" : "没有可用工作区"}
+              error={contextError || session.authContextError}
+              action={contexts?.length ? (
+                <button type="button" onClick={switchContext} disabled={!selectedContextId || switching}>
+                  <ShieldCheck size={17} aria-hidden="true" />
+                  {switching ? "正在进入" : "进入工作区"}
+                </button>
+              ) : undefined}
+            />
+          ) : null}
+          {hasActiveContext ? <div key={session?.contextVersion}>{children}</div> : null}
+        </main>
+      </div>
     </div>
   );
 }

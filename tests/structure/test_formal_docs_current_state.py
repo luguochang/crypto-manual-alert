@@ -186,11 +186,11 @@ def test_v2_product_api_contract_is_typed_from_zod_schema_through_same_origin_bf
 
     assert 'method === "GET" && path === "api/v2/runs"' in proxy
     assert 'method === "POST" && path === "api/v2/analysis"' in proxy
-    assert 'method === "GET" && /^api\\/v2\\/tasks\\/' in proxy
+    assert 'return method === "GET" && isTaskReadRoute(pathSegments);' in proxy
     assert "create analysis、run list、get task" in status
     assert "`GET /api/v2/tasks/{task_id}` 支持显式 `run_id`" in status
-    assert "`done=0`、`partial=13`、`blocked=0`、`not_started=3`" in status
-    assert "V2 不是 production ready" in status
+    assert "V2 = PARTIAL" in status
+    assert "Production Ready = NO" in status
     assert "V1 parity/removal 均不存在" in status
 
 
@@ -361,16 +361,17 @@ def test_v2_live_and_historical_ownership_is_documented_and_preserved_by_fronten
         assert required_text in schema
 
     assert "`?run_id=${encodeURIComponent(runId)}`" in client
-    assert 'import { useStream } from "@langchain/react";' in stream
+    assert 'import { useChannel, useStream } from "@langchain/react";' in stream
+    assert "useChannel(stream, productCustomChannels" in stream
     assert "const { assistant_id: assistantId, thread_id: threadId } = binding;" in stream
     assert "apiUrl: officialAgentApiUrl(window.location.origin)" in stream
     assert "runId:" not in stream
 
     assert "same-origin agent/product BFF" in status
     assert "`@langchain/react` thread attachment" in status
-    assert "Product task GET 现在可以用 `run_id` 选择历史 Product Run" in status
-    assert "官方 HITL 尚未交付" in status
-    assert "完整 command/event protocol" in status
+    assert "Product task GET 可以用 `run_id` 选择历史 Product Run" in status
+    assert "官方 HITL、notification 和 feedback 的 Product 侧交互" in status
+    assert "完整 Protocol v2" in status
     assert "strict real Playwright 已在开发 Runtime 下通过" in status
 
 

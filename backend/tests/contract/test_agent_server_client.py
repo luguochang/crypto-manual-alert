@@ -7,6 +7,7 @@ from langgraph_sdk.errors import (
     ConflictError,
     NotFoundError,
 )
+from langgraph_sdk.schema import StreamPart
 import pytest
 
 from crypto_alert_v2.api.agent_server import (
@@ -16,8 +17,10 @@ from crypto_alert_v2.api.agent_server import (
     RemoteInterruptSet,
     RemoteResumeIndeterminateError,
     RemoteRunHandle,
+    RemoteSubmitIndeterminateError,
 )
-from crypto_alert_v2.api.schemas import AnalysisSubmission
+from crypto_alert_v2.api.request_identity import correlation_id_for_task
+from crypto_alert_v2.api.schemas import AnalysisSubmission, DeepResearchSubmission
 from crypto_alert_v2.auth.context import ActorContext
 
 
@@ -67,6 +70,8 @@ class RecordingRuns:
         self.get_kwargs: dict[str, Any] | None = None
         self.join_args: tuple[Any, ...] | None = None
         self.join_kwargs: dict[str, Any] | None = None
+        self.join_stream_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.stream_parts: list[StreamPart] = []
         self.cancel_args: tuple[Any, ...] | None = None
         self.cancel_kwargs: dict[str, Any] | None = None
         self.get_status = "success"
@@ -118,6 +123,12 @@ class RecordingRuns:
             "terminal_status": "failed",
             "errors": [{"code": "provider_unavailable"}],
         }
+
+    async def join_stream(self, *args: Any, **kwargs: Any):
+        self.events.append("join_stream")
+        self.join_stream_calls.append((args, kwargs))
+        for part in self.stream_parts:
+            yield part
 
     async def cancel(self, *args: Any, **kwargs: Any) -> None:
         self.events.append("cancel")
@@ -231,7 +242,17 @@ def _single_interrupt_state(*, run_id: str = "run-1") -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
     client = RecordingClient()
-    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+    request_ids = iter(
+        (
+            "00000000-0000-4000-8000-000000000101",
+            "00000000-0000-4000-8000-000000000102",
+        )
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        request_id_factory=lambda: next(request_ids),
+    )
     actor = ActorContext(
         tenant_id="tenant-1",
         workspace_id="workspace-1",
@@ -255,24 +276,52 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
             "user_id": "user-1",
             "identity_issuer": "legacy",
             "task_id": "task-1",
+            "task_type": "market_analysis",
             "product_run_id": "task-1",
+            "correlation_id": correlation_id_for_task("task-1"),
+            "request_id": "00000000-0000-4000-8000-000000000101",
+            "lineage": {
+                "operation": "submit",
+                "product_run_id": "task-1",
+            },
         },
         "graph_id": "crypto_analysis",
+        "headers": {
+            "x-request-id": "00000000-0000-4000-8000-000000000101",
+        },
     }
     assert client.runs.create_args == ("thread-1", "crypto_analysis")
-    assert client.runs.create_kwargs == {
+    assert client.runs.create_kwargs is not None
+    create_kwargs = dict(client.runs.create_kwargs)
+    assert callable(create_kwargs.pop("on_run_created"))
+    assert create_kwargs == {
         "input": {
             "request": submission.model_dump(mode="json"),
             "review_policy": "bypass",
         },
         "durability": "sync",
+        "stream_mode": ["updates", "custom"],
+        "stream_resumable": True,
+        "if_not_exists": "reject",
+        "multitask_strategy": "reject",
         "metadata": {
             "tenant_id": "tenant-1",
             "workspace_id": "workspace-1",
             "user_id": "user-1",
             "identity_issuer": "legacy",
             "task_id": "task-1",
+            "task_type": "market_analysis",
             "product_run_id": "task-1",
+            "thread_id": "thread-1",
+            "correlation_id": correlation_id_for_task("task-1"),
+            "request_id": "00000000-0000-4000-8000-000000000102",
+            "lineage": {
+                "operation": "submit",
+                "product_run_id": "task-1",
+            },
+        },
+        "headers": {
+            "x-request-id": "00000000-0000-4000-8000-000000000102",
         },
     }
     assert client.runs.join_args == ("thread-1", "run-1")
@@ -282,12 +331,273 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runner_routes_deep_research_through_the_same_assistant() -> None:
+    client = RecordingClient()
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+    )
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    submission = DeepResearchSubmission(
+        symbol="BTC-USDT-SWAP",
+        horizon="7d",
+        query_text="Research BTC institutional adoption and counter-evidence.",
+    )
+
+    await runner.start(
+        actor=actor,
+        task_id="research-task-1",
+        product_thread_id="research-thread-1",
+        product_run_id="research-run-1",
+        submission=submission,
+        task_type="deep_research",
+    )
+
+    assert client.runs.create_args == ("thread-1", "crypto_analysis")
+    assert client.runs.create_kwargs is not None
+    assert client.runs.create_kwargs["input"]["request"] == {
+        "task_type": "deep_research",
+        "symbol": "BTC-USDT-SWAP",
+        "horizon": "7d",
+        "query_text": "Research BTC institutional adoption and counter-evidence.",
+    }
+    assert client.runs.create_kwargs["metadata"]["task_type"] == "deep_research"
+    assert client.threads.kwargs["metadata"]["task_type"] == "deep_research"
+
+
+@pytest.mark.asyncio
+async def test_runner_forwards_explicit_exit_durability_to_official_runs_api() -> None:
+    client = RecordingClient()
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+    actor = ActorContext(
+        tenant_id="tenant-1",
+        workspace_id="workspace-1",
+        user_id="user-1",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+
+    await runner.start(
+        actor=actor,
+        task_id="task-exit-durability",
+        product_thread_id=None,
+        product_run_id="product-run-exit-durability",
+        submission=AnalysisSubmission(
+            symbol="BTC-USDT-SWAP",
+            horizon="4h",
+            query_text="Prove exit durability serialization.",
+            notify=False,
+        ),
+        durability="exit",
+    )
+
+    assert client.runs.create_kwargs is not None
+    assert client.runs.create_kwargs["durability"] == "exit"
+
+
+@pytest.mark.asyncio
+async def test_runner_joins_the_official_resumable_update_stream() -> None:
+    client = RecordingClient()
+    client.runs.stream_parts = [
+        StreamPart(
+            event="updates",
+            data={"collect_market_snapshot": {"market_snapshot": {"symbol": "BTC"}}},
+            id="event-17",
+        )
+    ]
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        authorization_provider=lambda _: "Bearer stream-token",
+    )
+    handle = runner.authorize(
+        _remote_handle(),
+        ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:read",),
+        ),
+    )
+
+    parts = [
+        part
+        async for part in runner.join_stream(
+            handle,
+            last_event_id="event-16",
+        )
+    ]
+
+    assert parts == client.runs.stream_parts
+    assert client.runs.join_stream_calls == [
+        (
+            ("thread-1", "run-1"),
+            {
+                "cancel_on_disconnect": False,
+                "stream_mode": ["updates"],
+                "last_event_id": "event-16",
+                "headers": {"authorization": "Bearer stream-token"},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_replays_a_resumable_stream_from_the_start_without_a_cursor() -> (
+    None
+):
+    client = RecordingClient()
+    runner = AgentServerRunner(client=client, assistant_id="crypto_analysis")
+
+    assert [part async for part in runner.join_stream(_remote_handle())] == []
+
+    assert client.runs.join_stream_calls == [
+        (
+            ("thread-1", "run-1"),
+            {
+                "cancel_on_disconnect": False,
+                "stream_mode": ["updates"],
+                "last_event_id": "0",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runner_recovers_submit_id_from_official_response_headers() -> None:
+    client = RecordingClient()
+    client.runs.create_metadata_before_error = True
+    client.runs.create_error = APITimeoutError(
+        request=httpx.Request("POST", "http://agent.invalid/threads/thread-1/runs")
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        resume_reconciliation_delays=(0,),
+    )
+
+    handle = await runner.start(
+        actor=ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:write",),
+        ),
+        task_id="task-submit-header",
+        product_thread_id="product-thread-submit-header",
+        product_run_id="product-run-submit-header",
+        submission=AnalysisSubmission(
+            symbol="BTC-USDT-SWAP",
+            horizon="4h",
+            query_text="Assess submit recovery.",
+            notify=False,
+        ),
+    )
+
+    assert handle.run_id == "accepted-run"
+    assert handle.assistant_id == "crypto_analysis"
+    assert len(client.runs.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_never_recreates_an_indeterminate_submit() -> None:
+    client = RecordingClient()
+    client.runs.create_error = APITimeoutError(
+        request=httpx.Request("POST", "http://agent.invalid/threads/thread-1/runs")
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        resume_reconciliation_delays=(0, 0),
+    )
+    kwargs = {
+        "actor": ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:write",),
+        ),
+        "task_id": "task-submit-indeterminate",
+        "product_thread_id": "product-thread-submit-indeterminate",
+        "product_run_id": "product-run-submit-indeterminate",
+        "submission": AnalysisSubmission(
+            symbol="BTC-USDT-SWAP",
+            horizon="4h",
+            query_text="Assess indeterminate submit.",
+            notify=False,
+        ),
+    }
+
+    with pytest.raises(RemoteSubmitIndeterminateError, match="indeterminate"):
+        await runner.start(**kwargs)
+    with pytest.raises(RemoteSubmitIndeterminateError, match="indeterminate"):
+        await runner.start(**kwargs)
+
+    assert len(client.runs.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_retries_submit_when_connection_was_never_established() -> None:
+    client = RecordingClient()
+    client.runs.create_error = httpx.ConnectTimeout(
+        "connect timeout",
+        request=httpx.Request("POST", "http://agent.invalid/threads/thread-1/runs"),
+    )
+    runner = AgentServerRunner(
+        client=client,
+        assistant_id="crypto_analysis",
+        resume_reconciliation_delays=(0,),
+    )
+    kwargs = {
+        "actor": ActorContext(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            roles=("member",),
+            permissions=("analysis:write",),
+        ),
+        "task_id": "task-submit-connect-timeout",
+        "product_thread_id": "product-thread-submit-connect-timeout",
+        "product_run_id": "product-run-submit-connect-timeout",
+        "submission": AnalysisSubmission(
+            symbol="BTC-USDT-SWAP",
+            horizon="4h",
+            query_text="Assess pre-accept retry.",
+            notify=False,
+        ),
+    }
+
+    with pytest.raises(httpx.ConnectTimeout):
+        await runner.start(**kwargs)
+    client.runs.create_error = None
+    handle = await runner.start(**kwargs)
+
+    assert handle.run_id == "run-1"
+    assert len(client.runs.create_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
     client = RecordingClient()
     runner = AgentServerRunner(
         client=client,
         assistant_id="crypto_analysis",
         authorization_provider=lambda actor: f"Bearer token-for-{actor.user_id}",
+        request_id_factory=iter(
+            (
+                "00000000-0000-4000-8000-000000000201",
+                "00000000-0000-4000-8000-000000000202",
+            )
+        ).__next__,
     )
     actor = ActorContext(
         tenant_id="tenant-1",
@@ -322,16 +632,32 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
             "user_id": "user-1",
             "identity_issuer": "legacy",
             "task_id": "task-1",
+            "task_type": "market_analysis",
             "product_run_id": "product-run-1",
+            "correlation_id": correlation_id_for_task("task-1"),
+            "request_id": "00000000-0000-4000-8000-000000000201",
+            "lineage": {
+                "operation": "submit",
+                "product_run_id": "product-run-1",
+            },
         },
         "thread_id": "00000000-0000-0000-0000-000000000123",
         "if_exists": "do_nothing",
         "graph_id": "crypto_analysis",
-        "headers": {"authorization": "Bearer token-for-user-1"},
+        "headers": {
+            "authorization": "Bearer token-for-user-1",
+            "x-request-id": "00000000-0000-4000-8000-000000000201",
+        },
     }
     assert client.runs.create_kwargs is not None
     assert client.runs.create_kwargs["headers"] == {
-        "authorization": "Bearer token-for-user-1"
+        "authorization": "Bearer token-for-user-1",
+        "x-request-id": "00000000-0000-4000-8000-000000000202",
+    }
+    assert client.runs.create_kwargs["metadata"] == {
+        **client.threads.kwargs["metadata"],
+        "thread_id": "thread-1",
+        "request_id": "00000000-0000-4000-8000-000000000202",
     }
 
     state = await runner.get(handle)
@@ -377,6 +703,7 @@ async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
         client=client,
         assistant_id="crypto_analysis",
         authorization_provider=lambda _: "Bearer fork-token",
+        request_id_factory=lambda: "00000000-0000-4000-8000-000000000301",
     )
     actor = ActorContext(
         tenant_id="tenant-1",
@@ -404,6 +731,8 @@ async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
         "input": None,
         "checkpoint_id": "checkpoint-fork-source",
         "durability": "sync",
+        "stream_mode": ["updates", "custom"],
+        "stream_resumable": True,
         "metadata": {
             "tenant_id": "tenant-1",
             "workspace_id": "workspace-1",
@@ -411,10 +740,22 @@ async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
             "identity_issuer": "legacy",
             "task_id": "task-1",
             "product_run_id": "product-fork-run-2",
+            "thread_id": "thread-1",
             "forked_from_official_run_id": "run-1",
             "forked_from_checkpoint_id": "checkpoint-fork-source",
+            "correlation_id": correlation_id_for_task("task-1"),
+            "request_id": "00000000-0000-4000-8000-000000000301",
+            "lineage": {
+                "operation": "fork",
+                "product_run_id": "product-fork-run-2",
+                "parent_official_run_id": "run-1",
+                "checkpoint_id": "checkpoint-fork-source",
+            },
         },
-        "headers": {"authorization": "Bearer fork-token"},
+        "headers": {
+            "authorization": "Bearer fork-token",
+            "x-request-id": "00000000-0000-4000-8000-000000000301",
+        },
     }
     assert "config" not in create_kwargs
     assert client.threads.get_state_args == ("thread-1",)
@@ -688,6 +1029,7 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
         client=client,
         assistant_id="crypto_analysis",
         authorization_provider=lambda _: "Bearer resume-token",
+        request_id_factory=lambda: "00000000-0000-4000-8000-000000000401",
     )
     actor = ActorContext(
         tenant_id="tenant-1",
@@ -731,6 +1073,8 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
             }
         },
         "durability": "sync",
+        "stream_mode": ["updates", "custom"],
+        "stream_resumable": True,
         "multitask_strategy": "reject",
         "metadata": {
             "tenant_id": "tenant-1",
@@ -738,9 +1082,20 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
             "user_id": "user-1",
             "task_id": "task-1",
             "product_run_id": "product-run-2",
+            "thread_id": "thread-1",
             "resume_of_official_run_id": "run-1",
+            "correlation_id": correlation_id_for_task("task-1"),
+            "request_id": "00000000-0000-4000-8000-000000000401",
+            "lineage": {
+                "operation": "resume",
+                "product_run_id": "product-run-2",
+                "parent_official_run_id": "run-1",
+            },
         },
-        "headers": {"authorization": "Bearer resume-token"},
+        "headers": {
+            "authorization": "Bearer resume-token",
+            "x-request-id": "00000000-0000-4000-8000-000000000401",
+        },
     }
     assert resumed == RemoteRunHandle(
         assistant_id="11111111-1111-4111-8111-111111111111",
@@ -1063,6 +1418,7 @@ async def test_runner_recovers_an_existing_product_run_without_creating_another(
                 "user_id": "user-1",
                 "identity_issuer": "legacy",
                 "task_id": "task-1",
+                "task_type": "market_analysis",
                 "product_run_id": "product-run-1",
             },
             "status": existing_status,

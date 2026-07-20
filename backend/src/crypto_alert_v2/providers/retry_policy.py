@@ -21,15 +21,25 @@ class RetryPolicy:
     sleep: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
-        if self.max_attempts > 3 or self.total_budget_seconds > 10:
-            raise ValueError("provider retry budget allows at most 3 attempts and 10 seconds")
+        if (
+            self.max_attempts < 1
+            or self.max_attempts > 3
+            or self.total_budget_seconds <= 0
+            or self.total_budget_seconds > 10
+        ):
+            raise ValueError(
+                "provider retry budget requires at least 1 attempt, a positive budget, "
+                "and allows at most 3 attempts and 10 seconds"
+            )
+        if not self.backoff_seconds or any(delay < 0 for delay in self.backoff_seconds):
+            raise ValueError("provider retry backoff must contain non-negative delays")
 
     def execute(self, operation: Callable[[float], T]) -> T:
         started_at = self.monotonic()
         deadline = started_at + self.total_budget_seconds
         last_error: ProviderUnavailable | None = None
 
-        for attempt in range(self.max_attempts):
+        for attempt_index in range(self.max_attempts):
             remaining = deadline - self.monotonic()
             if remaining <= 0:
                 break
@@ -38,16 +48,24 @@ class RetryPolicy:
                 return operation(remaining)
             except ProviderUnavailable as exc:
                 last_error = exc
-                if not exc.retryable or attempt + 1 >= self.max_attempts:
+                exc.attempt = attempt_index + 1
+                if not exc.retryable:
+                    exc.retry_exhausted = False
+                    raise
+                if attempt_index + 1 >= self.max_attempts:
+                    exc.retry_exhausted = True
                     raise
 
-            delay = self.backoff_seconds[min(attempt, len(self.backoff_seconds) - 1)]
+            delay = self.backoff_seconds[
+                min(attempt_index, len(self.backoff_seconds) - 1)
+            ]
             remaining = deadline - self.monotonic()
             if delay >= remaining:
                 break
             self.sleep(delay)
 
         if last_error is not None:
+            last_error.retry_exhausted = last_error.retryable
             raise last_error
         raise RuntimeError("retry policy exhausted before its first attempt")
 
@@ -100,9 +118,7 @@ class SearchRetryPolicy:
             raise ValueError(
                 "search retry budget allows at most 3 attempts and 30 seconds"
             )
-        if not self.backoff_seconds or any(
-            delay < 0 for delay in self.backoff_seconds
-        ):
+        if not self.backoff_seconds or any(delay < 0 for delay in self.backoff_seconds):
             raise ValueError("search retry backoff must contain non-negative delays")
 
     def execute(
@@ -122,7 +138,10 @@ class SearchRetryPolicy:
                 break
             attempt_started = self.monotonic()
             try:
-                result = operation(remaining_before, attempt)
+                result = operation(
+                    self._attempt_timeout_seconds(remaining_before, attempt),
+                    attempt,
+                )
             except ResearchUnavailable as exc:
                 last_error = exc
                 exc.attempt = attempt
@@ -177,6 +196,26 @@ class SearchRetryPolicy:
             error_type="RetryBudgetExhausted",
         )
 
+    def _attempt_timeout_seconds(
+        self,
+        remaining_budget_seconds: float,
+        attempt: int,
+    ) -> float:
+        attempts_remaining = self.max_attempts - attempt + 1
+        future_backoff = sum(
+            self.backoff_seconds[min(index, len(self.backoff_seconds) - 1)]
+            for index in range(attempt - 1, self.max_attempts - 1)
+        )
+        reserved_backoff = min(
+            future_backoff,
+            remaining_budget_seconds / 2,
+        )
+        # Built-in model-backed search can spend its first turn negotiating the
+        # provider tool shape. Give that turn half of the usable budget while a
+        # shared deadline still bounds all retries and backoff to 30 seconds.
+        timeout_slices = 2 if attempts_remaining == 3 else attempts_remaining
+        return (remaining_budget_seconds - reserved_backoff) / timeout_slices
+
     async def execute_async(
         self,
         operation: Callable[[float, int], Awaitable[T]],
@@ -193,7 +232,10 @@ class SearchRetryPolicy:
                 break
             attempt_started = self.monotonic()
             try:
-                result = await operation(remaining_before, attempt)
+                result = await operation(
+                    self._attempt_timeout_seconds(remaining_before, attempt),
+                    attempt,
+                )
             except ResearchUnavailable as exc:
                 last_error = exc
                 exc.attempt = attempt

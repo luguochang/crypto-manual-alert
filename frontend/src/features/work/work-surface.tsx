@@ -11,7 +11,14 @@ import {
 } from "react";
 
 import { AnalysisProjection } from "@/features/analysis/analysis-projection";
-import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";
+import {
+  DurableRunProgress,
+  OfficialRunStream,
+} from "@/features/agent-runtime/official-run-stream";
+import { NotificationStatus } from "@/features/notifications/notification-status";
+import { DeepResearchProjection } from "@/features/research/deep-research-projection";
+import { CompletionScopeStatus } from "@/features/status/completion-scope-status";
+import { DeepResearchReviewPanel } from "@/features/work/deep-research-review-panel";
 import {
   HumanReviewPanel,
   isServerExpiredReviewConflict,
@@ -27,13 +34,21 @@ import { TaskForkPanel } from "@/features/work/task-fork-panel";
 import {
   cancelTask,
   createAnalysis,
+  createDeepResearch,
   getTask,
   ProductApiError,
+  retryTask,
   respondAllInterrupts,
 } from "@/lib/api/product-client";
 import {
-  interruptResponseSchema,
+  analysisSubmissionSchema,
+  deepResearchSubmissionSchema,
+  isAnalysisPendingInterrupt,
+  isDeepResearchPendingInterrupt,
   respondAllInterruptsSchema,
+  validateInterruptResponseForPayload,
+  type AnalysisSubmission,
+  type DeepResearchSubmission,
   type AgentStreamBinding,
   type InterruptResponse,
   type PendingInterruptPause,
@@ -41,6 +56,7 @@ import {
   type ProductTask,
   type RespondAllInterrupts,
 } from "@/lib/schemas/product-api";
+import { stableFingerprint } from "@/lib/stable-fingerprint";
 
 const symbols: Array<{ short: string; value: ProductSymbol }> = [
   { short: "BTC", value: "BTC-USDT-SWAP" },
@@ -52,9 +68,36 @@ const terminalStatuses = new Set(["succeeded", "blocked", "failed", "cancelled"]
 const productTaskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const officialStreamAttachDelayMs = 1_000;
 const taskPollIntervalMs = 1_000;
+const maxTaskPollRetryDelayMs = 10_000;
+const terminalTaskRevalidationDelaysMs = [5_000, 15_000, 30_000, 60_000] as const;
 const subscribeHydration = () => () => undefined;
 
+type WorkMode = "analysis" | "deep_research";
+
+type TerminalTaskRevalidationTimer = ReturnType<typeof setTimeout>;
+
+export type TerminalTaskRevalidationEnvironment = {
+  isVisible: () => boolean;
+  setTimer: (
+    callback: () => void,
+    delayMs: number,
+  ) => TerminalTaskRevalidationTimer;
+  clearTimer: (timer: TerminalTaskRevalidationTimer) => void;
+  subscribeVisibility: (listener: () => void) => () => void;
+};
+
+export type TerminalTaskRevalidationOptions = {
+  delaysMs: readonly number[];
+  revalidate: () => Promise<boolean>;
+  environment: TerminalTaskRevalidationEnvironment;
+};
+
 export type ReviewBatchRequestIdentity = {
+  fingerprint: string;
+  idempotencyKey: string;
+};
+
+export type AnalysisRequestIdentity = {
   fingerprint: string;
   idempotencyKey: string;
 };
@@ -92,7 +135,7 @@ export function reviewPauseFingerprint(pause: PendingInterruptPause): string {
   const members = pause.members
     .map((member) => [member.interrupt_id, member.response_version] as const)
     .sort(([left], [right]) => left.localeCompare(right));
-  return JSON.stringify([pause.pause_id, pause.pause_version, members]);
+  return stableFingerprint([pause.pause_id, pause.pause_version, members]);
 }
 
 export function reconcileReviewBatchState(
@@ -127,17 +170,19 @@ export function recordReviewDecision(
   response: InterruptResponse,
 ): ReviewBatchCoordinatorState {
   const reconciled = reconcileReviewBatchState(current, pause);
+  const member = pause.members.find((candidate) => candidate.interrupt_id === interruptId);
   if (
     pause.status !== "pending"
-    || !pause.members.some((member) => member.interrupt_id === interruptId)
+    || member === undefined
   ) {
     throw new Error("Review decision does not belong to the active pending pause");
   }
+  const validatedResponse = validateInterruptResponseForPayload(member.payload, response);
   return {
     ...reconciled,
     drafts: {
       ...reconciled.drafts,
-      [interruptId]: interruptResponseSchema.parse(response),
+      [interruptId]: validatedResponse,
     },
     phase: reconciled.phase === "network_error" ? "idle" : reconciled.phase,
     failureMessage: reconciled.phase === "network_error"
@@ -164,11 +209,14 @@ export function buildRespondAllSubmission(
   return respondAllInterruptsSchema.parse({
     pause_id: pause.pause_id,
     pause_version: pause.pause_version,
-    responses: pause.members.map((member) => ({
-      interrupt_id: member.interrupt_id,
-      response_version: member.response_version,
-      response: drafts[member.interrupt_id],
-    })),
+    responses: pause.members.map((member) => {
+      const response = drafts[member.interrupt_id];
+      return {
+        interrupt_id: member.interrupt_id,
+        response_version: member.response_version,
+        response: validateInterruptResponseForPayload(member.payload, response),
+      };
+    }),
   });
 }
 
@@ -189,10 +237,167 @@ export function resolveReviewBatchRequestIdentity(
   previous: ReviewBatchRequestIdentity | null,
   createIdempotencyKey: () => string = () => crypto.randomUUID(),
 ): ReviewBatchRequestIdentity {
-  const fingerprint = JSON.stringify(respondAllInterruptsSchema.parse(input));
+  const fingerprint = stableFingerprint(respondAllInterruptsSchema.parse(input));
   return previous?.fingerprint === fingerprint
     ? previous
     : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function resolveAnalysisRequestIdentity(
+  input: AnalysisSubmission,
+  previous: AnalysisRequestIdentity | null,
+  createIdempotencyKey: () => string = () => crypto.randomUUID(),
+): AnalysisRequestIdentity {
+  const fingerprint = stableFingerprint(analysisSubmissionSchema.parse(input));
+  return previous?.fingerprint === fingerprint
+    ? previous
+    : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function resolveDeepResearchRequestIdentity(
+  input: DeepResearchSubmission,
+  previous: AnalysisRequestIdentity | null,
+  createIdempotencyKey: () => string = () => crypto.randomUUID(),
+): AnalysisRequestIdentity {
+  const fingerprint = stableFingerprint(deepResearchSubmissionSchema.parse(input));
+  return previous?.fingerprint === fingerprint
+    ? previous
+    : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function preservesAnalysisRequestIdentity(error: unknown): boolean {
+  if (!(error instanceof ProductApiError)) return true;
+  return error.status === 408
+    || error.status === 429
+    || (error.status >= 500 && error.status <= 599);
+}
+
+export function shouldApplyProductTaskProjection(
+  current: ProductTask | null,
+  incoming: ProductTask,
+): boolean {
+  if (current === null || current.task_id !== incoming.task_id) return true;
+
+  const currentIsTerminal = terminalStatuses.has(current.status);
+  const incomingIsTerminal = terminalStatuses.has(incoming.status);
+  if (!currentIsTerminal) return true;
+
+  const isAuthoritativeTerminalCorrection = hasTerminalProjectionConflict(incoming);
+  return incomingIsTerminal
+    && (current.status === incoming.status || isAuthoritativeTerminalCorrection);
+}
+
+export function shouldAttachOfficialStream(
+  task: Pick<ProductTask, "status" | "cancel_requested_at"> | null,
+  historicalRunSelection: boolean,
+): boolean {
+  return task !== null
+    && !historicalRunSelection
+    && !terminalStatuses.has(task.status)
+    && task.cancel_requested_at === null;
+}
+
+function hasTerminalProjectionConflict(task: ProductTask): boolean {
+  return task.status === "failed"
+    && task.errors.some((error) => error.code === "terminal_projection_conflict");
+}
+
+export function startTerminalTaskRevalidation({
+  delaysMs,
+  revalidate,
+  environment,
+}: TerminalTaskRevalidationOptions): () => void {
+  let attempt = 0;
+  let timer: TerminalTaskRevalidationTimer | null = null;
+  let requestInFlight = false;
+  let waitingForVisibility = false;
+  let stopped = false;
+  let unsubscribeVisibility: (() => void) | null = null;
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    waitingForVisibility = false;
+    if (timer !== null) {
+      environment.clearTimer(timer);
+      timer = null;
+    }
+    unsubscribeVisibility?.();
+    unsubscribeVisibility = null;
+  };
+
+  const scheduleNext = () => {
+    if (stopped) return;
+    if (attempt >= delaysMs.length) {
+      stop();
+      return;
+    }
+    timer = environment.setTimer(() => {
+      timer = null;
+      if (!environment.isVisible()) {
+        waitingForVisibility = true;
+        return;
+      }
+      void runRevalidation();
+    }, delaysMs[attempt]);
+  };
+
+  const runRevalidation = async () => {
+    if (stopped || requestInFlight || attempt >= delaysMs.length) return;
+    requestInFlight = true;
+    waitingForVisibility = false;
+    attempt += 1;
+
+    let shouldContinue = true;
+    try {
+      shouldContinue = await revalidate();
+    } catch {
+      shouldContinue = true;
+    } finally {
+      requestInFlight = false;
+    }
+
+    if (stopped) return;
+    if (!shouldContinue) {
+      stop();
+      return;
+    }
+    scheduleNext();
+  };
+
+  unsubscribeVisibility = environment.subscribeVisibility(() => {
+    if (
+      stopped
+      || !waitingForVisibility
+      || !environment.isVisible()
+    ) return;
+    waitingForVisibility = false;
+    void runRevalidation();
+  });
+  scheduleNext();
+  return stop;
+}
+
+export function taskCompletionWarning(task: ProductTask): string | null {
+  const messages: string[] = [];
+
+  if (task.warnings.includes("notification_delivery_retrying")) {
+    messages.push("分析已完成，通知发送失败，系统将在重试窗口内继续发送。");
+  } else if (task.warnings.includes("notification_delivery_failed")) {
+    messages.push("分析已完成，但通知发送未成功。");
+  } else if (task.warnings.includes("notification_delivery_unknown")) {
+    messages.push("分析已完成，但通知结果暂时无法确认。");
+  }
+
+  const observabilityStatus = task.completion_scope?.observability ?? "not_enabled";
+  if (observabilityStatus === "pending") {
+    messages.push("运行记录同步仍在处理中，分析结果不受影响。");
+  }
+  if (observabilityStatus === "degraded") {
+    messages.push("分析结果已保存，但部分诊断记录未能同步；不影响本次分析结果。");
+  }
+
+  return messages.length > 0 ? messages.join(" ") : null;
 }
 
 export function hasUnsubmittedReviewDrafts(
@@ -265,8 +470,11 @@ export function WorkSurface() {
     () => false,
   );
   const [symbol, setSymbol] = useState<ProductSymbol>("BTC-USDT-SWAP");
+  const [mode, setMode] = useState<WorkMode>("analysis");
   const [horizon, setHorizon] = useState("4h");
   const [query, setQuery] = useState("");
+  const [notify, setNotify] = useState(false);
+  const [notificationRequestTaskId, setNotificationRequestTaskId] = useState<string | null>(null);
   const [task, setTask] = useState<ProductTask | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -284,11 +492,26 @@ export function WorkSurface() {
   const submitLock = useRef(false);
   const cancelLock = useRef(false);
   const cancelRequest = useRef<{ taskId: string; idempotencyKey: string } | null>(null);
+  const analysisRequest = useRef<AnalysisRequestIdentity | null>(null);
   const pollingLock = useRef(false);
   const reviewSubmissionLock = useRef(false);
   const taskRef = useRef<ProductTask | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
   const reviewBatchRef = useRef(reviewBatch);
+
+  const applyTaskProjection = useCallback((
+    nextTask: ProductTask,
+    allowTerminalReset = false,
+  ) => {
+    if (
+      !allowTerminalReset
+      && !shouldApplyProductTaskProjection(taskRef.current, nextTask)
+    ) return false;
+
+    taskRef.current = nextTask;
+    setTask(nextTask);
+    return true;
+  }, []);
 
   useEffect(() => {
     taskRef.current = task;
@@ -324,22 +547,44 @@ export function WorkSurface() {
     selectedRunId: string | null,
   ) => {
     let currentTask = initialTask;
+    let consecutiveReadFailures = 0;
+    let nextDelayMs = taskPollIntervalMs;
 
     try {
       while (
         shouldPollTask(currentTask)
         && pollVersion.current === version
       ) {
-        await delay(taskPollIntervalMs);
+        await delay(nextDelayMs);
         if (pollVersion.current !== version) return;
 
-        currentTask = await getTask(
-          initialTask.task_id,
-          undefined,
-          selectedRunId ?? undefined,
-        );
+        let incomingTask: ProductTask;
+        try {
+          incomingTask = await getTask(
+            initialTask.task_id,
+            undefined,
+            selectedRunId ?? undefined,
+          );
+        } catch (error) {
+          if (pollVersion.current !== version) return;
+          if (!isRecoverableTaskRead(error)) throw error;
+
+          consecutiveReadFailures += 1;
+          nextDelayMs = taskPollRetryDelayMs(consecutiveReadFailures);
+          setRecoverableTaskId(null);
+          setRequestError("任务状态读取暂时中断，正在自动重试。");
+          continue;
+        }
         if (pollVersion.current !== version) return;
-        setTask(currentTask);
+        consecutiveReadFailures = 0;
+        nextDelayMs = taskPollIntervalMs;
+        if (!applyTaskProjection(incomingTask)) {
+          const authoritativeTask = taskRef.current;
+          if (authoritativeTask?.task_id !== initialTask.task_id) return;
+          currentTask = authoritativeTask;
+          continue;
+        }
+        currentTask = incomingTask;
         setRequestError(null);
         setRecoverableTaskId(null);
       }
@@ -355,7 +600,7 @@ export function WorkSurface() {
         setPolling(false);
       }
     }
-  }, []);
+  }, [applyTaskProjection]);
 
   const startPolling = useCallback((
     initialTask: ProductTask,
@@ -393,13 +638,16 @@ export function WorkSurface() {
         selectedRunId ?? undefined,
       );
       if (pollVersion.current !== version) return;
-      setTask(recoveredTask);
-      setSymbol(recoveredTask.symbol);
-      setHorizon(recoveredTask.horizon);
-      setQuery(recoveredTask.query_text ?? "");
+      const applied = applyTaskProjection(recoveredTask);
+      const authoritativeTask = applied ? recoveredTask : taskRef.current;
+      if (authoritativeTask?.task_id !== taskId) return;
+      setMode(authoritativeTask.task_type === "deep_research" ? "deep_research" : "analysis");
+      setSymbol(authoritativeTask.symbol);
+      setHorizon(authoritativeTask.horizon);
+      setQuery(authoritativeTask.query_text ?? "");
       pollingLock.current = false;
       setPolling(false);
-      startPolling(recoveredTask, version, selectedRunId);
+      startPolling(authoritativeTask, version, selectedRunId);
     } catch (error) {
       if (pollVersion.current !== version) return;
       pollingLock.current = false;
@@ -407,7 +655,7 @@ export function WorkSurface() {
       setRecoverableTaskId(isRecoverableTaskRead(error) ? taskId : null);
       setRequestError(readableRequestError(error));
     }
-  }, [startPolling]);
+  }, [applyTaskProjection, startPolling]);
 
   const refreshProductTask = useCallback(async (taskId: string) => {
     const version = pollVersion.current;
@@ -418,15 +666,19 @@ export function WorkSurface() {
         selectedRunIdRef.current ?? undefined,
       );
       if (pollVersion.current !== version || taskRef.current?.task_id !== taskId) return;
-      setTask(refreshedTask);
+      const applied = applyTaskProjection(refreshedTask);
       setRequestError(null);
       setRecoverableTaskId(null);
 
-      if (!shouldPollTask(refreshedTask)) {
+      const authoritativeTask = applied ? refreshedTask : taskRef.current;
+      if (
+        authoritativeTask?.task_id === taskId
+        && !shouldPollTask(authoritativeTask)
+      ) {
         pollVersion.current += 1;
         pollingLock.current = false;
         setPolling(false);
-      } else if (!pollingLock.current) {
+      } else if (applied && !pollingLock.current) {
         startPolling(refreshedTask, version, selectedRunIdRef.current);
       }
     } catch (error) {
@@ -434,12 +686,72 @@ export function WorkSurface() {
       setRecoverableTaskId(isRecoverableTaskRead(error) ? taskId : null);
       setRequestError(readableRequestError(error));
     }
-  }, [startPolling]);
+  }, [applyTaskProjection, startPolling]);
 
-  const handleOfficialCompleted = useCallback(() => {
-    const taskId = taskRef.current?.task_id;
-    if (taskId) void refreshProductTask(taskId);
-  }, [refreshProductTask]);
+  const terminalRevalidationTaskId = task !== null
+    && terminalStatuses.has(task.status)
+    && !hasTerminalProjectionConflict(task)
+    ? task.task_id
+    : null;
+
+  useEffect(() => {
+    if (terminalRevalidationTaskId === null) return;
+
+    const taskId = terminalRevalidationTaskId;
+    const selectedRunId = selectedProductRunId;
+    let active = true;
+    const stop = startTerminalTaskRevalidation({
+      delaysMs: terminalTaskRevalidationDelaysMs,
+      environment: {
+        isVisible: () => document.visibilityState === "visible",
+        setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimer: (timer) => clearTimeout(timer),
+        subscribeVisibility: (listener) => {
+          document.addEventListener("visibilitychange", listener);
+          return () => document.removeEventListener("visibilitychange", listener);
+        },
+      },
+      revalidate: async () => {
+        const currentTask = taskRef.current;
+        if (
+          !active
+          || currentTask?.task_id !== taskId
+          || selectedRunIdRef.current !== selectedRunId
+          || !terminalStatuses.has(currentTask.status)
+          || hasTerminalProjectionConflict(currentTask)
+        ) return false;
+
+        try {
+          const incomingTask = await getTask(
+            taskId,
+            undefined,
+            selectedRunId ?? undefined,
+          );
+          if (
+            !active
+            || taskRef.current?.task_id !== taskId
+            || selectedRunIdRef.current !== selectedRunId
+          ) return false;
+
+          const applied = applyTaskProjection(incomingTask);
+          if (applied) {
+            setRequestError(null);
+            setRecoverableTaskId(null);
+          }
+          const authoritativeTask = applied ? incomingTask : taskRef.current;
+          return authoritativeTask?.task_id === taskId
+            && terminalStatuses.has(authoritativeTask.status)
+            && !hasTerminalProjectionConflict(authoritativeTask);
+        } catch {
+          return true;
+        }
+      },
+    });
+    return () => {
+      active = false;
+      stop();
+    };
+  }, [applyTaskProjection, selectedProductRunId, terminalRevalidationTaskId]);
 
   const submitReviewBatch = useCallback(async (
     preparedState?: ReviewBatchCoordinatorState,
@@ -507,10 +819,13 @@ export function WorkSurface() {
       pollVersion.current = version;
       pollingLock.current = false;
       setPolling(false);
-      setTask(updatedTask);
+      const applied = applyTaskProjection(updatedTask);
+      const authoritativeTask = applied ? updatedTask : taskRef.current;
       setRequestError(null);
       setRecoverableTaskId(null);
-      startPolling(updatedTask, version, null);
+      if (authoritativeTask?.task_id === currentTask.task_id) {
+        startPolling(authoritativeTask, version, null);
+      }
     } catch (error) {
       if (
         taskRef.current?.task_id !== currentTask.task_id
@@ -531,7 +846,7 @@ export function WorkSurface() {
     } finally {
       reviewSubmissionLock.current = false;
     }
-  }, [recoverTask, startPolling, updateReviewBatch]);
+  }, [applyTaskProjection, recoverTask, startPolling, updateReviewBatch]);
 
   const handleReviewDecision = useCallback((
     pause: PendingInterruptPause,
@@ -579,6 +894,7 @@ export function WorkSurface() {
     reviewSubmissionLock.current = false;
     cancelLock.current = false;
     cancelRequest.current = null;
+    analysisRequest.current = null;
     taskRef.current = null;
     selectedRunIdRef.current = selection?.runId ?? null;
     setSelectedProductRunId(selection?.runId ?? null);
@@ -593,6 +909,7 @@ export function WorkSurface() {
     setPolling(false);
     setCancelling(false);
     setForkNoticeTaskId(null);
+    setNotificationRequestTaskId(null);
     setHistoricalRunSelection(selection?.runId !== null && selection !== null);
     if (selection !== null) void recoverTask(selection.taskId, selection.runId);
   }, [recoverTask]);
@@ -614,10 +931,7 @@ export function WorkSurface() {
   const agentAssistantId = task?.agent_stream?.assistant_id ?? null;
   const agentThreadId = task?.agent_stream?.thread_id ?? null;
   const agentRunId = task?.agent_stream?.run_id ?? null;
-  const streamEligible = task !== null
-    && !historicalRunSelection
-    && !terminalStatuses.has(task.status)
-    && task.cancel_requested_at === null;
+  const streamEligible = shouldAttachOfficialStream(task, historicalRunSelection);
 
   useEffect(() => {
     if (
@@ -670,6 +984,7 @@ export function WorkSurface() {
     const emptyReviewBatch = createEmptyReviewBatchState();
     reviewBatchRef.current = emptyReviewBatch;
     setReviewBatch(emptyReviewBatch);
+    taskRef.current = null;
     setTask(null);
     selectedRunIdRef.current = null;
     setSelectedProductRunId(null);
@@ -677,18 +992,52 @@ export function WorkSurface() {
     setForkNoticeTaskId(null);
 
     try {
-      const createdTask = await createAnalysis({
-        symbol,
-        horizon,
-        query_text: query,
-        notify: false,
-      });
+      const notificationRequested = mode === "analysis" && notify;
+      let createdTask: ProductTask;
+      if (mode === "deep_research") {
+        const submission = deepResearchSubmissionSchema.parse({
+          symbol,
+          horizon,
+          query_text: query,
+        });
+        const request = resolveDeepResearchRequestIdentity(
+          submission,
+          analysisRequest.current,
+        );
+        analysisRequest.current = request;
+        createdTask = await createDeepResearch(
+          submission,
+          undefined,
+          request.idempotencyKey,
+        );
+      } else {
+        const submission = analysisSubmissionSchema.parse({
+          symbol,
+          horizon,
+          query_text: query,
+          notify: notificationRequested,
+        });
+        const request = resolveAnalysisRequestIdentity(
+          submission,
+          analysisRequest.current,
+        );
+        analysisRequest.current = request;
+        createdTask = await createAnalysis(
+            submission,
+            undefined,
+            request.idempotencyKey,
+        );
+      }
       if (pollVersion.current !== version) {
         submitLock.current = false;
         return;
       }
 
-      setTask(createdTask);
+      analysisRequest.current = null;
+      applyTaskProjection(createdTask);
+      setNotificationRequestTaskId(
+        notificationRequested ? createdTask.task_id : null,
+      );
       persistTaskId(createdTask.task_id);
       setSubmitting(false);
       submitLock.current = false;
@@ -696,10 +1045,46 @@ export function WorkSurface() {
     } catch (error) {
       submitLock.current = false;
       if (pollVersion.current !== version) return;
+      if (!preservesAnalysisRequestIdentity(error)) {
+        analysisRequest.current = null;
+      }
       setSubmitting(false);
       setRequestError(readableRequestError(error));
     }
-  }, [horizon, query, startPolling, symbol]);
+  }, [applyTaskProjection, horizon, mode, notify, query, startPolling, symbol]);
+
+  const retryCurrentTask = useCallback(async () => {
+    const currentTask = taskRef.current;
+    if (
+      submitLock.current
+      || currentTask === null
+      || historicalRunSelection
+      || !["failed", "blocked"].includes(currentTask.status)
+    ) return;
+
+    submitLock.current = true;
+    const version = pollVersion.current + 1;
+    pollVersion.current = version;
+    setSubmitting(true);
+    setRequestError(null);
+    setRecoverableTaskId(null);
+    setStreamBinding(null);
+    selectedRunIdRef.current = null;
+    setSelectedProductRunId(null);
+    setHistoricalRunSelection(false);
+    try {
+      const retriedTask = await retryTask(currentTask.task_id);
+      if (pollVersion.current !== version) return;
+      applyTaskProjection(retriedTask, true);
+      startPolling(retriedTask, version, null);
+    } catch (error) {
+      if (pollVersion.current !== version) return;
+      setRequestError(readableRequestError(error));
+    } finally {
+      submitLock.current = false;
+      if (pollVersion.current === version) setSubmitting(false);
+    }
+  }, [applyTaskProjection, historicalRunSelection, startPolling]);
 
   const cancelCurrentTask = useCallback(async () => {
     const currentTask = taskRef.current;
@@ -734,8 +1119,11 @@ export function WorkSurface() {
         request.idempotencyKey,
       );
       if (pollVersion.current !== version) return;
-      setTask(requested);
-      startPolling(requested, version, null);
+      const applied = applyTaskProjection(requested);
+      const authoritativeTask = applied ? requested : taskRef.current;
+      if (authoritativeTask?.task_id === currentTask.task_id) {
+        startPolling(authoritativeTask, version, null);
+      }
     } catch (error) {
       if (pollVersion.current !== version) return;
       setRequestError(readableRequestError(error));
@@ -748,7 +1136,7 @@ export function WorkSurface() {
       cancelLock.current = false;
       setCancelling(false);
     }
-  }, [historicalRunSelection, startPolling]);
+  }, [applyTaskProjection, historicalRunSelection, startPolling]);
 
   const handleForkAccepted = useCallback((
     requestedContext: ForkContext,
@@ -775,8 +1163,7 @@ export function WorkSurface() {
     const emptyReviewBatch = createEmptyReviewBatchState();
     reviewBatchRef.current = emptyReviewBatch;
     setReviewBatch(emptyReviewBatch);
-    taskRef.current = transition.task;
-    setTask(transition.task);
+    applyTaskProjection(transition.task);
     setStreamBinding(null);
     setRequestError(null);
     setRecoverableTaskId(null);
@@ -788,7 +1175,7 @@ export function WorkSurface() {
     setForkNoticeTaskId(transition.task.task_id);
     persistTaskId(transition.task.task_id);
     if (transition.shouldPoll) startPolling(transition.task, version, null);
-  }, [startPolling]);
+  }, [applyTaskProjection, startPolling]);
 
   const refreshForkContext = useCallback((requestedContext: ForkContext) => {
     const currentTask = taskRef.current;
@@ -828,14 +1215,15 @@ export function WorkSurface() {
   const forkControlDisabled = cancelling
     || cancellationPending
     || renderedReviewBatch.phase === "submitting";
+  const completionWarning = task === null ? null : taskCompletionWarning(task);
 
   return (
     <div className="work-page">
       <header className="work-header">
         <div>
-          <p className="section-kicker">Work / New analysis</p>
-          <h1>市场分析工作台</h1>
-          <p>提交一项人工决策分析，持续读取产品状态与最终报告。</p>
+          <p className="section-kicker">Work / New task</p>
+          <h1>研究与决策工作台</h1>
+          <p>提交市场分析或后台深度研究，持续读取产品状态与最终报告。</p>
         </div>
         <span className="boundary-label">
           <CircleAlert size={17} aria-hidden="true" />
@@ -872,7 +1260,12 @@ export function WorkSurface() {
       {activeStreamBinding && !historicalRunSelection ? (
         <OfficialRunStream
           binding={activeStreamBinding}
-          onCompleted={handleOfficialCompleted}
+          stageHistory={task?.stage_history ?? null}
+        />
+      ) : task?.stage_history ? (
+        <DurableRunProgress
+          history={task.stage_history}
+          historical={historicalRunSelection}
         />
       ) : null}
 
@@ -890,7 +1283,9 @@ export function WorkSurface() {
             aria-describedby={cancellationPending ? "cancel-task-status" : undefined}
           >
             <CircleX size={17} aria-hidden="true" />
-            {cancelling || cancellationPending ? "正在停止" : "取消分析"}
+            {cancelling || cancellationPending
+              ? "正在停止"
+              : task?.task_type === "deep_research" ? "取消研究" : "取消分析"}
           </button>
           {cancellationPending ? (
             <span id="cancel-task-status" className="task-command-status" role="status">
@@ -902,28 +1297,34 @@ export function WorkSurface() {
 
       {pendingPause !== null ? (
         <div className="hitl-review-stack">
-          {pendingPause.members.map((interrupt, index) => (
-            <HumanReviewPanel
-              key={`${pendingPause.pause_id}:${pendingPause.pause_version}:${interrupt.interrupt_id}:${interrupt.response_version}`}
-              interrupt={interrupt}
-              expiresAt={pendingPause.expires_at}
-              disabled={externalReviewDisabled}
-              phase={renderedReviewBatch.phase}
-              failureMessage={renderedReviewBatch.failureMessage}
-              decision={renderedReviewBatch.drafts[interrupt.interrupt_id] ?? null}
-              deferSubmission={pendingPause.members.length > 1}
-              announceSubmissionState={pendingPause.members.length === 1}
-              showSubmissionNotice={pendingPause.members.length === 1}
-              reviewPosition={pendingPause.members.length > 1
+          {pendingPause.members.map((interrupt, index) => {
+            const sharedProps = {
+              expiresAt: pendingPause.expires_at,
+              disabled: externalReviewDisabled,
+              phase: renderedReviewBatch.phase,
+              failureMessage: renderedReviewBatch.failureMessage,
+              decision: renderedReviewBatch.drafts[interrupt.interrupt_id] ?? null,
+              deferSubmission: pendingPause.members.length > 1,
+              announceSubmissionState: pendingPause.members.length === 1,
+              showSubmissionNotice: pendingPause.members.length === 1,
+              reviewPosition: pendingPause.members.length > 1
                 ? { index: index + 1, total: pendingPause.members.length }
-                : undefined}
-              onDecide={(response) => handleReviewDecision(
+                : undefined,
+              onDecide: (response: InterruptResponse) => handleReviewDecision(
                 pendingPause,
                 interrupt.interrupt_id,
                 response,
-              )}
-            />
-          ))}
+              ),
+            };
+            const key = `${pendingPause.pause_id}:${pendingPause.pause_version}:${interrupt.interrupt_id}:${interrupt.response_version}`;
+            if (isDeepResearchPendingInterrupt(interrupt)) {
+              return <DeepResearchReviewPanel key={key} interrupt={interrupt} {...sharedProps} />;
+            }
+            if (isAnalysisPendingInterrupt(interrupt)) {
+              return <HumanReviewPanel key={key} interrupt={interrupt} {...sharedProps} />;
+            }
+            return null;
+          })}
           {pendingPause.members.length > 1 ? (
             <section
               className="hitl-confirmation"
@@ -971,17 +1372,53 @@ export function WorkSurface() {
         </div>
       ) : null}
 
-      {task ? (
+      {task?.task_type === "deep_research" ? (
+        <DeepResearchProjection
+          key={`${task.task_id}:${task.status}:${task.deep_research_artifact?.schema_version ?? "pending"}`}
+          task={task}
+          onRetry={
+            !active
+            && !historicalRunSelection
+            && task.status === "failed"
+              ? retryCurrentTask
+              : undefined
+          }
+          retrying={submitting}
+        />
+      ) : task ? (
         <AnalysisProjection
           key={`${task.task_id}:${task.status}:${task.artifact?.content_version ?? 0}`}
           task={task}
-          onRetry={!active && query.trim().length >= 4 ? createProductTask : undefined}
+          onRetry={
+            !active
+            && !historicalRunSelection
+            && ["failed", "blocked"].includes(task.status)
+              ? retryCurrentTask
+              : undefined
+          }
           retrying={submitting}
         />
       ) : null}
 
+      {task ? (
+        <CompletionScopeStatus
+          status={task.completion_scope.observability ?? "not_enabled"}
+          message={completionWarning}
+        />
+      ) : null}
 
-      {task && shouldOfferForkControl(selectedProductRunId) ? (
+      {task?.task_type === "market_analysis" && !historicalRunSelection ? (
+        <NotificationStatus
+          key={task.task_id}
+          taskId={task.task_id}
+          requested={notificationRequestTaskId === task.task_id}
+          taskStatus={task.status}
+          onStatusChange={refreshProductTask}
+        />
+      ) : null}
+
+
+      {task?.task_type === "market_analysis" && shouldOfferForkControl(selectedProductRunId) ? (
         <TaskForkPanel
           key={forkContextKey({
             taskId: task.task_id,
@@ -999,7 +1436,9 @@ export function WorkSurface() {
         <section className="empty-work-state" aria-live="polite">
           <span className="empty-state-line" aria-hidden="true" />
           <div>
-            <h2>{submitting ? "正在提交分析" : "正在恢复分析"}</h2>
+            <h2>{submitting
+              ? mode === "deep_research" ? "正在提交深度研究" : "正在提交分析"
+              : mode === "deep_research" ? "正在恢复深度研究" : "正在恢复分析"}</h2>
             <p>{submitting ? "正在创建持久化任务。" : "正在读取已保存的任务与运行状态。"}</p>
           </div>
         </section>
@@ -1011,15 +1450,45 @@ export function WorkSurface() {
       >
         <div className="section-heading">
           <div>
-            <h2 id="analysis-request-title">分析请求</h2>
-            <p>选择标的与周期，并描述需要判断的问题。</p>
+            <h2 id="analysis-request-title">
+              {mode === "deep_research" ? "深度研究请求" : "分析请求"}
+            </h2>
+            <p>{mode === "deep_research"
+              ? "选择研究标的、范围与需要核验的问题。"
+              : "选择标的与周期，并描述需要判断的问题。"}</p>
           </div>
-          <span className="service-indicator"><span aria-hidden="true" />Product API</span>
+          <span className="service-indicator"><span aria-hidden="true" />任务状态可恢复</span>
         </div>
 
         <form className="analysis-form" onSubmit={submitAnalysis}>
+          <fieldset className="mode-fieldset" disabled={controlsDisabled}>
+            <legend>任务模式</legend>
+            <div className="segmented-control mode-segmented-control">
+              <label>
+                <input
+                  type="radio"
+                  name="work-mode"
+                  value="analysis"
+                  checked={mode === "analysis"}
+                  onChange={() => setMode("analysis")}
+                />
+                <span>市场分析</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="work-mode"
+                  value="deep_research"
+                  checked={mode === "deep_research"}
+                  onChange={() => setMode("deep_research")}
+                />
+                <span>深度研究</span>
+              </label>
+            </div>
+          </fieldset>
+
           <fieldset className="symbol-fieldset" disabled={controlsDisabled}>
-            <legend>分析标的</legend>
+            <legend>{mode === "deep_research" ? "研究标的" : "分析标的"}</legend>
             <div className="segmented-control">
               {symbols.map((item) => (
                 <label key={item.value}>
@@ -1038,7 +1507,7 @@ export function WorkSurface() {
           </fieldset>
 
           <label className="field-control horizon-control">
-            <span>分析周期</span>
+            <span>{mode === "deep_research" ? "研究范围" : "分析周期"}</span>
             <select
               value={horizon}
               onChange={(event) => setHorizon(event.target.value)}
@@ -1048,25 +1517,46 @@ export function WorkSurface() {
               <option value="1h">1 小时</option>
               <option value="4h">4 小时</option>
               <option value="1d">1 天</option>
+              <option value="7d">7 天</option>
+              <option value="30d">30 天</option>
             </select>
           </label>
 
           <label className="field-control query-control">
-            <span>分析问题</span>
+            <span>{mode === "deep_research" ? "研究问题" : "分析问题"}</span>
             <textarea
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="例如：结合近期宏观事件和市场结构，判断当前方向与失效条件"
+              placeholder={mode === "deep_research"
+                ? "例如：研究 BTC 机构采用的最新趋势、主要反证与仍缺失的证据"
+                : "例如：结合近期宏观事件和市场结构，判断当前方向与失效条件"}
               minLength={4}
-              maxLength={2000}
+              maxLength={mode === "deep_research" ? 4000 : 2000}
               rows={4}
               required
               disabled={controlsDisabled}
             />
           </label>
 
+          {mode === "analysis" ? <label className="notification-toggle">
+            <input
+              type="checkbox"
+              aria-label="完成后通知 Bark"
+              checked={notify}
+              onChange={(event) => setNotify(event.target.checked)}
+              disabled={controlsDisabled}
+            />
+            <span className="notification-toggle-track" aria-hidden="true"><span /></span>
+            <span>
+              <strong>完成后通知</strong>
+              <small>Bark</small>
+            </span>
+          </label> : null}
+
           <div className="form-actions">
-            <p>分析结果仅供人工决策参考，所有操作均需自行确认。</p>
+            <p>{mode === "deep_research"
+              ? "研究报告保留可验证来源与证据缺口。"
+              : "分析结果仅供人工决策参考，所有操作均需自行确认。"}</p>
             <button
               className="submit-button"
               type="submit"
@@ -1078,8 +1568,8 @@ export function WorkSurface() {
                 : cancelling || cancellationPending
                   ? "正在停止"
                   : active
-                    ? "分析处理中"
-                    : "开始分析"}
+                    ? mode === "deep_research" ? "研究处理中" : "分析处理中"
+                    : mode === "deep_research" ? "开始深度研究" : "开始分析"}
             </button>
           </div>
         </form>
@@ -1094,11 +1584,11 @@ export function WorkSurface() {
 
 function EmptyWorkState() {
   return (
-    <section className="empty-work-state" aria-label="尚未提交分析">
+    <section className="empty-work-state" aria-label="尚未提交任务">
       <span className="empty-state-line" aria-hidden="true" />
       <div>
-        <h2>等待新的分析请求</h2>
-        <p>提交后将在这里显示排队、执行、门禁与最终报告状态。</p>
+        <h2>等待新的任务请求</h2>
+        <p>提交后将在这里显示排队、执行、证据与最终报告状态。</p>
       </div>
     </section>
   );
@@ -1165,17 +1655,29 @@ function isRecoverableTaskRead(error: unknown): boolean {
   return error.status === 408 || error.status === 429 || error.status >= 500;
 }
 
-function shouldPollTask(task: ProductTask) {
+export function shouldPollTask(task: ProductTask) {
+  if (
+    task.status === "waiting_human"
+    && task.pending_interrupts === null
+    && task.projection_scope?.mode === "selected_run"
+  ) return false;
   return !terminalStatuses.has(task.status);
+}
+
+export function taskPollRetryDelayMs(consecutiveFailures: number): number {
+  const normalizedFailures = Math.max(1, Math.floor(consecutiveFailures));
+  return Math.min(
+    taskPollIntervalMs * (2 ** (normalizedFailures - 1)),
+    maxTaskPollRetryDelayMs,
+  );
 }
 
 function delay(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function taskSelectionFromLocation(): { taskId: string; runId: string | null } | null {
-  const search = new URLSearchParams(window.location.search);
-  const taskId = search.get("task");
+export function resolveTaskSelection(search: URLSearchParams): { taskId: string; runId: string | null } | null {
+  const taskId = search.get("task") ?? search.get("task_id");
   if (!taskId || !productTaskIdPattern.test(taskId)) return null;
   const candidateRunId = search.get("run");
   const runId = candidateRunId && productTaskIdPattern.test(candidateRunId)
@@ -1184,10 +1686,15 @@ function taskSelectionFromLocation(): { taskId: string; runId: string | null } |
   return { taskId, runId };
 }
 
+function taskSelectionFromLocation(): { taskId: string; runId: string | null } | null {
+  return resolveTaskSelection(new URLSearchParams(window.location.search));
+}
+
 function persistTaskId(taskId: string) {
   if (!productTaskIdPattern.test(taskId)) return;
   const url = new URL(window.location.href);
   url.searchParams.set("task", taskId);
+  url.searchParams.delete("task_id");
   url.searchParams.delete("run");
   window.history.replaceState(window.history.state, "", url);
 }

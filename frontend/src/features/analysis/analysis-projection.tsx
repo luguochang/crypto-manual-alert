@@ -58,17 +58,31 @@ export function AnalysisProjection({ task, onRetry, retrying = false }: Analysis
             <OctagonAlert size={21} aria-hidden="true" />
             <div>
               <h2>{viewModel.failure.title}</h2>
-              <span>{viewModel.failure.code}</span>
             </div>
           </div>
           <p>{viewModel.failure.message}</p>
           {viewModel.failure.explanation ? (
             <p className="failure-explanation">{viewModel.failure.explanation}</p>
           ) : null}
-          {viewModel.failure.provider || viewModel.failure.errorType || viewModel.failure.attempt ? (
+          <details className="failure-diagnostics-disclosure">
+            <summary>查看失败诊断</summary>
             <dl className="failure-diagnostics" aria-label="失败诊断">
+              <div><dt>关联 ID</dt><dd>{viewModel.failure.correlationId}</dd></div>
+              <div><dt>错误代码</dt><dd>{viewModel.failure.code}</dd></div>
+              {viewModel.failure.fallbackFrom ? (
+                <div><dt>首选数据源</dt><dd>{viewModel.failure.fallbackFrom}</dd></div>
+              ) : null}
+              {viewModel.failure.primaryAttempt ? (
+                <div><dt>首选源尝试</dt><dd>第 {viewModel.failure.primaryAttempt} 次尝试</dd></div>
+              ) : null}
               {viewModel.failure.provider ? (
-                <div><dt>Provider</dt><dd>{viewModel.failure.provider}</dd></div>
+                <div>
+                  <dt>{viewModel.failure.fallbackFrom ? "后备 Provider" : "Provider"}</dt>
+                  <dd>{viewModel.failure.provider}</dd>
+                </div>
+              ) : null}
+              {viewModel.failure.endpoint ? (
+                <div><dt>失败阶段</dt><dd>{viewModel.failure.endpoint}</dd></div>
               ) : null}
               {viewModel.failure.errorType ? (
                 <div><dt>错误类型</dt><dd>{viewModel.failure.errorType}</dd></div>
@@ -77,7 +91,7 @@ export function AnalysisProjection({ task, onRetry, retrying = false }: Analysis
                 <div><dt>尝试次数</dt><dd>第 {viewModel.failure.attempt} 次尝试</dd></div>
               ) : null}
             </dl>
-          ) : null}
+          </details>
           {viewModel.failure.retryable && onRetry ? (
             <button className="retry-button" type="button" onClick={onRetry} disabled={retrying}>
               <RotateCcw size={17} aria-hidden="true" />

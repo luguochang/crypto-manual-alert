@@ -20,6 +20,8 @@ describe("Agent BFF proxy", () => {
     delete process.env.DEVELOPMENT_BOOTSTRAP_PROFILE;
     delete process.env.DEVELOPMENT_BOOTSTRAP_ROLES;
     delete process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT;
+    delete process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER;
+    delete process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_TENANT_ID;
     delete process.env.DEVELOPMENT_BOOTSTRAP_WORKSPACE_ID;
     delete process.env.INTERNAL_JWT_ISSUER;
@@ -54,6 +56,8 @@ describe("Agent BFF proxy", () => {
         "x-tenant-id": "attacker-tenant-id",
         "x-workspace": "attacker-workspace",
         "x-workspace-id": "attacker-workspace-id",
+        "x-request-id": "browser-agent-request-1",
+        "x-correlation-id": "client-owned-correlation",
       },
     });
 
@@ -72,8 +76,31 @@ describe("Agent BFF proxy", () => {
     expect(headers.get("x-tenant-id")).toBeNull();
     expect(headers.get("x-workspace")).toBeNull();
     expect(headers.get("x-workspace-id")).toBeNull();
+    const requestId = headers.get("x-request-id");
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(requestId).not.toBe("browser-agent-request-1");
+    expect(headers.get("x-correlation-id")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-internal-token")).toBeNull();
+    expect(response.headers.get("x-request-id")).toBe(requestId);
+  });
+
+  it("generates one transport request ID and returns it on an authentication error", async () => {
+    process.env.APP_ENVIRONMENT = "production";
+    process.env.AGENT_SERVER_URL = "https://agent-server.internal";
+    const fetcher = vi.fn();
+    const resolveAuthorization = vi.fn(async () => null);
+
+    const response = await proxyAgentRequest(
+      new Request(`https://product.example.com/api/agent/threads/${threadId}/state`),
+      ["threads", threadId, "state"],
+      fetcher,
+      resolveAuthorization,
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("passes history JSON without forwarding browser-owned headers", async () => {
@@ -261,7 +288,7 @@ describe("Agent BFF proxy", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("rejects a non-loopback development Agent URL even with bootstrap fields", async () => {
+  it("rejects a non-loopback development Agent URL with incomplete bootstrap fields", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     process.env.APP_ENVIRONMENT = "development";
     process.env.AGENT_SERVER_URL = "http://agent-server:8123";
@@ -292,4 +319,51 @@ describe("Agent BFF proxy", () => {
     expect(response.status).toBe(502);
     expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it("uses a server-owned scoped token for a complete Compose Agent bootstrap", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    process.env.APP_ENVIRONMENT = "development";
+    process.env.AGENT_SERVER_URL = "http://langgraph-api:8000";
+    process.env.INTERNAL_JWT_PRIVATE_KEY = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    process.env.INTERNAL_JWT_KID = "compose-agent-key";
+    process.env.INTERNAL_JWT_ISSUER = "crypto-alert-v2-compose";
+    process.env.DEVELOPMENT_BOOTSTRAP_ENABLED = "true";
+    process.env.DEVELOPMENT_BOOTSTRAP_PROFILE = "local-proof";
+    process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT = "compose-user";
+    process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER = "crypto-alert-v2-compose";
+    process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID = "99999999-9999-4999-8999-999999999999";
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return Response.json({ values: {}, next: [] });
+    });
+
+    const response = await proxyAgentRequest(
+      new Request(`http://127.0.0.1:3001/api/agent/threads/${threadId}/state`, {
+        headers: { authorization: "Bearer browser-forgery" },
+      }),
+      ["threads", threadId, "state"],
+      fetcher,
+    );
+
+    expect(response.status).toBe(200);
+    const authorization = new Headers(fetcher.mock.calls[0]?.[1]?.headers)
+      .get("authorization") ?? "";
+    const payload = decodePayload(authorization);
+    expect(payload).toMatchObject({
+      aud: "crypto-alert-agent-server",
+      token_use: "user",
+      sub: "compose-user",
+      context_id: "99999999-9999-4999-8999-999999999999",
+    });
+  });
 });
+
+function decodePayload(authorization: string): Record<string, unknown> {
+  const token = authorization.replace(/^Bearer /, "");
+  const encoded = token.split(".")[1];
+  if (!encoded) throw new Error("Missing JWT payload");
+  return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
+}

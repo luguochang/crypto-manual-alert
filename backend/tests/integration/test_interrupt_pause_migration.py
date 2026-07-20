@@ -219,7 +219,7 @@ async def _insert_interrupt(
             "official_interrupt_id, namespace, checkpoint_id, response_version, "
             "status, payload, response, responded_at) "
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, "
-            "'{\"kind\":\"artifact_review\"}'::jsonb, $11::jsonb, "
+            '\'{"kind":"artifact_review"}\'::jsonb, $11::jsonb, '
             "CASE WHEN $11::jsonb IS NULL THEN NULL ELSE now() END)",
             projection_id,
             ids["tenant_id"],
@@ -358,18 +358,133 @@ def _assert_failed_before_ddl(
 def test_empty_database_up_down_round_trip(migration_database: str) -> None:
     upgrade = _alembic(migration_database, "upgrade", "0007_interrupt_pauses")
     assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
-    assert asyncio.run(
-        _fetchval(
-            migration_database,
-            "SELECT to_regclass('app.interrupt_pauses') IS NOT NULL",
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT to_regclass('app.interrupt_pauses') IS NOT NULL",
+            )
         )
-    ) is True
+        is True
+    )
 
     downgrade = _alembic(migration_database, "downgrade", "0006_interrupt_projection")
     assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
-    assert asyncio.run(
-        _fetchval(migration_database, "SELECT to_regclass('app.interrupt_pauses')")
-    ) is None
+    assert (
+        asyncio.run(
+            _fetchval(migration_database, "SELECT to_regclass('app.interrupt_pauses')")
+        )
+        is None
+    )
+
+
+def test_retry_lineage_upgrade_downgrade_upgrade_round_trip(
+    migration_database: str,
+) -> None:
+    upgrade = _alembic(migration_database, "upgrade", "0012_run_retry_lineage")
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT version_num FROM app.alembic_version",
+            )
+        )
+        == "0012_run_retry_lineage"
+    )
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT EXISTS ("
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'app' AND table_name = 'runs' "
+                "AND column_name = 'retry_of_run_id')",
+            )
+        )
+        is True
+    )
+
+    downgrade = _alembic(
+        migration_database,
+        "downgrade",
+        "0011_notification_destinations",
+    )
+    assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT version_num FROM app.alembic_version",
+            )
+        )
+        == "0011_notification_destinations"
+    )
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT NOT EXISTS ("
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'app' AND table_name = 'runs' "
+                "AND column_name = 'retry_of_run_id')",
+            )
+        )
+        is True
+    )
+
+    reupgrade = _alembic(migration_database, "upgrade", "0012_run_retry_lineage")
+    assert reupgrade.returncode == 0, reupgrade.stdout + reupgrade.stderr
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_constraint "
+                "WHERE connamespace = 'app'::regnamespace "
+                "AND conname = 'fk_runs_retry_scope')",
+            )
+        )
+        is True
+    )
+
+
+def test_feedback_upgrade_downgrade_upgrade_round_trip(
+    migration_database: str,
+) -> None:
+    upgrade = _alembic(migration_database, "upgrade", "0013_feedback")
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT to_regclass('app.feedback') IS NOT NULL",
+            )
+        )
+        is True
+    )
+
+    downgrade = _alembic(migration_database, "downgrade", "0012_run_retry_lineage")
+    assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
+    assert (
+        asyncio.run(_fetchval(migration_database, "SELECT to_regclass('app.feedback')"))
+        is None
+    )
+
+    reupgrade = _alembic(migration_database, "upgrade", "0013_feedback")
+    assert reupgrade.returncode == 0, reupgrade.stdout + reupgrade.stderr
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_constraint "
+                "WHERE connamespace = 'app'::regnamespace "
+                "AND conname = 'uq_feedback_owner_run')",
+            )
+        )
+        is True
+    )
 
 
 def test_single_member_legacy_pause_up_down_round_trip(
@@ -433,16 +548,22 @@ def test_single_member_legacy_pause_up_down_round_trip(
 
     downgrade = _alembic(migration_database, "downgrade", "0006_interrupt_projection")
     assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
-    assert asyncio.run(
-        _fetchval(
-            migration_database,
-            "SELECT count(*) FROM app.interrupt_inbox WHERE id = $1",
-            projection_id,
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT count(*) FROM app.interrupt_inbox WHERE id = $1",
+                projection_id,
+            )
         )
-    ) == 1
-    assert asyncio.run(
-        _fetchval(migration_database, "SELECT to_regclass('app.interrupt_pauses')")
-    ) is None
+        == 1
+    )
+    assert (
+        asyncio.run(
+            _fetchval(migration_database, "SELECT to_regclass('app.interrupt_pauses')")
+        )
+        is None
+    )
 
 
 def test_consistent_legacy_members_backfill_as_one_pause(
@@ -526,12 +647,15 @@ def test_partial_unique_index_allows_only_one_active_pause_per_task(
 
     downgrade = _alembic(migration_database, "downgrade", "0006_interrupt_projection")
     assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
-    assert asyncio.run(
-        _fetchval(
-            migration_database,
-            "SELECT to_regclass('app.uq_interrupt_pauses_one_active_task')",
+    assert (
+        asyncio.run(
+            _fetchval(
+                migration_database,
+                "SELECT to_regclass('app.uq_interrupt_pauses_one_active_task')",
+            )
         )
-    ) is None
+        is None
+    )
 
 
 @pytest.mark.parametrize("command_status", ["pending", "dispatching"])

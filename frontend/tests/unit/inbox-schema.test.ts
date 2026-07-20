@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { inboxViewSchema } from "../../src/lib/schemas/product-api";
+import { resolveInboxReviewCardContent } from "../../src/features/inbox/inbox-surface";
+import {
+  inboxReviewReceiptSchema,
+  inboxReviewSubmissionSchema,
+  inboxViewSchema,
+} from "../../src/lib/schemas/product-api";
 
 describe("Inbox Product schema", () => {
   it("strictly parses an Inbox view and its official review payload", () => {
@@ -15,7 +20,43 @@ describe("Inbox Product schema", () => {
       horizon: "4h",
       member_count: 2,
     });
-    expect(parsed.items[0]?.payload.artifact.analysis.reference_price).toBe(67250.5);
+    const item = parsed.items[0];
+    expect(item?.payload.kind).toBe("artifact_review");
+    if (item?.payload.kind !== "artifact_review") {
+      throw new Error("Inbox fixture must parse as an analysis review");
+    }
+    expect(item.payload.artifact.analysis.reference_price).toBe(67250.5);
+  });
+
+  it("parses and projects a scoped deep research review without analysis fields", () => {
+    const parsed = inboxViewSchema.parse({
+      items: [researchInboxItem()],
+      next_cursor: null,
+    }).items[0];
+    if (parsed === undefined) throw new Error("expected research Inbox item");
+
+    expect(parsed.payload.kind).toBe("deep_research_review");
+    expect(resolveInboxReviewCardContent(parsed)).toEqual({
+      factLabel: "研究来源",
+      factValue: "1 条",
+      summaryMeta: "1 个章节 · 第 3 轮",
+      summaryText: "人工审核前的深度研究执行摘要。",
+      reviewType: "deep_research",
+    });
+    expect(parsed.query_text).toHaveLength(4000);
+  });
+
+  it("validates research Inbox scope and the shared 4000-character query limit", () => {
+    const wrongSymbol = researchInboxItem();
+    wrongSymbol.payload.symbol = "ETH-USDT-SWAP";
+    const wrongHorizon = researchInboxItem();
+    wrongHorizon.payload.horizon = "30d";
+    const oversizedQuery = researchInboxItem();
+    oversizedQuery.query_text = "x".repeat(4001);
+
+    expect(() => inboxViewSchema.parse({ items: [wrongSymbol], next_cursor: null })).toThrow();
+    expect(() => inboxViewSchema.parse({ items: [wrongHorizon], next_cursor: null })).toThrow();
+    expect(() => inboxViewSchema.parse({ items: [oversizedQuery], next_cursor: null })).toThrow();
   });
 
   it.each([
@@ -69,6 +110,31 @@ describe("Inbox Product schema", () => {
       items: [],
       next_cursor: null,
       total: 1,
+    })).toThrow();
+  });
+
+  it("keeps direct Inbox review admission free of Runtime coordinates", () => {
+    const submission = inboxReviewSubmissionSchema.parse({
+      pause_version: 2,
+      response: { action: "approve" },
+    });
+    const receipt = inboxReviewReceiptSchema.parse({
+      task_id: "22222222-2222-4222-8222-222222222222",
+      pause_id: "33333333-3333-4333-8333-333333333333",
+      pause_version: 2,
+      status: "responding",
+      responded_at: "2026-07-15T10:10:00Z",
+    });
+
+    expect(submission).toEqual({
+      pause_version: 2,
+      response: { action: "approve" },
+    });
+    expect(receipt.pause_id).toBe("33333333-3333-4333-8333-333333333333");
+    expect(() => inboxReviewSubmissionSchema.parse({
+      pause_version: 2,
+      interrupt_id: "private-runtime-id",
+      response: { action: "approve" },
     })).toThrow();
   });
 });
@@ -142,5 +208,63 @@ function inboxItem() {
     symbol: "BTC-USDT-SWAP",
     horizon: "4h",
     query_text: "Assess BTC around the next macro event.",
+  };
+}
+
+function researchInboxItem() {
+  return {
+    ...inboxItem(),
+    member_count: 1,
+    horizon: "7d",
+    query_text: "x".repeat(4000),
+    payload: {
+      kind: "deep_research_review" as const,
+      schema_version: "1.0" as const,
+      allowed_actions: ["approve", "reject", "edit"] as const,
+      symbol: "BTC-USDT-SWAP" as "BTC-USDT-SWAP" | "ETH-USDT-SWAP",
+      horizon: "7d",
+      review_iteration: 3,
+      artifact: {
+        artifact_type: "deep_research_report" as const,
+        schema_version: "1.0" as const,
+        status: "draft" as const,
+        harness_mode: "langchain" as const,
+        search_coverage: {
+          status: "complete" as const,
+          attempted_queries: 1,
+          successful_queries: 1,
+          failed_queries: [],
+        },
+        report: {
+          executive_summary: "人工审核前的深度研究执行摘要。",
+          sections: [{
+            title: "验证结论",
+            summary: "来源支持该结论。",
+            findings: [{ claim: "验证后的研究发现。", source_indexes: [1] }],
+          }],
+          risk_notes: [],
+          evidence_gaps: [],
+        },
+        sources: [{
+          index: 1,
+          evidence: {
+            query: "BTC verified research",
+            final_url: "https://example.com/research",
+            redirect_chain: [],
+            http_status: 200,
+            fetched_at: "2026-07-19T12:00:00Z",
+            published_at: null,
+            content_hash: "a".repeat(64),
+            parser_version: "test-v1",
+            title: "Verified BTC research",
+            author: null,
+            source: "test_search",
+            excerpt: "A verified source excerpt.",
+            evidence_relation: "supports",
+          },
+        }],
+        model_audits: [],
+      },
+    },
   };
 }

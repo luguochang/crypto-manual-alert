@@ -1,5 +1,9 @@
 # 文档入口
 
+## V2 当前交付入口
+
+V2 的当前实现、执行账本、生产差距和跨平台开发交接以 [`docs/v2/README.md`](v2/README.md) 为入口。Windows + Docker Desktop 开发者先阅读 [`docs/v2/19-windows-docker-development.md`](v2/19-windows-docker-development.md)，不要直接照抄 V1 的启动命令。
+
 开发前请优先阅读：
 
 - `formal/00-文档索引.md`

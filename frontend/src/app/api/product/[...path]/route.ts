@@ -14,5 +14,8 @@ export const runtime = "nodejs";
 
 export {
   handleProductRequest as GET,
+  handleProductRequest as PATCH,
   handleProductRequest as POST,
+  handleProductRequest as PUT,
+  handleProductRequest as DELETE,
 };

@@ -9,6 +9,9 @@ RUNS_ROUTE = FRONTEND_SRC / "app" / "runs" / "page.tsx"
 PRIMARY_NAVIGATION = FRONTEND_SRC / "components" / "primary-navigation.tsx"
 WORK_SURFACE = FRONTEND_SRC / "features" / "work" / "work-surface.tsx"
 RUNS_SURFACE = FRONTEND_SRC / "features" / "runs" / "runs-surface.tsx"
+DATA_LIFECYCLE_CONTROLS = (
+    FRONTEND_SRC / "features" / "settings" / "data-lifecycle-controls.tsx"
+)
 OFFICIAL_RUN_STREAM = (
     FRONTEND_SRC / "features" / "agent-runtime" / "official-run-stream.tsx"
 )
@@ -27,15 +30,16 @@ def test_work_and_runs_routes_keep_product_ownership_in_feature_surfaces():
     assert "return <RunsSurface />;" in runs_route
     assert _line_count(WORK_ROUTE) <= 10
     assert _line_count(RUNS_ROUTE) <= 10
-    assert '{ label: "Work", icon: BriefcaseBusiness, href: "/work" }' in navigation
-    assert '{ label: "Runs", icon: History, href: "/runs" }' in navigation
+    assert '{ label: "工作台", icon: BriefcaseBusiness, href: "/work" }' in navigation
+    assert '{ label: "运行记录", icon: History, href: "/runs" }' in navigation
 
 
 def test_work_route_uses_typed_product_api_and_official_stream_projection():
     source = WORK_SURFACE.read_text(encoding="utf-8")
 
     assert 'import { AnalysisProjection } from "@/features/analysis/analysis-projection";' in source
-    assert 'import { OfficialRunStream } from "@/features/agent-runtime/official-run-stream";' in source
+    assert 'from "@/features/agent-runtime/official-run-stream";' in source
+    assert "OfficialRunStream" in source
     assert 'cancelTask,' in source
     assert 'createAnalysis,' in source
     assert 'getTask,' in source
@@ -54,16 +58,14 @@ def test_runs_route_reads_persisted_products_and_links_historical_run_selection(
     assert 'import type { ProductRunSummary } from "@/lib/schemas/product-api";' in source
     assert "const response = await listRuns(25);" in source
     assert "<li key={run.run_id}>" in source
-    assert (
-        "href={`/work?task=${encodeURIComponent(run.task_id)}"
-        "&run=${encodeURIComponent(run.run_id)}`}"
-    ) in source
+    assert "href={`/runs/${encodeURIComponent(run.run_id)}`}" in source
 
 
 def test_official_stream_uses_langchain_react_and_same_origin_agent_bff():
     source = OFFICIAL_RUN_STREAM.read_text(encoding="utf-8")
 
-    assert 'import { useStream } from "@langchain/react";' in source
+    assert 'import { useChannel, useStream } from "@langchain/react";' in source
+    assert "useChannel(stream, productCustomChannels" in source
     assert "const stream = useStream<OfficialExecutionValues>({" in source
     assert 'return new URL("/api/agent", baseUrl).toString();' in source
     assert "apiUrl: officialAgentApiUrl(window.location.origin)" in source
@@ -76,8 +78,11 @@ def test_historical_run_does_not_attach_the_live_thread_head():
     browser_gate = WORK_PRODUCT_E2E.read_text(encoding="utf-8")
 
     assert "setHistoricalRunSelection(selectedRunId !== null)" in work
-    assert "const streamEligible = task !== null" in work
+    assert "export function shouldAttachOfficialStream(" in work
+    assert "const streamEligible = shouldAttachOfficialStream(task, historicalRunSelection);" in work
     assert "&& !historicalRunSelection" in work
+    assert "&& !terminalStatuses.has(task.status)" in work
+    assert "&& task.cancel_requested_at === null" in work
     assert "&& streamEligible" in work
     assert "{activeStreamBinding && !historicalRunSelection ? (" in work
     assert "const { assistant_id: assistantId, thread_id: threadId } = binding;" in stream
@@ -101,7 +106,18 @@ def test_v2_product_surfaces_do_not_render_raw_json_or_preformatted_payloads():
     assert "<dl" in combined
     assert "<ol" in combined
     assert "<pre" not in combined
-    assert "JSON.stringify(" not in combined
+    sources_with_json_serialization = [
+        path
+        for path in product_sources
+        if "JSON.stringify(" in path.read_text(encoding="utf-8")
+    ]
+    assert sources_with_json_serialization == [DATA_LIFECYCLE_CONTROLS]
+    lifecycle_source = DATA_LIFECYCLE_CONTROLS.read_text(encoding="utf-8")
+    assert lifecycle_source.count("JSON.stringify(") == 1
+    assert (
+        'new Blob([JSON.stringify(value, null, 2)], { type: "application/json" })'
+        in lifecycle_source
+    )
     assert "Raw JSON" not in combined
 
 
@@ -119,10 +135,9 @@ def test_retired_v1_diagnostics_are_not_misrepresented_as_completed_v2_parity():
         assert not retired_path.exists(), retired_path
 
     for tracked_gap in (
-        "V2 不是 production ready",
-        "Runs detail/Inbox/Workspace/feedback/commands 完整 API",
-        "Inbox、Library、Settings 未交付",
-        "官方 HITL、notification、feedback",
+        "V2 = PARTIAL",
+        "Production Ready = NO",
+        "licensed persistent Agent Server",
         "V1 parity/removal 均不存在",
     ):
         assert tracked_gap in status

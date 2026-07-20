@@ -142,6 +142,7 @@ function runSummary(
   return {
     run_id: runId,
     task_id: runTaskId,
+    task_type: "market_analysis",
     attempt,
     status: "succeeded",
     symbol: "BTC-USDT-SWAP",
@@ -155,6 +156,8 @@ function runSummary(
 function queuedTask(): ProductTask {
   return {
     task_id: taskId,
+    task_type: "market_analysis",
+    correlation_id: "55555555-5555-5555-8555-555555555555",
     status: "queued",
     symbol: "BTC-USDT-SWAP",
     horizon: "4h",
@@ -162,7 +165,13 @@ function queuedTask(): ProductTask {
     created_at: "2026-07-15T08:30:00Z",
     completed_at: null,
     cancel_requested_at: null,
+    completion_scope: {
+      analysis: "pending",
+      notification: "not_requested",
+    },
+    warnings: [],
     artifact: null,
+    deep_research_artifact: null,
     errors: [],
     agent_stream: null,
     market_snapshot: null,

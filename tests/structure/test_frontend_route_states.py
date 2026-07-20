@@ -75,8 +75,10 @@ def test_product_surfaces_expose_user_facing_loading_error_and_empty_states():
     for required_text in (
         "请求未完成",
         "正在提交分析",
+        "正在提交深度研究",
         "正在恢复分析",
-        "等待新的分析请求",
+        "正在恢复深度研究",
+        "等待新的任务请求",
     ):
         assert required_text in work
     for required_text in (

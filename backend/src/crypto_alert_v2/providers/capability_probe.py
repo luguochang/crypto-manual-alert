@@ -13,7 +13,7 @@ from crypto_alert_v2.providers.errors import TRANSIENT_MODEL_ERRORS
 from crypto_alert_v2.providers.model import as_chat_completions_model
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
-    DuckDuckGoSearchProvider,
+    DdgsMetasearchProvider,
     TavilySearchProvider,
 )
 
@@ -21,7 +21,7 @@ from crypto_alert_v2.providers.search import (
 class SearchProvider(StrEnum):
     BUILTIN = "builtin_web_search"
     TAVILY = "tavily"
-    DUCKDUCKGO = "duckduckgo"
+    DDGS_METASEARCH = "ddgs_metasearch"
 
 
 class CapabilityFailure(BaseModel):
@@ -54,7 +54,7 @@ class SearchReadiness(BaseModel):
     capabilities: ModelCapabilities
     tavily_configured: bool
     tavily_connected: bool
-    duckduckgo_connected: bool = False
+    ddgs_metasearch_connected: bool = False
 
     @field_validator("endpoint")
     @classmethod
@@ -87,9 +87,7 @@ class SearchReadiness(BaseModel):
             if not getattr(self.capabilities, name)
         ]
         if missing:
-            raise ValueError(
-                "ready search selection requires all model capabilities"
-            )
+            raise ValueError("ready search selection requires all model capabilities")
         if self.selected_provider is SearchProvider.BUILTIN and not (
             self.capabilities.builtin_web_search_invoked
             and self.capabilities.builtin_web_search_citation_count > 0
@@ -104,12 +102,10 @@ class SearchReadiness(BaseModel):
                 "Tavily selection requires configured and connected readiness"
             )
         if (
-            self.selected_provider is SearchProvider.DUCKDUCKGO
-            and not self.duckduckgo_connected
+            self.selected_provider is SearchProvider.DDGS_METASEARCH
+            and not self.ddgs_metasearch_connected
         ):
-            raise ValueError(
-                "DuckDuckGo selection requires connected readiness"
-            )
+            raise ValueError("DDGS metasearch selection requires connected readiness")
         return self
 
 
@@ -212,6 +208,7 @@ def select_search_provider(
     *,
     tavily_configured: bool,
     tavily_connected: bool,
+    requested_provider: SearchProvider | None = None,
 ) -> SearchProvider:
     required_capabilities = (
         "tool_calling",
@@ -227,23 +224,43 @@ def select_search_provider(
             "Required model capabilities failed: " + ", ".join(missing)
         )
 
-    if (
+    builtin_ready = (
         capabilities.builtin_web_search_invoked
         and capabilities.builtin_web_search_citation_count > 0
-    ):
-        return SearchProvider.BUILTIN
-
-    if tavily_configured and tavily_connected:
+    )
+    if requested_provider is SearchProvider.TAVILY:
+        if not tavily_configured:
+            raise SearchReadinessError("Tavily is not configured")
+        if not tavily_connected:
+            raise SearchReadinessError("Tavily connectivity failed")
         return SearchProvider.TAVILY
 
+    if builtin_ready:
+        return SearchProvider.BUILTIN
+
+    if requested_provider is SearchProvider.BUILTIN:
+        fallback = "configured provider requires built-in web search"
+    elif not tavily_configured:
+        fallback = "Tavily is not configured"
+    elif not tavily_connected:
+        fallback = "Tavily connectivity failed"
+    else:
+        return SearchProvider.TAVILY
+
+    builtin_failure = next(
+        (
+            failure.error_type
+            for failure in capabilities.failures
+            if failure.capability == "builtin_web_search"
+        ),
+        None,
+    )
     if capabilities.builtin_web_search_invoked:
         reason = "built-in web search returned no verifiable URL citation"
     else:
         reason = "built-in web search was not invoked"
-    if not tavily_configured:
-        fallback = "Tavily is not configured"
-    else:
-        fallback = "Tavily connectivity failed"
+    if builtin_failure is not None:
+        reason = f"{reason} ({builtin_failure})"
     raise SearchReadinessError(f"{reason}; {fallback}")
 
 
@@ -256,7 +273,7 @@ def establish_search_readiness(
     capability_probe: Callable[[ChatOpenAI], ModelCapabilities] | None = None,
     tavily_probe: Callable[[str], bool] | None = None,
     requested_provider: SearchProvider | None = None,
-    duckduckgo_probe: Callable[[str | None], bool] | None = None,
+    ddgs_metasearch_probe: Callable[[str | None], bool] | None = None,
     search_http_proxy: str | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> SearchReadiness:
@@ -265,7 +282,7 @@ def establish_search_readiness(
     capabilities = (capability_probe or probe_openai_capabilities)(model)
     tavily_configured = bool(tavily_api_key)
     tavily_connected = False
-    duckduckgo_connected = False
+    ddgs_metasearch_connected = False
 
     missing_model_capabilities = [
         name
@@ -288,18 +305,29 @@ def establish_search_readiness(
         capabilities.builtin_web_search_invoked
         and capabilities.builtin_web_search_citation_count > 0
     )
-    if requested_provider is SearchProvider.DUCKDUCKGO:
-        connectivity_probe = duckduckgo_probe or probe_duckduckgo_connectivity
+    if requested_provider is SearchProvider.DDGS_METASEARCH:
+        connectivity_probe = ddgs_metasearch_probe or probe_ddgs_metasearch_connectivity
         try:
-            duckduckgo_connected = bool(connectivity_probe(search_http_proxy))
+            ddgs_metasearch_connected = bool(connectivity_probe(search_http_proxy))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
-                f"DuckDuckGo connectivity failed: {error_type}"
+                f"DDGS metasearch connectivity failed: {error_type}"
             ) from exc
-        if not duckduckgo_connected:
-            raise SearchReadinessError("DuckDuckGo connectivity failed")
-    elif not builtin_ready and tavily_configured:
+        if not ddgs_metasearch_connected:
+            raise SearchReadinessError("DDGS metasearch connectivity failed")
+    elif requested_provider is SearchProvider.TAVILY:
+        if not tavily_configured:
+            raise SearchReadinessError("Tavily is not configured")
+        connectivity_probe = tavily_probe or probe_tavily_connectivity
+        try:
+            tavily_connected = bool(connectivity_probe(tavily_api_key or ""))
+        except Exception as exc:
+            error_type = getattr(exc, "error_type", None) or type(exc).__name__
+            raise SearchReadinessError(
+                f"Tavily connectivity failed: {error_type}"
+            ) from exc
+    elif requested_provider is None and not builtin_ready and tavily_configured:
         connectivity_probe = tavily_probe or probe_tavily_connectivity
         try:
             tavily_connected = bool(connectivity_probe(tavily_api_key or ""))
@@ -310,12 +338,13 @@ def establish_search_readiness(
             ) from exc
 
     selected_provider = (
-        SearchProvider.DUCKDUCKGO
-        if requested_provider is SearchProvider.DUCKDUCKGO
+        SearchProvider.DDGS_METASEARCH
+        if requested_provider is SearchProvider.DDGS_METASEARCH
         else select_search_provider(
             capabilities,
             tavily_configured=tavily_configured,
             tavily_connected=tavily_connected,
+            requested_provider=requested_provider,
         )
     )
     clock = now or _utc_now
@@ -328,7 +357,7 @@ def establish_search_readiness(
         capabilities=capabilities,
         tavily_configured=tavily_configured,
         tavily_connected=tavily_connected,
-        duckduckgo_connected=duckduckgo_connected,
+        ddgs_metasearch_connected=ddgs_metasearch_connected,
     )
 
 
@@ -341,7 +370,7 @@ async def establish_search_readiness_async(
     capability_probe: Callable[[ChatOpenAI], ModelCapabilities] | None = None,
     tavily_probe: Callable[[str], Awaitable[bool]] | None = None,
     requested_provider: SearchProvider | None = None,
-    duckduckgo_probe: Callable[[str | None], Awaitable[bool]] | None = None,
+    ddgs_metasearch_probe: Callable[[str | None], Awaitable[bool]] | None = None,
     search_http_proxy: str | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> SearchReadiness:
@@ -353,7 +382,7 @@ async def establish_search_readiness_async(
     )
     tavily_configured = bool(tavily_api_key)
     tavily_connected = False
-    duckduckgo_connected = False
+    ddgs_metasearch_connected = False
 
     missing_model_capabilities = [
         name
@@ -376,27 +405,36 @@ async def establish_search_readiness_async(
         capabilities.builtin_web_search_invoked
         and capabilities.builtin_web_search_citation_count > 0
     )
-    if requested_provider is SearchProvider.DUCKDUCKGO:
+    if requested_provider is SearchProvider.DDGS_METASEARCH:
         connectivity_probe = (
-            duckduckgo_probe or probe_duckduckgo_connectivity_async
+            ddgs_metasearch_probe or probe_ddgs_metasearch_connectivity_async
         )
         try:
-            duckduckgo_connected = bool(
+            ddgs_metasearch_connected = bool(
                 await connectivity_probe(search_http_proxy)
             )
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
-                f"DuckDuckGo connectivity failed: {error_type}"
+                f"DDGS metasearch connectivity failed: {error_type}"
             ) from exc
-        if not duckduckgo_connected:
-            raise SearchReadinessError("DuckDuckGo connectivity failed")
-    elif not builtin_ready and tavily_configured:
+        if not ddgs_metasearch_connected:
+            raise SearchReadinessError("DDGS metasearch connectivity failed")
+    elif requested_provider is SearchProvider.TAVILY:
+        if not tavily_configured:
+            raise SearchReadinessError("Tavily is not configured")
         connectivity_probe = tavily_probe or probe_tavily_connectivity_async
         try:
-            tavily_connected = bool(
-                await connectivity_probe(tavily_api_key or "")
-            )
+            tavily_connected = bool(await connectivity_probe(tavily_api_key or ""))
+        except Exception as exc:
+            error_type = getattr(exc, "error_type", None) or type(exc).__name__
+            raise SearchReadinessError(
+                f"Tavily connectivity failed: {error_type}"
+            ) from exc
+    elif requested_provider is None and not builtin_ready and tavily_configured:
+        connectivity_probe = tavily_probe or probe_tavily_connectivity_async
+        try:
+            tavily_connected = bool(await connectivity_probe(tavily_api_key or ""))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
@@ -404,12 +442,13 @@ async def establish_search_readiness_async(
             ) from exc
 
     selected_provider = (
-        SearchProvider.DUCKDUCKGO
-        if requested_provider is SearchProvider.DUCKDUCKGO
+        SearchProvider.DDGS_METASEARCH
+        if requested_provider is SearchProvider.DDGS_METASEARCH
         else select_search_provider(
             capabilities,
             tavily_configured=tavily_configured,
             tavily_connected=tavily_connected,
+            requested_provider=requested_provider,
         )
     )
     clock = now or _utc_now
@@ -422,7 +461,7 @@ async def establish_search_readiness_async(
         capabilities=capabilities,
         tavily_configured=tavily_configured,
         tavily_connected=tavily_connected,
-        duckduckgo_connected=duckduckgo_connected,
+        ddgs_metasearch_connected=ddgs_metasearch_connected,
     )
 
 
@@ -440,15 +479,13 @@ async def probe_tavily_connectivity_async(api_key: str) -> bool:
     return bool(evidence)
 
 
-def probe_duckduckgo_connectivity(proxy: str | None) -> bool:
-    evidence = DuckDuckGoSearchProvider(proxy=proxy).search(
-        "current Bitcoin market news"
-    )
+def probe_ddgs_metasearch_connectivity(proxy: str | None) -> bool:
+    evidence = DdgsMetasearchProvider(proxy=proxy).search("current Bitcoin market news")
     return bool(evidence)
 
 
-async def probe_duckduckgo_connectivity_async(proxy: str | None) -> bool:
-    return await asyncio.to_thread(probe_duckduckgo_connectivity, proxy)
+async def probe_ddgs_metasearch_connectivity_async(proxy: str | None) -> bool:
+    return await asyncio.to_thread(probe_ddgs_metasearch_connectivity, proxy)
 
 
 def _utc_now() -> datetime:

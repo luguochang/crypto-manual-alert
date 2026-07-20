@@ -16,6 +16,7 @@ from crypto_alert_v2.auth.membership import (
 )
 from crypto_alert_v2.auth.store_namespace import rewrite_namespace
 from crypto_alert_v2.config import get_settings
+from crypto_alert_v2.monitors.models import MonitorIngressRequest
 
 
 auth = Auth()
@@ -24,6 +25,39 @@ _STORE_AUTHORITY_COMPONENTS = frozenset(
     {"tenant", "workspace", "user", "scope", "principal", "purpose"}
 )
 _STORE_PURPOSE = "agent-memory"
+_THREAD_AUTHORITY_METADATA = frozenset(
+    {"tenant_id", "workspace_id", "user_id", "identity_issuer", "context_id"}
+)
+_THREAD_READ_ACTIONS = frozenset({"read", "search"})
+_THREAD_WRITE_ACTIONS = frozenset({"create_run", "delete", "update"})
+_CRON_REFERENCE_METADATA = frozenset(
+    {"monitor_id", "schedule_version", "cron_binding_id"}
+)
+_CRON_AUTHORITY_METADATA = frozenset(
+    {"tenant_id", "workspace_id", "user_id", "identity_issuer", "context_id"}
+)
+_CRON_CREATE_PAYLOAD_FIELDS = frozenset(
+    {
+        "assistant_id",
+        "config",
+        "schedule",
+        "input",
+        "metadata",
+        "enabled",
+        "timezone",
+        "end_time",
+        "stream_mode",
+        "stream_subgraphs",
+        "stream_resumable",
+        "durability",
+        "checkpoint_during",
+        "interrupt_before",
+        "interrupt_after",
+        "on_run_completed",
+        "multitask_strategy",
+    }
+)
+_CRON_UPDATE_PAYLOAD_FIELDS = _CRON_CREATE_PAYLOAD_FIELDS - {"assistant_id"}
 
 
 @auth.authenticate
@@ -114,16 +148,31 @@ async def scope_thread_create(
     value: Auth.types.on.threads.create.value,
 ) -> None:
     permissions = await _authorized_permissions(ctx)
+    _require_permission(permissions, "analysis:write")
     tenant_id, workspace_id = _scope_from_permissions(permissions)
     identity_issuer = _tag(permissions, "identity-issuer:")
     context_id = _tag(permissions, "auth-context:")
-    value["metadata"] = {
+    supplied_metadata = value.get("metadata")
+    if supplied_metadata is None:
+        supplied_metadata = {}
+        value["metadata"] = supplied_metadata
+    elif not isinstance(supplied_metadata, dict):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    preserved_metadata = {
+        key: item
+        for key, item in supplied_metadata.items()
+        if key not in _THREAD_AUTHORITY_METADATA
+    }
+    scoped_metadata = {
+        **preserved_metadata,
         "tenant_id": tenant_id,
         "workspace_id": workspace_id,
         "user_id": ctx.user.identity,
         **({"identity_issuer": identity_issuer} if identity_issuer is not None else {}),
         **({"context_id": context_id} if context_id is not None else {}),
     }
+    supplied_metadata.clear()
+    supplied_metadata.update(scoped_metadata)
 
 
 @auth.on.threads
@@ -133,6 +182,13 @@ async def scope_thread_access(
 ) -> Auth.types.FilterType:
     del value
     permissions = await _authorized_permissions(ctx)
+    action = str(getattr(ctx, "action", ""))
+    if action in _THREAD_READ_ACTIONS:
+        _require_permission(permissions, "analysis:read")
+    elif action in _THREAD_WRITE_ACTIONS:
+        _require_permission(permissions, "analysis:write")
+    else:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
     tenant_id, workspace_id = _scope_from_permissions(permissions)
     identity_issuer = _tag(permissions, "identity-issuer:")
     context_id = _tag(permissions, "auth-context:")
@@ -161,6 +217,74 @@ async def allow_assistant_search(
 ) -> bool:
     del value
     return "analysis:read" in await _authorized_permissions(ctx)
+
+
+@auth.on.crons.create
+async def scope_cron_create(
+    ctx: Auth.types.AuthContext,
+    value: Auth.types.on.crons.create.value,
+) -> None:
+    permissions = await _authorized_permissions(ctx)
+    _require_permission(permissions, "analysis:write")
+    authority = _cron_authority(ctx, permissions)
+    payload = value.get("payload")
+    if not isinstance(payload, dict):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    _require_cron_payload_fields(payload, allowed=_CRON_CREATE_PAYLOAD_FIELDS)
+    _require_server_cron_config(payload, cron_id=value.get("cron_id"))
+    _scope_monitor_cron_payload(payload, authority)
+    _bind_cron_run_permissions(payload, permissions)
+    value["user_id"] = ctx.user.identity
+
+
+@auth.on.crons.read
+async def scope_cron_read(
+    ctx: Auth.types.AuthContext,
+    value: Auth.types.on.crons.read.value,
+) -> Auth.types.FilterType:
+    del value
+    return await _cron_access_filter(ctx, required_permission="analysis:read")
+
+
+@auth.on.crons.search
+async def scope_cron_search(
+    ctx: Auth.types.AuthContext,
+    value: Auth.types.on.crons.search.value,
+) -> Auth.types.FilterType:
+    del value
+    return await _cron_access_filter(ctx, required_permission="analysis:read")
+
+
+@auth.on.crons.update
+async def scope_cron_update(
+    ctx: Auth.types.AuthContext,
+    value: Auth.types.on.crons.update.value,
+) -> Auth.types.FilterType:
+    permissions = await _authorized_permissions(ctx)
+    _require_permission(permissions, "analysis:write")
+    authority = _cron_authority(ctx, permissions)
+    payload = value.get("payload")
+    if payload is not None:
+        if not isinstance(payload, dict):
+            raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+        _require_cron_payload_fields(payload, allowed=_CRON_UPDATE_PAYLOAD_FIELDS)
+        _require_server_cron_config(payload, cron_id=value.get("cron_id"))
+        has_input = "input" in payload
+        has_metadata = "metadata" in payload
+        if has_input != has_metadata:
+            raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+        if has_input:
+            _scope_monitor_cron_payload(payload, authority)
+    return authority
+
+
+@auth.on.crons.delete
+async def scope_cron_delete(
+    ctx: Auth.types.AuthContext,
+    value: Auth.types.on.crons.delete.value,
+) -> Auth.types.FilterType:
+    del value
+    return await _cron_access_filter(ctx, required_permission="analysis:write")
 
 
 @auth.on.store
@@ -209,6 +333,120 @@ async def scope_store(
         ) from exc
 
 
+async def _cron_access_filter(
+    ctx: Auth.types.AuthContext,
+    *,
+    required_permission: str,
+) -> Auth.types.FilterType:
+    permissions = await _authorized_permissions(ctx)
+    _require_permission(permissions, required_permission)
+    return _cron_authority(ctx, permissions)
+
+
+def _cron_authority(
+    ctx: Auth.types.AuthContext,
+    permissions: tuple[str, ...],
+) -> dict[str, str]:
+    tenant_id, workspace_id = _scope_from_permissions(permissions)
+    identity = ctx.user.identity
+    if not isinstance(identity, str) or not identity:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    identity_issuer = _tag(permissions, "identity-issuer:")
+    context_id = _tag(permissions, "auth-context:")
+    if (identity_issuer is None) != (context_id is None):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    return {
+        "tenant_id": tenant_id,
+        "workspace_id": workspace_id,
+        "user_id": identity,
+        **(
+            {"identity_issuer": identity_issuer, "context_id": context_id}
+            if identity_issuer is not None and context_id is not None
+            else {}
+        ),
+    }
+
+
+def _scope_monitor_cron_payload(
+    payload: dict[str, Any],
+    authority: dict[str, str],
+) -> None:
+    raw_input = payload.get("input")
+    if not isinstance(raw_input, dict) or set(raw_input) != {"request"}:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    raw_request = raw_input.get("request")
+    if not isinstance(raw_request, dict):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    try:
+        request = MonitorIngressRequest.model_validate(raw_request)
+    except ValueError as exc:
+        raise Auth.exceptions.HTTPException(
+            status_code=403, detail="Forbidden"
+        ) from exc
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict) or not _CRON_REFERENCE_METADATA.issubset(
+        metadata
+    ):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    if set(metadata) - _CRON_REFERENCE_METADATA - _CRON_AUTHORITY_METADATA:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    references = request.reference_metadata()
+    if any(
+        type(metadata.get(key)) is not type(expected) or metadata.get(key) != expected
+        for key, expected in references.items()
+    ):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    metadata.clear()
+    metadata.update({**references, **authority})
+
+
+def _require_cron_payload_fields(
+    payload: dict[str, Any],
+    *,
+    allowed: frozenset[str],
+) -> None:
+    if set(payload) - allowed:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+
+
+def _require_server_cron_config(
+    payload: dict[str, Any],
+    *,
+    cron_id: object,
+) -> None:
+    config = payload.get("config")
+    if config is None:
+        return
+    if not isinstance(config, dict) or set(config) - {"configurable"}:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    configurable = config.get("configurable")
+    if configurable is None:
+        return
+    if not isinstance(configurable, dict) or set(configurable) - {"cron_id"}:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    configured_cron_id = configurable.get("cron_id")
+    if configured_cron_id is not None and (
+        cron_id is None or str(configured_cron_id) != str(cron_id)
+    ):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+
+
+def _bind_cron_run_permissions(
+    payload: dict[str, Any],
+    permissions: tuple[str, ...],
+) -> None:
+    config = payload.get("config")
+    if config is None:
+        config = {}
+        payload["config"] = config
+    configurable = config.get("configurable")
+    if configurable is None:
+        configurable = {}
+        config["configurable"] = configurable
+    configurable["langgraph_auth_permissions"] = list(permissions)
+
+
 def _scope_from_permissions(permissions: tuple[str, ...]) -> tuple[str, str]:
     tenant_id = _tag(permissions, "tenant:")
     workspace_id = _tag(permissions, "workspace:")
@@ -217,10 +455,20 @@ def _scope_from_permissions(permissions: tuple[str, ...]) -> tuple[str, str]:
     return tenant_id, workspace_id
 
 
+def _require_permission(permissions: tuple[str, ...], required: str) -> None:
+    if required not in permissions:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+
+
 async def _authorized_permissions(
     ctx: Auth.types.AuthContext,
 ) -> tuple[str, ...]:
-    permissions = tuple(ctx.user.permissions)
+    context_permissions = getattr(ctx, "permissions", None)
+    permissions = tuple(
+        context_permissions
+        if context_permissions is not None
+        else getattr(ctx.user, "permissions", ())
+    )
     if "trusted-service" in permissions:
         return permissions
     context_id = _tag(permissions, "auth-context:")
@@ -306,6 +554,11 @@ __all__ = [
     "auth",
     "authenticate",
     "deny_unhandled",
+    "scope_cron_create",
+    "scope_cron_delete",
+    "scope_cron_read",
+    "scope_cron_search",
+    "scope_cron_update",
     "scope_store",
     "scope_thread_access",
     "scope_thread_create",

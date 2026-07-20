@@ -127,7 +127,9 @@ def test_risk_percentage_over_budget_is_blocked_with_actual_and_limit() -> None:
 
     verdict = apply_risk_policy(_analysis(risk_pct=0.10), _sufficient(), budget)
 
-    assert "budget.max_risk_pct_exceeded:actual=0.1,limit=0.05" in verdict.blocked_reasons
+    assert (
+        "budget.max_risk_pct_exceeded:actual=0.1,limit=0.05" in verdict.blocked_reasons
+    )
 
 
 def test_symbol_outside_workspace_budget_is_blocked() -> None:

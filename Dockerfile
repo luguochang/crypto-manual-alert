@@ -7,6 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_HTTP_RETRIES=10 \
+    UV_HTTP_TIMEOUT=120 \
     PATH=/app/backend/.venv/bin:$PATH
 
 WORKDIR /app/backend
@@ -14,9 +16,11 @@ WORKDIR /app/backend
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 COPY backend ./
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-CMD ["python", "-m", "crypto_alert_v2.commands.worker", "--worker-id", "container-worker"]
+CMD ["python", "-m", "crypto_alert_v2.workers", "--worker-id", "container-worker"]

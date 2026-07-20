@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.stream import CheckpointsTransformer
 from langgraph.types import interrupt
 
 from crypto_alert_v2.domain.models import (
@@ -120,7 +121,10 @@ builder.add_edge("finish", END)
 
 
 def create_graph(*, checkpointer: Any = None) -> Any:
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(
+        checkpointer=checkpointer,
+        transformers=[CheckpointsTransformer],
+    )
 
 
 graph = create_graph()

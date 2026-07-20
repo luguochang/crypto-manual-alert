@@ -17,9 +17,7 @@ from crypto_alert_v2.providers.models import (
 )
 from crypto_alert_v2.providers.retry_policy import RetryPolicy
 
-SUPPORTED_SYMBOLS = frozenset(
-    {"BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"}
-)
+SUPPORTED_SYMBOLS = frozenset({"BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"})
 
 _PUBLIC_ENDPOINTS = (
     ("ticker", "/api/v5/market/ticker"),
@@ -30,6 +28,30 @@ _PUBLIC_ENDPOINTS = (
     ("book", "/api/v5/market/books"),
     ("candles", "/api/v5/market/candles"),
 )
+
+_INSTRUMENT_ID_ENDPOINTS = frozenset(
+    {"ticker", "mark", "index", "funding", "open_interest"}
+)
+
+_HORIZON_TO_OKX_BAR = {
+    "15m": "15m",
+    "1h": "1H",
+    "4h": "4H",
+    "1d": "1D",
+}
+
+
+def _okx_bar_for_horizon(horizon: str | None) -> str:
+    """Translate the supported Product UI horizons to OKX candle bars."""
+    if horizon is None:
+        return "1H"
+    return _HORIZON_TO_OKX_BAR.get(horizon.strip().lower(), "1H")
+
+
+def _instrument_id_for_endpoint(endpoint: str, symbol: str) -> str:
+    if endpoint == "index":
+        return symbol.removesuffix("-SWAP")
+    return symbol
 
 
 def _failure(
@@ -93,6 +115,29 @@ def _decimal(
     return number
 
 
+def _non_negative_decimal(
+    value: Any,
+    *,
+    endpoint: str,
+    field: str,
+    correlation_id: str,
+) -> Decimal:
+    number = _decimal(
+        value,
+        endpoint=endpoint,
+        field=field,
+        correlation_id=correlation_id,
+        positive=False,
+    )
+    if number < 0:
+        raise _failure(
+            f"OKX {endpoint} requires finite non-negative {field}",
+            endpoint=endpoint,
+            correlation_id=correlation_id,
+        )
+    return number
+
+
 def _timestamp(value: Any, *, endpoint: str, correlation_id: str) -> int:
     try:
         timestamp = int(value)
@@ -121,6 +166,33 @@ def _record(
             correlation_id=correlation_id,
         )
     return record
+
+
+def _validate_instrument_ids(
+    rows: Sequence[Any],
+    *,
+    endpoint: str,
+    symbol: str,
+    correlation_id: str,
+) -> None:
+    expected = _instrument_id_for_endpoint(endpoint, symbol)
+    for record in rows:
+        if not isinstance(record, Mapping):
+            raise _failure(
+                f"invalid OKX {endpoint} response shape: instrument row must be an object",
+                endpoint=endpoint,
+                correlation_id=correlation_id,
+            )
+        actual = record.get("instId")
+        if actual != expected:
+            raise _failure(
+                (
+                    f"OKX {endpoint} instrument mismatch: "
+                    f"expected instId={expected}, got {actual!r}"
+                ),
+                endpoint=endpoint,
+                correlation_id=correlation_id,
+            )
 
 
 def _field(
@@ -237,12 +309,11 @@ def _candles(
                     correlation_id=correlation_id,
                     positive=True,
                 ),
-                volume=_decimal(
+                volume=_non_negative_decimal(
                     row[5],
                     endpoint="candles",
                     field="volume",
                     correlation_id=correlation_id,
-                    positive=False,
                 ),
             )
         )
@@ -297,16 +368,26 @@ def parse_okx_snapshot(
                 endpoint=endpoint,
                 correlation_id=correlation_id,
             ) from exc
-        parsed[endpoint] = _data(
+        rows = _data(
             envelope,
             endpoint=endpoint,
             correlation_id=correlation_id,
         )
+        if endpoint in _INSTRUMENT_ID_ENDPOINTS:
+            _validate_instrument_ids(
+                rows,
+                endpoint=endpoint,
+                symbol=symbol,
+                correlation_id=correlation_id,
+            )
+        parsed[endpoint] = rows
 
     ticker = _record(parsed["ticker"], endpoint="ticker", correlation_id=correlation_id)
     mark = _record(parsed["mark"], endpoint="mark", correlation_id=correlation_id)
     index = _record(parsed["index"], endpoint="index", correlation_id=correlation_id)
-    funding = _record(parsed["funding"], endpoint="funding", correlation_id=correlation_id)
+    funding = _record(
+        parsed["funding"], endpoint="funding", correlation_id=correlation_id
+    )
     open_interest = _record(
         parsed["open_interest"],
         endpoint="open_interest",
@@ -499,6 +580,7 @@ class OkxProvider:
         self,
         symbol: str,
         *,
+        horizon: str | None = None,
         correlation_id: str | None = None,
     ) -> MarketSnapshot:
         correlation = correlation_id or uuid4().hex
@@ -523,7 +605,7 @@ class OkxProvider:
                     )
                 envelopes[endpoint] = self._get_public_json(
                     path,
-                    params=self._params(endpoint, symbol),
+                    params=self._params(endpoint, symbol, horizon=horizon),
                     endpoint=endpoint,
                     correlation_id=correlation,
                     timeout=request_timeout,
@@ -537,16 +619,19 @@ class OkxProvider:
         return self._retry_policy.execute(fetch_once)
 
     @staticmethod
-    def _params(endpoint: str, symbol: str) -> dict[str, str]:
-        if endpoint == "index":
-            return {"instId": symbol.removesuffix("-SWAP")}
-        params = {"instId": symbol}
+    def _params(
+        endpoint: str,
+        symbol: str,
+        *,
+        horizon: str | None = None,
+    ) -> dict[str, str]:
+        params = {"instId": _instrument_id_for_endpoint(endpoint, symbol)}
         if endpoint in {"mark", "open_interest"}:
             params["instType"] = "SWAP"
         elif endpoint == "book":
             params["sz"] = "20"
         elif endpoint == "candles":
-            params.update({"bar": "1H", "limit": "100"})
+            params.update({"bar": _okx_bar_for_horizon(horizon), "limit": "100"})
         return params
 
     def _get_public_json(

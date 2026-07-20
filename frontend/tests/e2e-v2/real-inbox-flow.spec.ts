@@ -7,7 +7,13 @@ import {
   type InboxItem,
 } from "../../src/lib/schemas/product-api";
 
+type AnalysisInboxItem = InboxItem & {
+  payload: Extract<InboxItem["payload"], { kind: "artifact_review" }>;
+};
+
 const inboxPath = "/api/product/api/v2/inbox";
+const expectedTaskId = process.env.REAL_INBOX_TASK_ID?.trim().toLowerCase() ?? "";
+const uuidPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const writeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const expectedProjects: Record<string, { width: number; height: number }> = {
   "fixture-desktop": { width: 1440, height: 1000 },
@@ -21,6 +27,7 @@ test.skip(
 
 test("opens a persisted Inbox review without browser-side writes", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
+  expect(expectedTaskId).toMatch(uuidPattern);
   expect(page.viewportSize()).toEqual(expectedViewport(testInfo));
 
   const observer = installBrowserObserver(page);
@@ -30,15 +37,20 @@ test("opens a persisted Inbox review without browser-side writes", async ({ page
   const rawInbox: unknown = await (await inboxResponsePromise).json();
   assertNoRuntimeProjectionFields(rawInbox);
   const inbox = inboxViewSchema.parse(rawInbox);
-  const pendingItem = requirePendingItem(inbox.items);
+  const pendingItem = requirePendingItem(inbox.items, expectedTaskId);
+  const taskHref = `/work?task=${encodeURIComponent(pendingItem.task_id)}`;
   const card = page.locator(".inbox-item", {
-    has: page.getByRole("link", { name: "打开任务", exact: true }),
-  }).filter({ hasText: pendingItem.symbol.replace("-USDT-SWAP", "") }).first();
+    has: page.locator(`a[href="${taskHref}"]`),
+  });
 
   await expect(page.getByRole("heading", { name: "审核收件箱", exact: true })).toBeVisible();
   await expect(card).toHaveAttribute("data-status", "pending");
   await expect(card.getByText("待审核", { exact: true }).first()).toBeVisible();
   await expect(card.getByText(pendingItem.horizon, { exact: true })).toBeVisible();
+  await expect(card.getByRole("link", { name: "打开任务", exact: true })).toHaveAttribute(
+    "href",
+    taskHref,
+  );
   for (const statement of pendingItem.payload.artifact.analysis.root_cause_chain.slice(0, 2)) {
     await expect(card.getByText(statement, { exact: false })).toBeVisible();
   }
@@ -192,17 +204,24 @@ function isJsonReadResponse(response: Response, pathname: string) {
     && (response.headers()["content-type"] ?? "").includes("application/json");
 }
 
-function requirePendingItem(items: InboxItem[]): InboxItem {
-  const pendingItem = items.find((item) => item.status === "pending");
+function requirePendingItem(items: InboxItem[], taskId: string): AnalysisInboxItem {
+  const pendingItem = items.find((item) =>
+    item.status === "pending" && item.task_id.toLowerCase() === taskId);
   if (pendingItem === undefined) {
-    throw new Error("real Product Inbox must contain a fresh pending review task");
+    throw new Error(`real Product Inbox must contain pending seeded Task ${taskId}`);
   }
-  expect(pendingItem.payload.kind).toBe("artifact_review");
+  if (!isAnalysisInboxItem(pendingItem)) {
+    throw new Error(`real Product Inbox Task ${taskId} must be an analysis review`);
+  }
   expect(pendingItem.payload.artifact.status).toBe("draft");
   expect(pendingItem.payload.artifact.analysis.root_cause_chain.length).toBeGreaterThan(0);
   expect(pendingItem.member_count).toBeGreaterThan(0);
   expect(pendingItem.responded_at).toBeNull();
   return pendingItem;
+}
+
+function isAnalysisInboxItem(item: InboxItem): item is AnalysisInboxItem {
+  return item.payload.kind === "artifact_review";
 }
 
 async function assertNoInternalRuntimeText(page: Page, item: InboxItem) {
@@ -347,6 +366,7 @@ async function attachDeepScrollScreenshot(page: Page, testInfo: TestInfo) {
   }));
   expect(position.maximumScrollY).toBeGreaterThan(0);
   expect(position.scrollY).toBeGreaterThan(0);
+  await target.scrollIntoViewIfNeeded();
   await expect(target).toBeInViewport();
   await testInfo.attach(`real-inbox-review-${testInfo.project.name}`, {
     body: await page.screenshot({ animations: "disabled" }),

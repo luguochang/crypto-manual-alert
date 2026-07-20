@@ -19,13 +19,9 @@ COMMON_REQUIRED_CLAIMS = (
 )
 REQUIRED_CLAIMS = COMMON_REQUIRED_CLAIMS
 MAX_INTERNAL_TOKEN_TTL_SECONDS = 60
-TOKEN_USES = frozenset(
-    {"identity_discovery", "user", "worker", "healthcheck"}
-)
+TOKEN_USES = frozenset({"identity_discovery", "user", "worker", "healthcheck"})
 IDENTITY_DISCOVERY_AUDIENCE = "crypto-alert-identity-discovery"
-_AUTHORITY_CLAIMS = frozenset(
-    {"tenant_id", "workspace_id", "roles", "permissions"}
-)
+_AUTHORITY_CLAIMS = frozenset({"tenant_id", "workspace_id", "roles", "permissions"})
 
 
 class InternalTokenIssuer:
@@ -152,10 +148,7 @@ class InternalTokenVerifier:
             raise ValueError("at least one internal JWT public key is required")
         if not issuer or not audience:
             raise ValueError("internal JWT issuer and audience are required")
-        if (
-            max_ttl_seconds < 1
-            or max_ttl_seconds > MAX_INTERNAL_TOKEN_TTL_SECONDS
-        ):
+        if max_ttl_seconds < 1 or max_ttl_seconds > MAX_INTERNAL_TOKEN_TTL_SECONDS:
             raise ValueError("max_ttl_seconds must be between 1 and 60 seconds")
         self._public_keys = dict(public_keys)
         self._issuer = issuer
@@ -219,7 +212,9 @@ class InternalTokenVerifier:
                 if self._audience != IDENTITY_DISCOVERY_AUDIENCE:
                     raise PermissionError("invalid identity discovery audience")
                 if "context_id" in claims:
-                    raise PermissionError("identity discovery token cannot select a context")
+                    raise PermissionError(
+                        "identity discovery token cannot select a context"
+                    )
                 return
             if self._audience == IDENTITY_DISCOVERY_AUDIENCE:
                 raise PermissionError("scoped user token requires a resource audience")
@@ -260,8 +255,10 @@ def _claim_string(claims: Mapping[str, Any], name: str) -> str:
 
 
 def _valid_strings(values: object, *, allow_empty: bool = False) -> bool:
-    return isinstance(values, (list, tuple)) and (allow_empty or bool(values)) and all(
-        isinstance(value, str) and bool(value.strip()) for value in values
+    return (
+        isinstance(values, (list, tuple))
+        and (allow_empty or bool(values))
+        and all(isinstance(value, str) and bool(value.strip()) for value in values)
     )
 
 

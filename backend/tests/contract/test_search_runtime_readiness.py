@@ -45,10 +45,30 @@ def _readiness() -> SearchReadiness:
     )
 
 
-def _duckduckgo_readiness() -> SearchReadiness:
+def _builtin_readiness() -> SearchReadiness:
     return SearchReadiness(
         status="ready",
-        selected_provider=SearchProvider.DUCKDUCKGO,
+        selected_provider=SearchProvider.BUILTIN,
+        probed_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        model="capability-test",
+        endpoint="https://model.example",
+        capabilities=ModelCapabilities(
+            tool_calling=True,
+            structured_output=True,
+            streaming=True,
+            usage_reporting=True,
+            builtin_web_search_invoked=True,
+            builtin_web_search_citation_count=1,
+        ),
+        tavily_configured=False,
+        tavily_connected=False,
+    )
+
+
+def _ddgs_metasearch_readiness() -> SearchReadiness:
+    return SearchReadiness(
+        status="ready",
+        selected_provider=SearchProvider.DDGS_METASEARCH,
         probed_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
         model="capability-test",
         endpoint="https://model.example",
@@ -62,8 +82,129 @@ def _duckduckgo_readiness() -> SearchReadiness:
         ),
         tavily_configured=False,
         tavily_connected=False,
-        duckduckgo_connected=True,
+        ddgs_metasearch_connected=True,
     )
+
+
+def test_runtime_passes_configured_okx_endpoint_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_environment="development",
+        openai_api_key=SecretStr("test-only-model-key"),
+        okx_base_url="https://okx.example.test",
+    )
+    provider_options: dict[str, object] = {}
+
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime_module, "ChatOpenAI", lambda **_: object())
+    monkeypatch.setattr(
+        runtime_module,
+        "OkxProvider",
+        lambda **kwargs: provider_options.update(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "create_market_analysis_agent",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "CapabilityAwareResearchCollector",
+        lambda *_args, **_kwargs: object(),
+    )
+    runtime_module.get_default_runtime.cache_clear()
+    try:
+        runtime_module.get_default_runtime()
+    finally:
+        runtime_module.get_default_runtime.cache_clear()
+
+    assert provider_options == {
+        "base_url": "https://okx.example.test",
+        "proxy": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "readiness", "tavily_key", "factory_name", "factory_options"),
+    [
+        (
+            "ddgs_metasearch",
+            _ddgs_metasearch_readiness(),
+            None,
+            "DdgsMetasearchProvider",
+            {
+                "proxy": "http://proxy.example:8080",
+                "result_kind": "text",
+            },
+        ),
+        (
+            "tavily",
+            _readiness(),
+            "test-tavily-key",
+            "TavilySearchProvider",
+            {"api_key": "test-tavily-key"},
+        ),
+    ],
+)
+def test_runtime_assembles_market_fallback_for_external_search_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    readiness: SearchReadiness,
+    tavily_key: str | None,
+    factory_name: str,
+    factory_options: dict[str, str],
+) -> None:
+    selected_search = object()
+    fallback = object()
+    search_options: dict[str, object] = {}
+    fallback_options: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        runtime_module, "failure_injection_from_settings", lambda _: None
+    )
+    monkeypatch.setattr(runtime_module, "OkxProvider", lambda **_: object())
+    monkeypatch.setattr(
+        runtime_module,
+        "CapabilityAwareResearchCollector",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "create_market_analysis_agent",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        factory_name,
+        lambda **kwargs: search_options.update(kwargs) or selected_search,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "WebSearchMarketCollector",
+        lambda *_args, **kwargs: fallback_options.update(kwargs) or fallback,
+    )
+
+    assembled = runtime_module._assemble_runtime(
+        settings=Settings(
+            _env_file=None,
+            app_environment="local",
+            search_provider=provider,
+            tavily_api_key=(SecretStr(tavily_key) if tavily_key is not None else None),
+            search_http_proxy="http://proxy.example:8080",
+        ),
+        model=object(),
+        tavily_api_key=tavily_key,
+        search_readiness=readiness,
+    )
+
+    assert assembled.market_fallback_collector is fallback
+    assert fallback_options["search"] is selected_search
+    assert search_options == {
+        **factory_options,
+        "evidence_validator": runtime_module.require_usd_price_evidence,
+    }
 
 
 @pytest.mark.asyncio
@@ -139,6 +280,70 @@ def test_app_environment_is_required_when_no_env_file_is_loaded(
         Settings(_env_file=None)
 
 
+@pytest.mark.parametrize("environment", ["development", "local", "test"])
+def test_non_strict_environment_accepts_ddgs_metasearch(environment: str) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_environment=environment,
+        search_provider="ddgs_metasearch",
+    )
+
+    assert settings.search_provider == "ddgs_metasearch"
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_strict_environment_rejects_ddgs_metasearch(environment: str) -> None:
+    with pytest.raises(ValidationError, match="ddgs_metasearch"):
+        Settings(
+            _env_file=None,
+            app_environment=environment,
+            search_provider="ddgs_metasearch",
+        )
+
+
+def test_search_provider_rejects_legacy_name() -> None:
+    with pytest.raises(ValidationError, match="search_provider"):
+        Settings(
+            _env_file=None,
+            app_environment="local",
+            search_provider="duckduckgo",  # type: ignore[arg-type]
+        )
+
+
+def test_blank_optional_provider_configuration_is_normalized_to_missing() -> None:
+    settings = Settings(
+        _env_file=None,
+        app_environment="local",
+        openai_api_key="  ",
+        openai_base_url="  ",
+        tavily_api_key=SecretStr(""),
+        market_data_http_proxy="",
+        search_http_proxy="\t",
+        worker_readiness_url=" ",
+        agent_readiness_url=" ",
+        langfuse_host=" ",
+    )
+
+    assert settings.openai_api_key is None
+    assert settings.openai_base_url is None
+    assert settings.tavily_api_key is None
+    assert settings.market_data_http_proxy is None
+    assert settings.search_http_proxy is None
+    assert settings.worker_readiness_url is None
+    assert settings.agent_readiness_url is None
+    assert settings.langfuse_host is None
+
+
+def test_tavily_selection_rejects_a_blank_credential() -> None:
+    with pytest.raises(ValidationError, match="TAVILY_API_KEY"):
+        Settings(
+            _env_file=None,
+            app_environment="local",
+            search_provider="tavily",
+            tavily_api_key=" ",
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("environment", ["development", "local", "test"])
 async def test_non_strict_environment_lifespan_does_not_probe_search(
@@ -204,7 +409,7 @@ async def test_strict_environment_lifespan_awaits_search_readiness(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("environment", ["staging", "production"])
-async def test_active_loop_lifespan_uses_official_async_tavily_fallback(
+async def test_active_loop_lifespan_uses_configured_async_tavily_provider(
     environment: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,6 +419,7 @@ async def test_active_loop_lifespan_uses_official_async_tavily_fallback(
         app_environment=environment,
         openai_api_key=SecretStr("test-only-model-key"),
         tavily_api_key=SecretStr("test-only-tavily-key"),
+        search_provider="tavily",
     )
     capabilities = ModelCapabilities(
         tool_calling=True,
@@ -312,7 +518,7 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
         openai_api_key=SecretStr("test-only-model-key"),
         tavily_api_key=SecretStr("test-only-tavily-key"),
     )
-    readiness = _readiness()
+    readiness = _builtin_readiness()
     probe_calls = 0
     collector_options = {}
 
@@ -329,6 +535,7 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
         nonlocal probe_calls
         probe_calls += 1
         assert kwargs["tavily_api_key"] == "test-only-tavily-key"
+        assert kwargs["requested_provider"] is SearchProvider.BUILTIN
         return readiness
 
     def collector(model, **kwargs):
@@ -348,21 +555,31 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
     assert first is second
     assert first.search_readiness is readiness
     assert probe_calls == 1
-    assert collector_options["provider"] is SearchProvider.TAVILY
+    assert collector_options["provider"] is SearchProvider.BUILTIN
 
 
 @pytest.mark.asyncio
-async def test_production_runtime_requests_explicit_duckduckgo_readiness(
+@pytest.mark.parametrize(
+    ("configured_provider", "readiness", "tavily_key"),
+    [
+        ("builtin_web_search", _builtin_readiness(), None),
+        ("tavily", _readiness(), "test-only-tavily-key"),
+    ],
+)
+async def test_strict_runtime_requests_configured_search_provider(
     monkeypatch: pytest.MonkeyPatch,
+    configured_provider: str,
+    readiness: SearchReadiness,
+    tavily_key: str | None,
 ) -> None:
     settings = Settings(
         _env_file=None,
         app_environment="production",
         openai_api_key=SecretStr("test-only-model-key"),
-        search_provider="duckduckgo",
+        search_provider=configured_provider,
+        tavily_api_key=SecretStr(tavily_key) if tavily_key is not None else None,
         search_http_proxy="http://127.0.0.1:7890",
     )
-    readiness = _duckduckgo_readiness()
     probe_options: dict[str, object] = {}
     collector_options: dict[str, object] = {}
 
@@ -392,9 +609,8 @@ async def test_production_runtime_requests_explicit_duckduckgo_readiness(
         runtime_module.get_default_runtime.cache_clear()
 
     assert runtime.search_readiness is readiness
-    assert probe_options["requested_provider"] is SearchProvider.DUCKDUCKGO
-    assert probe_options["search_http_proxy"] == "http://127.0.0.1:7890"
-    assert collector_options["provider"] is SearchProvider.DUCKDUCKGO
+    assert probe_options["requested_provider"] is SearchProvider(configured_provider)
+    assert collector_options["provider"] is SearchProvider(configured_provider)
 
 
 def test_production_runtime_cannot_start_when_search_readiness_fails(
@@ -411,9 +627,7 @@ def test_production_runtime_cannot_start_when_search_readiness_fails(
         runtime_module,
         "establish_search_readiness",
         lambda **_: (_ for _ in ()).throw(
-            SearchReadinessError(
-                "built-in web search failed; Tavily is not configured"
-            )
+            SearchReadinessError("built-in web search failed; Tavily is not configured")
         ),
     )
     runtime_module.get_default_runtime.cache_clear()
@@ -537,9 +751,7 @@ def test_custom_app_enters_and_exits_product_lifespan(
 
 def test_langgraph_config_mounts_authenticated_custom_http_app() -> None:
     config = json.loads(
-        (
-            Path(__file__).resolve().parents[2] / "langgraph.json"
-        ).read_text()
+        (Path(__file__).resolve().parents[2] / "langgraph.json").read_text()
     )
 
     assert config["http"] == {

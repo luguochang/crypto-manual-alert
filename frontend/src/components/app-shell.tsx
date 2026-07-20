@@ -1,7 +1,10 @@
-import { Radar, ShieldCheck } from "lucide-react";
+import { Plus, ShieldCheck } from "lucide-react";
+import Link from "next/link";
 
 import { AuthenticatedAppShell } from "@/components/authenticated-app-shell";
+import { BrandLockup } from "@/components/brand-lockup";
 import { PrimaryNavigation } from "@/components/primary-navigation";
+import { ShellTopbar } from "@/components/shell-topbar";
 import { requiresAuthenticatedRuntime } from "@/lib/runtime/app-environment";
 
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -10,16 +13,14 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
   }
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
       <aside className="sidebar">
-        <div className="brand-lockup" aria-label="Signal Desk">
-          <span className="brand-mark" aria-hidden="true">
-            <Radar size={22} strokeWidth={1.8} />
-          </span>
-          <span className="brand-copy">
-            <strong>Signal Desk</strong>
-            <span>Decision workspace</span>
-          </span>
-        </div>
+        <BrandLockup />
+
+        <Link className="sidebar-primary-action" href="/work" prefetch={false}>
+          <Plus size={17} aria-hidden="true" />
+          新建分析
+        </Link>
 
         <PrimaryNavigation />
 
@@ -31,7 +32,10 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
           </span>
         </div>
       </aside>
-      <main className="main-content">{children}</main>
+      <div className="app-frame">
+        <ShellTopbar />
+        <main className="main-content" id="main-content" tabIndex={-1}>{children}</main>
+      </div>
     </div>
   );
 }

@@ -4,7 +4,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from crypto_alert_v2.api.service import ProductAnalysisService
-from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.auth.context import ActorContext, configured_development_actor
 from crypto_alert_v2.config import Settings, get_settings
 
 
@@ -20,13 +20,12 @@ def development_actor(settings: Settings) -> ActorContext:
         raise RuntimeError("development bootstrap is not explicitly enabled")
     if settings.development_bootstrap_profile != "local-proof":
         raise RuntimeError("development bootstrap requires the local-proof profile")
-    return ActorContext(
-        tenant_id=settings.development_bootstrap_tenant_id,
-        workspace_id=settings.development_bootstrap_workspace_id,
-        user_id=settings.development_bootstrap_subject,
-        roles=settings.development_bootstrap_roles,
-        permissions=settings.development_bootstrap_permissions,
-    )
+    actor = configured_development_actor(settings)
+    if actor is None:
+        raise RuntimeError(
+            "development bootstrap requires a complete local-proof identity"
+        )
+    return actor
 
 
 async def bootstrap_development_membership(

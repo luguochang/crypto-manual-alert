@@ -25,12 +25,16 @@ class ProviderUnavailable(RuntimeError):
         endpoint: str,
         retryable: bool,
         correlation_id: str,
+        attempt: int | None = None,
+        retry_exhausted: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.endpoint = endpoint
         self.retryable = retryable
         self.correlation_id = correlation_id
+        self.attempt = attempt
+        self.retry_exhausted = retry_exhausted
 
 
 class ResearchUnavailable(RuntimeError):

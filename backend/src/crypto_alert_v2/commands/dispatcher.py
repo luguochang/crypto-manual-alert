@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -10,7 +10,9 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from langgraph_sdk.schema import StreamPart
 from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -22,18 +24,29 @@ from crypto_alert_v2.api.agent_server import (
     RemoteResumeIndeterminateError,
     RemoteRunHandle,
     RemoteRunState,
+    RemoteSubmitIndeterminateError,
 )
-from crypto_alert_v2.api.schemas import AnalysisSubmission, TerminalGraphOutput
+from crypto_alert_v2.api.schemas import (
+    AnalysisSubmission,
+    DeepResearchSubmission,
+    ProductSubmission,
+    TerminalGraphOutput,
+)
 from crypto_alert_v2.auth.context import ActorContext
-from crypto_alert_v2.graph.request import ArtifactReviewPayload, ReviewResponse
+from crypto_alert_v2.graph.request import (
+    DeepResearchReviewPayload,
+    ReviewResponse,
+    parse_review_interrupt_payload,
+    validate_review_payload_for_task,
+)
+from crypto_alert_v2.notifications.outbox import plan_notification
 from crypto_alert_v2.persistence.models import (
     Artifact,
-    ArtifactVersion,
-    Decision,
     InterruptPause,
     InterruptProjection,
     MarketSnapshot,
     Membership,
+    NotificationDestination,
     Run,
     Task,
     TaskCommand,
@@ -42,6 +55,15 @@ from crypto_alert_v2.persistence.models import (
     User,
     WebEvidence,
     Workspace,
+)
+from crypto_alert_v2.persistence.repositories import (
+    ArtifactRepository,
+    ObservabilityDeliveryIntent,
+    ObservabilityDeliveryRepository,
+)
+from crypto_alert_v2.projections.domain_events import (
+    append_domain_events,
+    append_progressive_events,
 )
 
 
@@ -53,11 +75,18 @@ class RemoteRunner(Protocol):
         task_id: str,
         product_thread_id: str,
         product_run_id: str,
-        submission: AnalysisSubmission,
+        submission: ProductSubmission,
+        task_type: Literal["market_analysis", "deep_research"] = "market_analysis",
         review_policy: Literal["bypass", "required"] = "bypass",
     ) -> RemoteRunHandle: ...
-
     async def join(self, handle: RemoteRunHandle) -> dict[str, Any]: ...
+
+    def join_stream(
+        self,
+        handle: RemoteRunHandle,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[StreamPart]: ...
 
     async def get(self, handle: RemoteRunHandle) -> RemoteRunState: ...
 
@@ -97,6 +126,60 @@ class RemoteRunner(Protocol):
         responses: Mapping[str, dict[str, Any]],
         checkpoint: RemoteCheckpoint,
     ) -> RemoteRunHandle: ...
+
+
+async def _persist_verified_web_evidence(
+    session: AsyncSession,
+    *,
+    task: Task,
+    product_run: Run,
+    evidence_items: Iterable[Any],
+) -> None:
+    persisted = {
+        (source_url, str(payload.get("content_hash") or ""))
+        for source_url, payload in (
+            await session.execute(
+                select(WebEvidence.source_url, WebEvidence.payload).where(
+                    WebEvidence.tenant_id == task.tenant_id,
+                    WebEvidence.workspace_id == task.workspace_id,
+                    WebEvidence.owner_user_id == task.owner_user_id,
+                    WebEvidence.task_id == task.id,
+                    WebEvidence.run_id == product_run.id,
+                )
+            )
+        ).all()
+    }
+    for evidence in evidence_items:
+        payload = evidence.model_dump(mode="json")
+        identity = (str(evidence.final_url), evidence.content_hash)
+        if identity in persisted:
+            continue
+        persisted.add(identity)
+        session.add(
+            WebEvidence(
+                id=uuid4(),
+                tenant_id=task.tenant_id,
+                workspace_id=task.workspace_id,
+                owner_user_id=task.owner_user_id,
+                task_id=task.id,
+                run_id=product_run.id,
+                source_url=identity[0],
+                title=evidence.title,
+                payload=payload,
+                fetched_at=evidence.fetched_at,
+                published_at=evidence.published_at,
+            )
+        )
+
+
+class ObservabilityIntentPlanner(Protocol):
+    def __call__(
+        self,
+        *,
+        task_id: UUID,
+        product_run_id: UUID,
+        now: datetime,
+    ) -> Iterable[ObservabilityDeliveryIntent]: ...
 
 
 ObservedTerminalStatus = Literal["error", "success", "timeout"]
@@ -157,6 +240,25 @@ class ForkCommandPayload(BaseModel):
         return self
 
 
+class RetryCommandPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_run_id: UUID
+    retry_run_id: UUID
+
+    @model_validator(mode="after")
+    def require_distinct_runs(self) -> "RetryCommandPayload":
+        if self.source_run_id == self.retry_run_id:
+            raise ValueError("retry source and destination Runs must differ")
+        return self
+
+
+class CancelRunCommandPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    run_id: UUID
+
+
 @dataclass(frozen=True, slots=True)
 class CommandLease:
     command_id: UUID
@@ -168,7 +270,8 @@ class CommandLease:
     worker_id: str
     fence_token: int
     actor: ActorContext
-    submission: AnalysisSubmission | None
+    task_type: Literal["market_analysis", "deep_research"] = "market_analysis"
+    submission: ProductSubmission | None = None
     remote_handle: RemoteRunHandle | None = None
     resume_handle: RemoteRunHandle | None = None
     respond_payload: RespondCommandPayload | None = None
@@ -176,8 +279,10 @@ class CommandLease:
     fork_payload: ForkCommandPayload | None = None
     review_policy: ReviewPolicy = "bypass"
     observed_terminal_status: ObservedTerminalStatus | None = None
+    submit_reconcile_only: bool = False
     resume_reconcile_only: bool = False
     fork_reconcile_only: bool = False
+    official_stream_last_event_id: str | None = None
 
 
 def _task_accepts_active_run(task: Task, lease: CommandLease) -> bool:
@@ -189,6 +294,12 @@ def _task_accepts_active_run(task: Task, lease: CommandLease) -> bool:
         and lease.respond_payload is not None
         and not lease.respond_payload.expired
     )
+
+
+def _canonical_payload_hash(payload: object) -> str:
+    return sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 class CommandDispatcher:
@@ -207,6 +318,9 @@ class CommandDispatcher:
         reconciliation_interval_seconds: float = 2.0,
         max_run_seconds: int = 900,
         interrupt_ttl_seconds: int = 3_600,
+        observability_intent_planner: ObservabilityIntentPlanner | None = None,
+        stream_slice_seconds: float = 0.5,
+        max_stream_events_per_slice: int = 64,
     ) -> None:
         if not worker_id.strip():
             raise ValueError("worker_id is required")
@@ -226,6 +340,10 @@ class CommandDispatcher:
             raise ValueError("max_run_seconds must be positive")
         if interrupt_ttl_seconds < 1:
             raise ValueError("interrupt_ttl_seconds must be positive")
+        if stream_slice_seconds <= 0:
+            raise ValueError("stream_slice_seconds must be positive")
+        if max_stream_events_per_slice < 1:
+            raise ValueError("max_stream_events_per_slice must be positive")
         self._session_factory = session_factory
         self._runner = runner
         self._worker_id = worker_id
@@ -238,6 +356,81 @@ class CommandDispatcher:
         self._reconciliation_interval_seconds = reconciliation_interval_seconds
         self._max_run_seconds = max_run_seconds
         self._interrupt_ttl_seconds = interrupt_ttl_seconds
+        self._observability_intent_planner = observability_intent_planner
+        self._stream_slice_seconds = stream_slice_seconds
+        self._max_stream_events_per_slice = max_stream_events_per_slice
+
+    async def _persist_terminal_run(
+        self,
+        session: AsyncSession,
+        *,
+        task: Task,
+        product_run: Run,
+        terminal: TerminalGraphOutput,
+        now: datetime,
+        projection_fence: int,
+        terminalize_task: bool,
+        failure_message: str | None = None,
+    ) -> None:
+        output = terminal.model_dump(mode="json", exclude_none=True)
+        output_hash = _canonical_payload_hash(output)
+        product_run.status = terminal.terminal_status
+        product_run.output_payload = output
+        product_run.finished_at = now
+        product_run.projection_fence = projection_fence
+        product_run.terminal_output_hash = output_hash
+        if terminal.errors:
+            product_run.failure_code = terminal.errors[0].code
+            product_run.failure_message = failure_message
+        else:
+            product_run.failure_code = None
+            product_run.failure_message = None
+        if terminalize_task:
+            task.status = terminal.terminal_status
+            task.completed_at = now
+        await append_domain_events(
+            session,
+            task=task,
+            run=product_run,
+            output=output,
+            notification_payload=None,
+            created_at=now,
+        )
+
+    async def _persist_failed_terminal_run(
+        self,
+        session: AsyncSession,
+        *,
+        task: Task,
+        product_run: Run,
+        failure_code: str,
+        error_type: str,
+        retryable: bool,
+        now: datetime,
+        projection_fence: int,
+        terminalize_task: bool,
+        failure_message: str,
+        attempt: int | None = None,
+    ) -> None:
+        error: dict[str, object] = {
+            "code": failure_code,
+            "error_type": error_type,
+            "retryable": retryable,
+        }
+        if attempt is not None:
+            error["attempt"] = max(1, min(attempt, 100))
+        await self._persist_terminal_run(
+            session,
+            task=task,
+            product_run=product_run,
+            terminal=TerminalGraphOutput.model_validate(
+                {"terminal_status": "failed", "errors": [error]}
+            ),
+            now=now,
+            projection_fence=projection_fence,
+            terminalize_task=terminalize_task,
+            failure_message=failure_message,
+        )
 
     async def dispatch_once(self) -> bool:
         if await self._expire_due_interrupt_once():
@@ -449,7 +642,14 @@ class CommandDispatcher:
                     )
                     .where(
                         TaskCommand.command_type.in_(
-                            ("submit", "respond", "fork", "cancel_task")
+                            (
+                                "submit",
+                                "respond",
+                                "fork",
+                                "retry",
+                                "cancel_run",
+                                "cancel_task",
+                            )
                         ),
                         Task.status.in_(("queued", "running", "waiting_human")),
                         or_(
@@ -505,44 +705,96 @@ class CommandDispatcher:
                     Run.task_id == task.id,
                     Run.tenant_id == task.tenant_id,
                     Run.workspace_id == task.workspace_id,
+                    Run.owner_user_id == task.owner_user_id,
                 )
                 .order_by(Run.attempt.desc())
                 .limit(1)
                 .with_for_update()
             )
+            claimed_product_run = product_run
             respond_payload = None
             fork_payload = None
+            if command.command_type == "cancel_run":
+                try:
+                    cancel_run_payload = CancelRunCommandPayload.model_validate(
+                        command.payload
+                    )
+                except ValidationError:
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    return None
+                product_run = await session.scalar(
+                    select(Run)
+                    .where(
+                        Run.id == cancel_run_payload.run_id,
+                        Run.task_id == task.id,
+                        Run.thread_id == task.thread_id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                    )
+                    .with_for_update()
+                )
+                if product_run is None or product_run.status in {
+                    "succeeded",
+                    "blocked",
+                    "failed",
+                    "cancelled",
+                }:
+                    command.status = "cancelled"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    return None
             if command.command_type == "respond":
                 try:
                     respond_payload = RespondCommandPayload.model_validate(
                         command.payload
                     )
-                except ValidationError as exc:
+                except ValidationError:
                     command.status = "failed"
                     command.lease_owner = None
                     command.lease_expires_at = None
-                    task.status = "failed"
-                    task.completed_at = now
                     if product_run is not None:
-                        product_run.status = "failed"
-                        product_run.failure_code = "invalid_respond_command"
-                        product_run.failure_message = str(exc)
-                        product_run.finished_at = now
+                        await self._persist_failed_terminal_run(
+                            session,
+                            task=task,
+                            product_run=product_run,
+                            failure_code="invalid_respond_command",
+                            error_type="CommandValidationError",
+                            retryable=False,
+                            now=now,
+                            projection_fence=command.sequence,
+                            terminalize_task=True,
+                            failure_message="The respond command payload was invalid.",
+                        )
+                    else:
+                        task.status = "failed"
+                        task.completed_at = now
                     return None
             if command.command_type == "fork":
                 try:
                     fork_payload = ForkCommandPayload.model_validate(command.payload)
-                except ValidationError as exc:
+                except ValidationError:
                     command.status = "failed"
                     command.lease_owner = None
                     command.lease_expires_at = None
-                    task.status = "failed"
-                    task.completed_at = now
                     if product_run is not None:
-                        product_run.status = "failed"
-                        product_run.failure_code = "invalid_fork_command"
-                        product_run.failure_message = str(exc)
-                        product_run.finished_at = now
+                        await self._persist_failed_terminal_run(
+                            session,
+                            task=task,
+                            product_run=product_run,
+                            failure_code="invalid_fork_command",
+                            error_type="CommandValidationError",
+                            retryable=False,
+                            now=now,
+                            projection_fence=command.sequence,
+                            terminalize_task=True,
+                            failure_message="The fork command payload was invalid.",
+                        )
+                    else:
+                        task.status = "failed"
+                        task.completed_at = now
                     return None
 
                 product_run = await session.scalar(
@@ -581,16 +833,101 @@ class CommandDispatcher:
                     command.status = "failed"
                     command.lease_owner = None
                     command.lease_expires_at = None
-                    task.status = "failed"
-                    task.completed_at = now
-                    if product_run is not None:
-                        product_run.status = "failed"
-                        product_run.failure_code = "invalid_fork_lineage"
-                        product_run.failure_message = (
-                            "Fork command does not match its Product Run lineage."
+                    failed_run = product_run or claimed_product_run
+                    if failed_run is not None:
+                        await self._persist_failed_terminal_run(
+                            session,
+                            task=task,
+                            product_run=failed_run,
+                            failure_code="invalid_fork_lineage",
+                            error_type="CommandLineageError",
+                            retryable=False,
+                            now=now,
+                            projection_fence=command.sequence,
+                            terminalize_task=True,
+                            failure_message=(
+                                "Fork command does not match its Product Run lineage."
+                            ),
                         )
-                        product_run.finished_at = now
+                    else:
+                        task.status = "failed"
+                        task.completed_at = now
                     return None
+            elif command.command_type == "retry":
+                try:
+                    retry_payload = RetryCommandPayload.model_validate(command.payload)
+                except ValidationError:
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    if product_run is not None:
+                        await self._persist_failed_terminal_run(
+                            session,
+                            task=task,
+                            product_run=product_run,
+                            failure_code="invalid_retry_command",
+                            error_type="CommandValidationError",
+                            retryable=False,
+                            now=now,
+                            projection_fence=command.sequence,
+                            terminalize_task=True,
+                            failure_message="The retry command payload was invalid.",
+                        )
+                    else:
+                        task.status = "failed"
+                        task.completed_at = now
+                    return None
+                product_run = await session.scalar(
+                    select(Run)
+                    .where(
+                        Run.id == retry_payload.retry_run_id,
+                        Run.task_id == task.id,
+                        Run.thread_id == task.thread_id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                        Run.retry_of_run_id == retry_payload.source_run_id,
+                    )
+                    .with_for_update()
+                )
+                retry_source_run = await session.scalar(
+                    select(Run)
+                    .where(
+                        Run.id == retry_payload.source_run_id,
+                        Run.task_id == task.id,
+                        Run.thread_id == task.thread_id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                        Run.status.in_(("failed", "blocked")),
+                    )
+                    .with_for_update()
+                )
+                if product_run is None or retry_source_run is None:
+                    command.status = "failed"
+                    command.lease_owner = None
+                    command.lease_expires_at = None
+                    failed_run = product_run or claimed_product_run
+                    if failed_run is not None:
+                        await self._persist_failed_terminal_run(
+                            session,
+                            task=task,
+                            product_run=failed_run,
+                            failure_code="invalid_retry_lineage",
+                            error_type="CommandLineageError",
+                            retryable=False,
+                            now=now,
+                            projection_fence=command.sequence,
+                            terminalize_task=True,
+                            failure_message=(
+                                "Retry command does not match its Product Run lineage."
+                            ),
+                        )
+                    else:
+                        task.status = "failed"
+                        task.completed_at = now
+                    return None
+                fork_source_run = None
             else:
                 fork_source_run = None
             if command.command_type == "submit" and product_run is None:
@@ -618,6 +955,27 @@ class CommandDispatcher:
                 await session.flush()
 
             if (
+                product_run is not None
+                and command.command_type in {"submit", "respond", "fork", "retry"}
+                and self._observability_intent_planner is not None
+            ):
+                intents = tuple(
+                    self._observability_intent_planner(
+                        task_id=task.id,
+                        product_run_id=product_run.id,
+                        now=now,
+                    )
+                )
+                await ObservabilityDeliveryRepository(session).ensure_intents(
+                    tenant_id=task.tenant_id,
+                    workspace_id=task.workspace_id,
+                    owner_user_id=task.owner_user_id,
+                    task_id=task.id,
+                    run_id=product_run.id,
+                    intents=intents,
+                )
+
+            if (
                 command.command_type == "submit"
                 and product_run is not None
                 and product_run.cancel_requested_at is not None
@@ -641,8 +999,8 @@ class CommandDispatcher:
             command.lease_owner = self._worker_id
             command.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
             command.attempt += 1
-            if command.command_type in {"submit", "respond", "fork"}:
-                if command.command_type in {"submit", "fork"} or (
+            if command.command_type in {"submit", "respond", "fork", "retry"}:
+                if command.command_type in {"submit", "fork", "retry"} or (
                     respond_payload is not None and respond_payload.expired
                 ):
                     task.status = "running"
@@ -672,6 +1030,23 @@ class CommandDispatcher:
                     product_run.failure_code = "agent_resume_create_intent"
                     product_run.failure_message = (
                         "Official resume create intent is durable; a replacement "
+                        "worker must reconcile metadata before any second create."
+                    )
+
+            submit_reconcile_only = False
+            if (
+                command.command_type in {"submit", "retry"}
+                and product_run is not None
+                and product_run.official_run_id is None
+            ):
+                submit_reconcile_only = product_run.failure_code in {
+                    "agent_submit_create_intent",
+                    "agent_submit_indeterminate",
+                }
+                if not submit_reconcile_only:
+                    product_run.failure_code = "agent_submit_create_intent"
+                    product_run.failure_message = (
+                        "Official submit create intent is durable; a replacement "
                         "worker must reconcile metadata before any second create."
                     )
 
@@ -772,9 +1147,17 @@ class CommandDispatcher:
                 worker_id=self._worker_id,
                 fence_token=command.attempt,
                 actor=actor,
+                task_type=cast(
+                    Literal["market_analysis", "deep_research"],
+                    task.task_type,
+                ),
                 submission=(
-                    AnalysisSubmission.model_validate(task.request_payload)
-                    if command.command_type == "submit"
+                    (
+                        DeepResearchSubmission.model_validate(task.request_payload)
+                        if task.task_type == "deep_research"
+                        else AnalysisSubmission.model_validate(task.request_payload)
+                    )
+                    if command.command_type in {"submit", "retry"}
                     else None
                 ),
                 remote_handle=remote_handle,
@@ -791,19 +1174,25 @@ class CommandDispatcher:
                     if product_run is not None
                     else None
                 ),
+                submit_reconcile_only=submit_reconcile_only,
                 resume_reconcile_only=resume_reconcile_only,
                 fork_reconcile_only=fork_reconcile_only,
+                official_stream_last_event_id=(
+                    product_run.official_stream_last_event_id
+                    if product_run is not None
+                    else None
+                ),
             )
 
     async def execute(self, lease: CommandLease) -> bool:
         if not await self._owns_lease(lease):
             return False
 
-        if lease.command_type == "cancel_task":
+        if lease.command_type in {"cancel_run", "cancel_task"}:
             return await self._execute_cancel(lease)
         if lease.product_run_id is None:
             return False
-        if lease.command_type == "submit" and lease.submission is None:
+        if lease.command_type in {"submit", "retry"} and lease.submission is None:
             return False
         if lease.command_type == "respond" and lease.respond_payload is None:
             return False
@@ -823,12 +1212,22 @@ class CommandDispatcher:
                             "Respond command has no registered interrupted Run"
                         )
                     if lease.resume_reconcile_only:
-                        handle = await self._runner.find(
-                            actor=lease.actor,
-                            task_id=str(lease.task_id),
-                            product_thread_id=lease.resume_handle.thread_id,
-                            product_run_id=str(lease.product_run_id),
-                        )
+                        try:
+                            async with asyncio.timeout(
+                                self._remote_operation_timeout_seconds
+                            ):
+                                handle = await self._runner.find(
+                                    actor=lease.actor,
+                                    task_id=str(lease.task_id),
+                                    product_thread_id=lease.resume_handle.thread_id,
+                                    product_run_id=str(lease.product_run_id),
+                                )
+                        except TimeoutError as exc:
+                            raise RemoteResumeIndeterminateError(
+                                "Official resume metadata reconciliation exceeded "
+                                "the remote operation deadline; refusing a duplicate "
+                                "create"
+                            ) from exc
                         if handle is None:
                             raise RemoteResumeIndeterminateError(
                                 "Durable resume create intent has no visible official "
@@ -873,12 +1272,22 @@ class CommandDispatcher:
                     if authorize is not None:
                         source_handle = authorize(source_handle, lease.actor)
                     if lease.fork_reconcile_only:
-                        handle = await self._runner.find(
-                            actor=lease.actor,
-                            task_id=str(lease.task_id),
-                            product_thread_id=source_handle.thread_id,
-                            product_run_id=str(lease.product_run_id),
-                        )
+                        try:
+                            async with asyncio.timeout(
+                                self._remote_operation_timeout_seconds
+                            ):
+                                handle = await self._runner.find(
+                                    actor=lease.actor,
+                                    task_id=str(lease.task_id),
+                                    product_thread_id=source_handle.thread_id,
+                                    product_run_id=str(lease.product_run_id),
+                                )
+                        except TimeoutError as exc:
+                            raise RemoteForkIndeterminateError(
+                                "Official checkpoint fork metadata reconciliation "
+                                "exceeded the remote operation deadline; refusing a "
+                                "duplicate create"
+                            ) from exc
                         if handle is None:
                             raise RemoteForkIndeterminateError(
                                 "Durable checkpoint fork create intent has no visible "
@@ -895,15 +1304,38 @@ class CommandDispatcher:
                         )
                 else:
                     assert lease.submission is not None
-                    handle = await self._start_with_heartbeat(
-                        lease,
-                        actor=lease.actor,
-                        task_id=str(lease.task_id),
-                        product_thread_id=str(lease.product_thread_id),
-                        product_run_id=str(lease.product_run_id),
-                        submission=lease.submission,
-                        review_policy=lease.review_policy,
-                    )
+                    if lease.submit_reconcile_only:
+                        try:
+                            async with asyncio.timeout(
+                                self._remote_operation_timeout_seconds
+                            ):
+                                handle = await self._runner.find(
+                                    actor=lease.actor,
+                                    task_id=str(lease.task_id),
+                                    product_thread_id=str(lease.product_thread_id),
+                                    product_run_id=str(lease.product_run_id),
+                                )
+                        except TimeoutError as exc:
+                            raise RemoteSubmitIndeterminateError(
+                                "Official submit metadata reconciliation exceeded the "
+                                "remote operation deadline; refusing a duplicate create"
+                            ) from exc
+                        if handle is None:
+                            raise RemoteSubmitIndeterminateError(
+                                "Durable submit uncertainty has no visible official "
+                                "Run; refusing a duplicate create"
+                            )
+                    else:
+                        handle = await self._start_with_heartbeat(
+                            lease,
+                            actor=lease.actor,
+                            task_id=str(lease.task_id),
+                            product_thread_id=str(lease.product_thread_id),
+                            product_run_id=str(lease.product_run_id),
+                            submission=lease.submission,
+                            task_type=lease.task_type,
+                            review_policy=lease.review_policy,
+                        )
             except Exception as exc:
                 await self._record_remote_error(lease, exc)
                 return False
@@ -915,6 +1347,13 @@ class CommandDispatcher:
             if registration == "lost":
                 return False
 
+        try:
+            if not await self._drain_progressive_stream(lease, handle):
+                return False
+        except Exception as exc:
+            await self._record_remote_error(lease, exc)
+            return False
+
         if lease.observed_terminal_status is not None:
             return await self._project_remote_terminal(
                 lease,
@@ -923,7 +1362,8 @@ class CommandDispatcher:
             )
 
         try:
-            remote_state = await self._runner.get(handle)
+            async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                remote_state = await self._runner.get(handle)
         except Exception:
             return await self._reconcile_or_timeout(lease, handle)
 
@@ -941,6 +1381,94 @@ class CommandDispatcher:
             handle,
             remote_state,
         )
+
+    async def _drain_progressive_stream(
+        self,
+        lease: CommandLease,
+        handle: RemoteRunHandle,
+    ) -> bool:
+        join_stream = getattr(self._runner, "join_stream", None)
+        if join_stream is None:
+            return True
+        stream = join_stream(
+            handle,
+            last_event_id=lease.official_stream_last_event_id,
+        )
+        seen = 0
+        try:
+            async with asyncio.timeout(self._stream_slice_seconds):
+                async for part in stream:
+                    if part.event != "updates":
+                        continue
+                    if not isinstance(part.id, str) or not part.id:
+                        raise RuntimeError(
+                            "Resumable Agent Server update omitted its event id"
+                        )
+                    if not isinstance(part.data, dict):
+                        raise RuntimeError(
+                            "Agent Server update event returned an invalid payload"
+                        )
+                    if not await self._persist_progressive_update(
+                        lease,
+                        handle,
+                        event_id=part.id,
+                        updates=part.data,
+                    ):
+                        return False
+                    seen += 1
+                    if seen >= self._max_stream_events_per_slice:
+                        break
+        except TimeoutError:
+            pass
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+        return True
+
+    async def _persist_progressive_update(
+        self,
+        lease: CommandLease,
+        handle: RemoteRunHandle,
+        *,
+        event_id: str,
+        updates: dict[str, Any],
+    ) -> bool:
+        if lease.product_run_id is None:
+            return False
+        now = self._clock()
+        async with self._session_factory() as session, session.begin():
+            command = await self._locked_command(session, lease, now)
+            if command is None:
+                return False
+            task = await session.scalar(
+                select(Task).where(Task.id == lease.task_id).with_for_update()
+            )
+            product_run = await session.scalar(
+                select(Run).where(Run.id == lease.product_run_id).with_for_update()
+            )
+            if (
+                task is None
+                or product_run is None
+                or not _task_accepts_active_run(task, lease)
+                or product_run.official_run_id != handle.run_id
+                or command.official_run_id != handle.run_id
+            ):
+                return False
+            await append_progressive_events(
+                session,
+                task=task,
+                run=product_run,
+                updates=updates,
+                source_event_id=event_id,
+                checkpoint_id=product_run.checkpoint_id,
+                created_at=now,
+            )
+            product_run.official_stream_last_event_id = event_id
+            product_run.official_stream_last_event_at = now
+            product_run.last_heartbeat_at = now
+            command.lease_expires_at = now + timedelta(seconds=self._lease_seconds)
+            return True
 
     async def _execute_cancel(self, lease: CommandLease) -> bool:
         handle = lease.remote_handle
@@ -1002,7 +1530,7 @@ class CommandDispatcher:
         if not await self._remember_remote_terminal(lease, remote_state):
             return False
         if remote_state.status in {"error", "timeout"}:
-            return await self._finalize(
+            return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
                     terminal_status="failed",
@@ -1041,7 +1569,24 @@ class CommandDispatcher:
                     }
                 ],
             )
-        return await self._finalize(lease, terminal)
+        if terminal.terminal_status == "succeeded" and (
+            (lease.task_type == "market_analysis" and terminal.artifact is None)
+            or (
+                lease.task_type == "deep_research"
+                and terminal.deep_research_artifact is None
+            )
+        ):
+            terminal = TerminalGraphOutput(
+                terminal_status="failed",
+                errors=[
+                    {
+                        "code": "invalid_agent_output",
+                        "error_type": "TaskArtifactTypeMismatch",
+                        "retryable": False,
+                    }
+                ],
+            )
+        return await self._finalize_with_database_recovery(lease, terminal)
 
     async def _remember_remote_terminal(
         self,
@@ -1085,11 +1630,11 @@ class CommandDispatcher:
     ) -> bool:
         attempt_limit = (
             self._max_cancel_attempts
-            if lease.command_type == "cancel_task"
+            if lease.command_type in {"cancel_run", "cancel_task"}
             else self._max_attempts
         )
         if lease.fence_token >= attempt_limit:
-            return await self._finalize(
+            return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
                     terminal_status="failed",
@@ -1303,22 +1848,21 @@ class CommandDispatcher:
         failure_message: str = "Official Run cancellation could not be confirmed.",
     ) -> bool:
         now = self._clock()
-        output = {
-            "terminal_status": "failed",
-            "errors": [
-                {
-                    "code": failure_code,
-                    "error_type": type(exc).__name__
-                    if exc is not None
-                    else "RunDiscoveryTimeout",
-                    "retryable": False,
-                    "attempt": max(1, min(lease.fence_token, 100)),
-                }
-            ],
-        }
-        output_hash = sha256(
-            json.dumps(output, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        terminal = TerminalGraphOutput.model_validate(
+            {
+                "terminal_status": "failed",
+                "errors": [
+                    {
+                        "code": failure_code,
+                        "error_type": type(exc).__name__
+                        if exc is not None
+                        else "RunDiscoveryTimeout",
+                        "retryable": False,
+                        "attempt": max(1, min(lease.fence_token, 100)),
+                    }
+                ],
+            }
+        )
         async with self._session_factory() as session, session.begin():
             command = await self._locked_command(
                 session,
@@ -1352,27 +1896,44 @@ class CommandDispatcher:
                 pause_status="cancelled",
                 member_status="cancelled",
             )
-            task.status = "failed"
-            task.completed_at = now
+            target_is_latest = lease.command_type == "cancel_task"
+            if product_run is not None and lease.command_type == "cancel_run":
+                latest_run_id = await session.scalar(
+                    select(Run.id)
+                    .where(
+                        Run.task_id == task.id,
+                        Run.tenant_id == task.tenant_id,
+                        Run.workspace_id == task.workspace_id,
+                        Run.owner_user_id == task.owner_user_id,
+                    )
+                    .order_by(Run.attempt.desc())
+                    .limit(1)
+                )
+                target_is_latest = latest_run_id == product_run.id
+            if target_is_latest:
+                task.status = "failed"
+                task.completed_at = now
             command.status = "failed"
             command.lease_owner = None
             command.lease_expires_at = None
             if product_run is not None:
-                product_run.status = "failed"
-                product_run.output_payload = output
-                product_run.failure_code = failure_code
-                product_run.failure_message = failure_message
-                product_run.finished_at = now
-                product_run.projection_fence = lease.command_sequence
-                product_run.terminal_output_hash = output_hash
+                await self._persist_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    terminal=terminal,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=target_is_latest,
+                    failure_message=failure_message,
+                )
             return True
 
     async def _finalize_cancel(self, lease: CommandLease) -> bool:
         now = self._clock()
-        output = {"terminal_status": "cancelled", "errors": []}
-        output_hash = sha256(
-            json.dumps(output, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        terminal = TerminalGraphOutput.model_validate(
+            {"terminal_status": "cancelled", "errors": []}
+        )
         async with self._session_factory() as session, session.begin():
             command = await self._locked_command(
                 session,
@@ -1413,17 +1974,36 @@ class CommandDispatcher:
                 pause_status="cancelled",
                 member_status="cancelled",
             )
-            task.status = "cancelled"
-            task.completed_at = now
+            if lease.command_type == "cancel_task":
+                task.status = "cancelled"
+                task.completed_at = now
             command.status = "dispatched"
             command.lease_owner = None
             command.lease_expires_at = None
             if product_run is not None:
-                product_run.status = "cancelled"
-                product_run.output_payload = output
-                product_run.finished_at = now
-                product_run.projection_fence = lease.command_sequence
-                product_run.terminal_output_hash = output_hash
+                target_is_latest = lease.command_type == "cancel_task"
+                if lease.command_type == "cancel_run":
+                    latest_run_id = await session.scalar(
+                        select(Run.id)
+                        .where(
+                            Run.task_id == task.id,
+                            Run.tenant_id == task.tenant_id,
+                            Run.workspace_id == task.workspace_id,
+                            Run.owner_user_id == task.owner_user_id,
+                        )
+                        .order_by(Run.attempt.desc())
+                        .limit(1)
+                    )
+                    target_is_latest = latest_run_id == product_run.id
+                await self._persist_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    terminal=terminal,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=target_is_latest,
+                )
             return True
 
     async def _start_with_heartbeat(
@@ -1433,14 +2013,23 @@ class CommandDispatcher:
     ) -> RemoteRunHandle | None:
         start_task = asyncio.create_task(self._runner.start(**kwargs))
         interval = max(1.0, self._lease_seconds / 3)
-        while True:
-            done, _ = await asyncio.wait({start_task}, timeout=interval)
-            if start_task in done:
-                return await start_task
-            if not await self._renew_lease(lease):
+        try:
+            async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                while True:
+                    done, _ = await asyncio.wait({start_task}, timeout=interval)
+                    if start_task in done:
+                        return await start_task
+                    if not await self._renew_lease(lease):
+                        return None
+        except TimeoutError as exc:
+            raise RemoteSubmitIndeterminateError(
+                "Official submit exceeded the remote operation deadline; only "
+                "metadata reconciliation is allowed"
+            ) from exc
+        finally:
+            if not start_task.done():
                 start_task.cancel()
                 await asyncio.gather(start_task, return_exceptions=True)
-                return None
 
     async def _resume_with_heartbeat(
         self,
@@ -1449,14 +2038,23 @@ class CommandDispatcher:
     ) -> RemoteRunHandle | None:
         resume_task = asyncio.create_task(self._runner.resume(**kwargs))
         interval = max(1.0, self._lease_seconds / 3)
-        while True:
-            done, _ = await asyncio.wait({resume_task}, timeout=interval)
-            if resume_task in done:
-                return await resume_task
-            if not await self._renew_lease(lease):
+        try:
+            async with asyncio.timeout(self._remote_operation_timeout_seconds):
+                while True:
+                    done, _ = await asyncio.wait({resume_task}, timeout=interval)
+                    if resume_task in done:
+                        return await resume_task
+                    if not await self._renew_lease(lease):
+                        return None
+        except TimeoutError as exc:
+            raise RemoteResumeIndeterminateError(
+                "Official resume exceeded the remote operation deadline; only "
+                "metadata reconciliation is allowed"
+            ) from exc
+        finally:
+            if not resume_task.done():
                 resume_task.cancel()
                 await asyncio.gather(resume_task, return_exceptions=True)
-                return None
 
     async def _fork_with_heartbeat(
         self,
@@ -1524,7 +2122,7 @@ class CommandDispatcher:
                     handle,
                     cancel_result.state,
                 )
-            return await self._finalize(
+            return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
                     terminal_status="failed",
@@ -1638,7 +2236,7 @@ class CommandDispatcher:
         exc: Exception,
     ) -> bool:
         if lease.fence_token >= self._max_attempts:
-            return await self._finalize(
+            return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
                     terminal_status="failed",
@@ -1665,7 +2263,7 @@ class CommandDispatcher:
         if not interrupts:
             return False
         if len(interrupts) > 64:
-            return await self._finalize(
+            return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
                     terminal_status="failed",
@@ -1771,10 +2369,20 @@ class CommandDispatcher:
                 raise RuntimeError(
                     "Official Runtime changed an existing interrupt pause member set"
                 )
+            verified_evidence = []
             for remote_interrupt in interrupts:
-                public_payload = ArtifactReviewPayload.model_validate(
-                    remote_interrupt.value
-                ).model_dump(mode="json")
+                review_payload = parse_review_interrupt_payload(remote_interrupt.value)
+                validate_review_payload_for_task(
+                    review_payload,
+                    task_type=task.task_type,
+                    symbol=task.request_payload["symbol"],
+                    horizon=task.request_payload["horizon"],
+                )
+                public_payload = review_payload.model_dump(mode="json")
+                if isinstance(review_payload, DeepResearchReviewPayload):
+                    verified_evidence.extend(
+                        source.evidence for source in review_payload.artifact.sources
+                    )
                 projection = await session.scalar(
                     select(InterruptProjection)
                     .where(
@@ -1836,6 +2444,12 @@ class CommandDispatcher:
                 raise RuntimeError(
                     "Persisted interrupt pause member count is inconsistent"
                 )
+            await _persist_verified_web_evidence(
+                session,
+                task=task,
+                product_run=product_run,
+                evidence_items=verified_evidence,
+            )
             task.status = "waiting_human"
             product_run.status = "waiting_human"
             product_run.checkpoint_id = root_checkpoint.checkpoint_id
@@ -1907,6 +2521,62 @@ class CommandDispatcher:
                 return
             if product_run.cancel_requested_at is not None:
                 command.status = "cancelled"
+                command.lease_owner = None
+                command.lease_expires_at = None
+                return
+            if (
+                lease.command_type in {"submit", "retry"}
+                and isinstance(exc, RemoteSubmitIndeterminateError)
+                and product_run.reconciliation_deadline_at is not None
+                and product_run.reconciliation_deadline_at > now
+            ):
+                task = await session.scalar(
+                    select(Task).where(Task.id == lease.task_id).with_for_update()
+                )
+                if task is None:
+                    raise RuntimeError(
+                        "Indeterminate submit command has no Task authority"
+                    )
+                task.status = "queued"
+                product_run.status = "queued"
+                product_run.failure_code = "agent_submit_indeterminate"
+                product_run.failure_message = (
+                    "Official submit may have succeeded; only metadata "
+                    "reconciliation is allowed until the recovery deadline."
+                )
+                command.status = "pending"
+                command.lease_owner = None
+                command.lease_expires_at = now + timedelta(
+                    seconds=self._reconciliation_interval_seconds
+                )
+                return
+            if lease.command_type in {"submit", "retry"} and isinstance(
+                exc, RemoteSubmitIndeterminateError
+            ):
+                task = await session.scalar(
+                    select(Task).where(Task.id == lease.task_id).with_for_update()
+                )
+                if task is None:
+                    raise RuntimeError(
+                        "Expired indeterminate submit command has no Task authority"
+                    )
+                await self._persist_failed_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    failure_code="agent_submit_indeterminate",
+                    error_type=type(exc).__name__,
+                    retryable=False,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=True,
+                    failure_message=(
+                        "The official submit acceptance remained unknown until the "
+                        "recovery deadline; no second Run was created."
+                    ),
+                    attempt=command.attempt,
+                )
+                command.status = "failed"
                 command.lease_owner = None
                 command.lease_expires_at = None
                 return
@@ -2001,36 +2671,32 @@ class CommandDispatcher:
                     )
                     return
 
-                output = {
-                    "terminal_status": "failed",
-                    "errors": [
-                        {
-                            "code": "agent_resume_failed",
-                            "error_type": type(exc).__name__,
-                            "retryable": False,
-                            "attempt": max(1, min(command.attempt, 100)),
-                        }
-                    ],
-                }
-                output_hash = sha256(
-                    json.dumps(
-                        output,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).hexdigest()
-                pause.status = "resume_failed"
-                product_run.status = "failed"
-                product_run.output_payload = output
-                product_run.failure_code = "agent_resume_failed"
-                product_run.failure_message = (
-                    "Official Run resume failed after the configured attempt limit."
+                terminal = TerminalGraphOutput.model_validate(
+                    {
+                        "terminal_status": "failed",
+                        "errors": [
+                            {
+                                "code": "agent_resume_failed",
+                                "error_type": type(exc).__name__,
+                                "retryable": False,
+                                "attempt": max(1, min(command.attempt, 100)),
+                            }
+                        ],
+                    }
                 )
-                product_run.finished_at = now
-                product_run.projection_fence = lease.command_sequence
-                product_run.terminal_output_hash = output_hash
-                task.status = "failed"
-                task.completed_at = now
+                pause.status = "resume_failed"
+                await self._persist_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    terminal=terminal,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=True,
+                    failure_message=(
+                        "Official Run resume failed after the configured attempt limit."
+                    ),
+                )
                 command.status = "failed"
                 command.lease_owner = None
                 command.lease_expires_at = None
@@ -2074,38 +2740,40 @@ class CommandDispatcher:
                     )
                     return
 
-                output = {
-                    "terminal_status": "failed",
-                    "errors": [
-                        {
-                            "code": "agent_fork_failed",
-                            "error_type": type(exc).__name__,
-                            "retryable": False,
-                            "attempt": max(1, min(command.attempt, 100)),
-                        }
-                    ],
-                }
-                output_hash = sha256(
-                    json.dumps(
-                        output,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).hexdigest()
-                product_run.status = "failed"
-                product_run.output_payload = output
-                product_run.failure_code = "agent_fork_failed"
-                product_run.failure_message = "Official checkpoint fork failed after the configured attempt limit."
-                product_run.finished_at = now
-                product_run.projection_fence = lease.command_sequence
-                product_run.terminal_output_hash = output_hash
-                task.status = "failed"
-                task.completed_at = now
+                await self._persist_failed_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    failure_code="agent_fork_failed",
+                    error_type=type(exc).__name__,
+                    retryable=False,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=True,
+                    failure_message=(
+                        "Official checkpoint fork failed after the configured "
+                        "attempt limit."
+                    ),
+                    attempt=command.attempt,
+                )
                 command.status = "failed"
                 command.lease_owner = None
                 command.lease_expires_at = None
                 return
             if command.attempt < self._max_attempts:
+                if lease.command_type in {"submit", "retry"}:
+                    task = await session.scalar(
+                        select(Task).where(Task.id == lease.task_id).with_for_update()
+                    )
+                    if task is not None:
+                        task.status = "queued"
+                        task.completed_at = None
+                    product_run.status = "queued"
+                    product_run.failure_code = "agent_server_unavailable"
+                    product_run.failure_message = (
+                        "Agent Server rejected the request before an official Run "
+                        "was known to exist; submit may be retried."
+                    )
                 command.lease_expires_at = now
                 return
             task = await session.scalar(
@@ -2113,26 +2781,146 @@ class CommandDispatcher:
             )
             if task is None:
                 return
-            output = {
-                "terminal_status": "failed",
-                "errors": [
-                    {
-                        "code": "agent_server_unavailable",
-                        "error_type": type(exc).__name__,
-                        "retryable": True,
-                    }
-                ],
-            }
-            product_run.status = "failed"
-            product_run.output_payload = output
-            product_run.failure_code = "agent_server_unavailable"
-            product_run.failure_message = "Agent Server 暂时不可用，当前分析未完成。"
-            product_run.finished_at = now
-            task.status = "failed"
-            task.completed_at = now
+            await self._persist_failed_terminal_run(
+                session,
+                task=task,
+                product_run=product_run,
+                failure_code="agent_server_unavailable",
+                error_type=type(exc).__name__,
+                retryable=True,
+                now=now,
+                projection_fence=lease.command_sequence,
+                terminalize_task=True,
+                failure_message="Agent Server 暂时不可用，当前分析未完成。",
+                attempt=command.attempt,
+            )
             command.status = "failed"
             command.lease_owner = None
             command.lease_expires_at = None
+
+    async def _finalize_with_database_recovery(
+        self,
+        lease: CommandLease,
+        terminal: TerminalGraphOutput,
+    ) -> bool:
+        try:
+            return await self._finalize(lease, terminal)
+        except DBAPIError as exc:
+            return await self._record_terminal_projection_database_error(
+                lease,
+                terminal,
+                exc,
+            )
+
+    async def _record_terminal_projection_database_error(
+        self,
+        lease: CommandLease,
+        terminal: TerminalGraphOutput,
+        exc: DBAPIError,
+    ) -> bool:
+        if lease.product_run_id is None:
+            return False
+        now = self._clock()
+        expected_output = terminal.model_dump(mode="json", exclude_none=True)
+        expected_hash = sha256(
+            json.dumps(
+                expected_output,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        async with self._session_factory() as session, session.begin():
+            command = await self._locked_command(
+                session,
+                lease,
+                now,
+                allow_expired=True,
+            )
+            if command is None:
+                return False
+            task = await session.scalar(
+                select(Task).where(Task.id == lease.task_id).with_for_update()
+            )
+            product_run = await session.scalar(
+                select(Run)
+                .where(
+                    Run.id == lease.product_run_id,
+                    Run.task_id == lease.task_id,
+                )
+                .with_for_update()
+            )
+            if task is None or product_run is None:
+                return False
+
+            if (
+                product_run.projection_fence == lease.command_sequence
+                and product_run.terminal_output_hash == expected_hash
+                and product_run.output_payload is not None
+                and _canonical_payload_hash(product_run.output_payload) == expected_hash
+            ):
+                await self._persist_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    terminal=terminal,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=True,
+                    failure_message=product_run.failure_message,
+                )
+                command.status = "dispatched"
+                command.lease_owner = None
+                command.lease_expires_at = None
+                return True
+
+            product_run.failure_code = "terminal_projection_unavailable"
+            product_run.failure_message = (
+                "The terminal Product projection could not be committed."
+            )
+            product_run.last_heartbeat_at = now
+            command.lease_owner = None
+            if command.attempt < self._max_attempts:
+                task.status = "queued"
+                task.completed_at = None
+                product_run.status = "queued"
+                product_run.finished_at = None
+                command.status = "pending"
+                command.lease_expires_at = now + timedelta(
+                    seconds=self._reconciliation_interval_seconds
+                )
+                return False
+
+            error_type = (
+                "DatabaseOperationalError"
+                if isinstance(exc, OperationalError)
+                else "DatabaseError"
+            )
+            failed_output = {
+                "terminal_status": "failed",
+                "errors": [
+                    {
+                        "code": "terminal_projection_unavailable",
+                        "error_type": error_type,
+                        "retryable": True,
+                        "attempt": max(1, min(command.attempt, 100)),
+                    }
+                ],
+            }
+            await self._persist_terminal_run(
+                session,
+                task=task,
+                product_run=product_run,
+                terminal=TerminalGraphOutput.model_validate(failed_output),
+                now=now,
+                projection_fence=lease.command_sequence,
+                terminalize_task=True,
+                failure_message=(
+                    "The terminal Product projection could not be committed."
+                ),
+            )
+            command.status = "failed"
+            command.lease_expires_at = None
+            return False
 
     async def _finalize(
         self, lease: CommandLease, terminal: TerminalGraphOutput
@@ -2159,14 +2947,15 @@ class CommandDispatcher:
             if task is None or product_run is None:
                 return False
             task_accepts_projection = _task_accepts_active_run(task, lease) or (
-                lease.command_type == "cancel_task" and task.status == "waiting_human"
+                lease.command_type in {"cancel_run", "cancel_task"}
+                and task.status == "waiting_human"
             )
             if not task_accepts_projection:
                 command.status = "cancelled"
                 command.lease_owner = None
                 command.lease_expires_at = None
                 return False
-            if lease.command_type == "cancel_task":
+            if lease.command_type in {"cancel_run", "cancel_task"}:
                 await self._close_active_interrupt_lineage(
                     session,
                     lease,
@@ -2184,23 +2973,51 @@ class CommandDispatcher:
                 product_run.projection_fence == lease.command_sequence
                 and product_run.terminal_output_hash is not None
             ):
-                if product_run.terminal_output_hash == output_hash:
-                    product_run.status = terminal.terminal_status
-                    product_run.finished_at = product_run.finished_at or now
-                    task.status = terminal.terminal_status
-                    task.completed_at = task.completed_at or now
+                if (
+                    product_run.terminal_output_hash == output_hash
+                    and product_run.output_payload is not None
+                    and _canonical_payload_hash(product_run.output_payload)
+                    == output_hash
+                ):
+                    await self._persist_terminal_run(
+                        session,
+                        task=task,
+                        product_run=product_run,
+                        terminal=terminal,
+                        now=now,
+                        projection_fence=lease.command_sequence,
+                        terminalize_task=True,
+                        failure_message=product_run.failure_message,
+                    )
                     command.status = "dispatched"
                     command.lease_owner = None
                     command.lease_expires_at = None
                     return True
-                product_run.status = "failed"
-                product_run.failure_code = "terminal_projection_conflict"
-                product_run.failure_message = (
-                    "A terminal replay did not match the persisted output hash."
+                conflict = TerminalGraphOutput.model_validate(
+                    {
+                        "terminal_status": "failed",
+                        "errors": [
+                            {
+                                "code": "terminal_projection_conflict",
+                                "error_type": "TerminalOutputHashConflict",
+                                "retryable": False,
+                                "attempt": max(1, min(command.attempt, 100)),
+                            }
+                        ],
+                    }
                 )
-                product_run.finished_at = now
-                task.status = "failed"
-                task.completed_at = now
+                await self._persist_terminal_run(
+                    session,
+                    task=task,
+                    product_run=product_run,
+                    terminal=conflict,
+                    now=now,
+                    projection_fence=lease.command_sequence,
+                    terminalize_task=True,
+                    failure_message=(
+                        "A terminal replay did not match the persisted output hash."
+                    ),
+                )
                 command.status = "failed"
                 command.lease_owner = None
                 command.lease_expires_at = None
@@ -2219,6 +3036,9 @@ class CommandDispatcher:
 
             if terminal.errors:
                 product_run.failure_code = terminal.errors[0].code
+            else:
+                product_run.failure_code = None
+                product_run.failure_message = None
 
             if terminal.market_snapshot is not None:
                 market = terminal.market_snapshot
@@ -2235,69 +3055,166 @@ class CommandDispatcher:
                         fetched_at=market.fetched_at,
                     )
                 )
-            for evidence in terminal.web_evidence:
-                session.add(
-                    WebEvidence(
+            await _persist_verified_web_evidence(
+                session,
+                task=task,
+                product_run=product_run,
+                evidence_items=terminal.web_evidence,
+            )
+            notification_event_payload: dict[str, Any] | None = None
+            if (
+                terminal.terminal_status == "succeeded"
+                and terminal.artifact is not None
+            ):
+                artifact = await session.scalar(
+                    select(Artifact)
+                    .where(
+                        Artifact.tenant_id == task.tenant_id,
+                        Artifact.workspace_id == task.workspace_id,
+                        Artifact.owner_user_id == task.owner_user_id,
+                        Artifact.task_id == task.id,
+                        Artifact.artifact_type == "analysis_report",
+                    )
+                    .with_for_update()
+                )
+                if artifact is None:
+                    artifact = Artifact(
                         id=uuid4(),
                         tenant_id=task.tenant_id,
                         workspace_id=task.workspace_id,
                         owner_user_id=task.owner_user_id,
                         task_id=task.id,
-                        run_id=product_run.id,
-                        source_url=str(evidence.final_url),
-                        title=evidence.title,
-                        payload=evidence.model_dump(mode="json"),
-                        fetched_at=evidence.fetched_at,
-                        published_at=evidence.published_at,
+                        artifact_type="analysis_report",
                     )
-                )
-            if (
-                terminal.terminal_status == "succeeded"
-                and terminal.artifact is not None
-            ):
-                artifact = Artifact(
-                    id=uuid4(),
-                    tenant_id=task.tenant_id,
-                    workspace_id=task.workspace_id,
-                    owner_user_id=task.owner_user_id,
-                    task_id=task.id,
-                    artifact_type="analysis_report",
-                )
-                session.add(artifact)
-                await session.flush()
+                    session.add(artifact)
+                    await session.flush()
                 artifact_payload = terminal.artifact.model_dump(mode="json")
-                artifact_version = ArtifactVersion(
-                    id=uuid4(),
-                    tenant_id=artifact.tenant_id,
-                    workspace_id=artifact.workspace_id,
-                    owner_user_id=artifact.owner_user_id,
+                commit = await ArtifactRepository(
+                    session,
+                    lease.actor,
+                ).commit_version_and_decision(
                     artifact_id=artifact.id,
-                    task_id=artifact.task_id,
                     run_id=product_run.id,
-                    version_number=1,
-                    schema_version=terminal.artifact.schema_version,
-                    status="committed",
                     content=artifact_payload,
+                    decision=artifact_payload["analysis"],
+                    evidence_verdict=artifact_payload["evidence_verdict"],
+                    risk_verdict=artifact_payload["risk_verdict"],
+                    schema_version=terminal.artifact.schema_version,
                 )
-                artifact.latest_version_number = 1
-                session.add(artifact_version)
-                session.add(
-                    Decision(
-                        id=uuid4(),
-                        tenant_id=artifact.tenant_id,
-                        workspace_id=artifact.workspace_id,
-                        owner_user_id=artifact.owner_user_id,
-                        artifact_id=artifact.id,
-                        artifact_version_id=artifact_version.id,
-                        task_id=artifact.task_id,
-                        run_id=product_run.id,
-                        decision_version=1,
-                        decision=artifact_payload["analysis"],
-                        evidence_verdict=artifact_payload["evidence_verdict"],
-                        risk_verdict=artifact_payload["risk_verdict"],
+                decision = commit.decision
+                if task.request_payload.get("notify") is True:
+                    analysis = artifact_payload["analysis"]
+                    destination_id = await session.scalar(
+                        select(NotificationDestination.id)
+                        .where(
+                            NotificationDestination.tenant_id == decision.tenant_id,
+                            NotificationDestination.workspace_id
+                            == decision.workspace_id,
+                            NotificationDestination.owner_user_id
+                            == decision.owner_user_id,
+                            NotificationDestination.channel == "bark",
+                            NotificationDestination.status == "enabled",
+                        )
+                        .limit(1)
                     )
+                    notification_event_payload = {
+                        "title": f"{analysis['instrument']} analysis complete",
+                        "body": str(analysis["main_action"]),
+                        "task_id": str(decision.task_id),
+                        "run_id": str(decision.run_id),
+                        "artifact_id": str(decision.artifact_id),
+                        "artifact_version_id": str(decision.artifact_version_id),
+                        "decision_id": str(decision.id),
+                        "decision_version": decision.decision_version,
+                        "instrument": analysis["instrument"],
+                        "action": analysis["main_action"],
+                        "risk_allowed": bool(
+                            artifact_payload["risk_verdict"]["allowed"]
+                        ),
+                    }
+                    await plan_notification(
+                        session,
+                        tenant_id=decision.tenant_id,
+                        workspace_id=decision.workspace_id,
+                        owner_user_id=decision.owner_user_id,
+                        task_id=decision.task_id,
+                        run_id=decision.run_id,
+                        artifact_id=decision.artifact_id,
+                        artifact_version_id=decision.artifact_version_id,
+                        decision_id=decision.id,
+                        decision_version=decision.decision_version,
+                        destination_id=destination_id,
+                        channel="bark",
+                        notification_type="analysis_completed",
+                        payload=notification_event_payload,
+                        now=now,
+                    )
+            elif (
+                terminal.terminal_status == "succeeded"
+                and terminal.deep_research_artifact is not None
+            ):
+                research_artifact = await session.scalar(
+                    select(Artifact)
+                    .where(
+                        Artifact.tenant_id == task.tenant_id,
+                        Artifact.workspace_id == task.workspace_id,
+                        Artifact.owner_user_id == task.owner_user_id,
+                        Artifact.task_id == task.id,
+                        Artifact.artifact_type == "deep_research_report",
+                    )
+                    .with_for_update()
                 )
+                if research_artifact is None:
+                    research_artifact = Artifact(
+                        id=uuid4(),
+                        tenant_id=task.tenant_id,
+                        workspace_id=task.workspace_id,
+                        owner_user_id=task.owner_user_id,
+                        task_id=task.id,
+                        artifact_type="deep_research_report",
+                    )
+                    session.add(research_artifact)
+                    await session.flush()
+                research_payload = terminal.deep_research_artifact.model_dump(
+                    mode="json"
+                )
+                await ArtifactRepository(
+                    session,
+                    lease.actor,
+                ).commit_version(
+                    artifact_id=research_artifact.id,
+                    run_id=product_run.id,
+                    content=research_payload,
+                    schema_version=terminal.deep_research_artifact.schema_version,
+                )
+            await append_domain_events(
+                session,
+                task=task,
+                run=product_run,
+                output=output,
+                notification_payload=notification_event_payload,
+                created_at=now,
+            )
             return True
+
+    async def release_owned_leases(self) -> None:
+        now = self._clock()
+        async with self._session_factory() as session, session.begin():
+            commands = list(
+                (
+                    await session.scalars(
+                        select(TaskCommand)
+                        .where(
+                            TaskCommand.status == "dispatching",
+                            TaskCommand.lease_owner == self._worker_id,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+            )
+            for command in commands:
+                command.lease_owner = None
+                command.lease_expires_at = now
 
     async def _locked_command(
         self,

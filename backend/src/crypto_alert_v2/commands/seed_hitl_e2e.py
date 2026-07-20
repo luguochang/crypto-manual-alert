@@ -36,13 +36,15 @@ from crypto_alert_v2.persistence.models import (
 
 ASSISTANT_ID = "crypto_analysis"
 MULTI_INTERRUPT_ASSISTANT_ID = "multi_interrupt_fixture"
-FixtureKind = Literal["canonical", "multi_interrupt"]
+FixtureKind = Literal["canonical", "deep_research", "multi_interrupt"]
 FIXTURE_ASSISTANTS: dict[FixtureKind, str] = {
     "canonical": ASSISTANT_ID,
+    "deep_research": ASSISTANT_ID,
     "multi_interrupt": MULTI_INTERRUPT_ASSISTANT_ID,
 }
 FIXTURE_INTERRUPT_COUNTS: dict[FixtureKind, int] = {
     "canonical": 1,
+    "deep_research": 1,
     "multi_interrupt": 2,
 }
 FIXTURE_ACTOR = ActorContext(
@@ -120,6 +122,71 @@ GRAPH_STATE = {
     "errors": [],
     "lifecycle": "artifact_built",
 }
+DEEP_RESEARCH_REQUEST = {
+    "task_type": "deep_research",
+    "symbol": "BTC-USDT-SWAP",
+    "horizon": "7d",
+    "query_text": "审核已持久化的 BTC 机构采用研究草稿。",
+}
+DEEP_RESEARCH_EVIDENCE = {
+    "query": "BTC institutional adoption",
+    "final_url": "https://example.com/verified-institutional-source",
+    "redirect_chain": [],
+    "http_status": 200,
+    "fetched_at": "2026-07-19T08:00:00Z",
+    "published_at": "2026-07-19T07:00:00Z",
+    "content_hash": "a" * 64,
+    "parser_version": "controlled-hitl-seed-v1",
+    "title": "Verified institutional source",
+    "author": "Research Desk",
+    "source": "controlled_hitl_seed",
+    "excerpt": "A verified source records continued institutional product activity.",
+    "evidence_relation": "supports",
+}
+DEEP_RESEARCH_ARTIFACT = {
+    "artifact_type": "deep_research_report",
+    "schema_version": "1.0",
+    "status": "draft",
+    "harness_mode": "deepagents",
+    "search_coverage": {
+        "status": "complete",
+        "attempted_queries": 1,
+        "successful_queries": 1,
+        "failed_queries": [],
+    },
+    "report": {
+        "executive_summary": "BTC 机构采用仍在推进，但需要保留反证空间。",
+        "sections": [
+            {
+                "title": "机构采用",
+                "summary": "可验证来源支持该趋势，但样本窗口仍然有限。",
+                "findings": [
+                    {
+                        "claim": "机构产品活动保持增长。",
+                        "source_indexes": [1],
+                    }
+                ],
+            }
+        ],
+        "risk_notes": ["事件窗口可能快速改变当前判断。"],
+        "evidence_gaps": ["缺少跨周期资金流样本。"],
+    },
+    "sources": [{"index": 1, "evidence": DEEP_RESEARCH_EVIDENCE}],
+    "model_audits": [],
+}
+DEEP_RESEARCH_GRAPH_STATE = {
+    "request": DEEP_RESEARCH_REQUEST,
+    "task_type": "deep_research",
+    "deep_research_artifact": DEEP_RESEARCH_ARTIFACT,
+    "web_evidence": [DEEP_RESEARCH_EVIDENCE],
+    "model_audits": [],
+    "research_harness_mode": "deepagents",
+    "review_policy": "required",
+    "review_iteration": 0,
+    "terminal_status": "running",
+    "errors": [],
+    "lifecycle": "deep_research_draft_ready",
+}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -154,15 +221,17 @@ def _authorization(settings: Settings) -> str:
     if not _loopback_url(settings.agent_server_url):
         raise RuntimeError("HITL E2E seeding is restricted to a loopback Agent Server")
     if settings.app_environment not in {"development", "local", "test"}:
-        raise RuntimeError("HITL E2E seeding is disabled outside local test environments")
+        raise RuntimeError(
+            "HITL E2E seeding is disabled outside local test environments"
+        )
     token = settings.agent_server_local_token
     if token is None or not token.get_secret_value().strip():
         raise RuntimeError("AGENT_SERVER_LOCAL_TOKEN is required")
     return f"Bearer {token.get_secret_value()}"
 
 
-def _request_hash() -> str:
-    canonical = json.dumps(REQUEST, sort_keys=True, separators=(",", ":"))
+def _request_hash(request: dict[str, Any] = REQUEST) -> str:
+    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -261,6 +330,14 @@ async def _seed_one(
                 headers=headers,
             )
             initial_input = None
+        elif fixture == "deep_research":
+            await client.threads.update_state(
+                str(thread_id),
+                DEEP_RESEARCH_GRAPH_STATE,
+                as_node="run_deep_research",
+                headers=headers,
+            )
+            initial_input = None
         else:
             initial_input = {"completion_count": 0}
         raw_run = await client.runs.create(
@@ -304,6 +381,10 @@ async def _seed_one(
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=ttl_seconds)
         pause_id = uuid4()
+        request_payload = (
+            DEEP_RESEARCH_REQUEST if fixture == "deep_research" else REQUEST
+        )
+        task_type = "deep_research" if fixture == "deep_research" else "market_analysis"
         async with session_factory() as session, session.begin():
             session.add(
                 Thread(
@@ -312,7 +393,11 @@ async def _seed_one(
                     workspace_id=workspace_id,
                     owner_user_id=user_id,
                     official_thread_id=str(thread_id),
-                    title=f"BTC-USDT-SWAP 4h {label} review",
+                    title=(
+                        f"BTC-USDT-SWAP "
+                        f"{'7d' if fixture == 'deep_research' else '4h'} "
+                        f"{label} review"
+                    ),
                     context={"fixture": "official-hitl-e2e"},
                 )
             )
@@ -324,11 +409,11 @@ async def _seed_one(
                     workspace_id=workspace_id,
                     owner_user_id=user_id,
                     thread_id=thread_id,
-                    task_type="market_analysis",
+                    task_type=task_type,
                     status="waiting_human",
                     idempotency_key=f"hitl-{label}-{uuid4()}",
-                    request_payload_hash=_request_hash(),
-                    request_payload=REQUEST,
+                    request_payload_hash=_request_hash(request_payload),
+                    request_payload=request_payload,
                     completed_at=None,
                 )
             )
@@ -346,7 +431,7 @@ async def _seed_one(
                     official_assistant_id=handle.assistant_id,
                     official_run_id=handle.run_id,
                     checkpoint_id=root_checkpoint.checkpoint_id,
-                    input_payload=REQUEST,
+                    input_payload=request_payload,
                     output_payload=None,
                     failure_code=None,
                     failure_message=None,
@@ -409,6 +494,7 @@ async def _seed_one(
             "assistant_id": assistant_id,
             "member_count": len(interrupt_set),
             "task_id": str(task_id),
+            "product_run_id": str(product_run_id),
             "official_raw_status": raw_status,
             "normalized_status": normalized_status,
             "product_status": "waiting_human",

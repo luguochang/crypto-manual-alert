@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 import crypto_alert_v2.api.service as service_module
 from crypto_alert_v2.api.schemas import TaskView
@@ -90,6 +91,7 @@ class _TaskViewSession(_RunSourceSession):
         latest_run: SimpleNamespace | None,
         market_snapshot: dict[str, Any] | None,
         web_evidence: list[dict[str, Any]],
+        stage_events: list[tuple[str, int, datetime, bool]] | None = None,
     ) -> None:
         super().__init__(
             market_snapshot=market_snapshot,
@@ -97,6 +99,7 @@ class _TaskViewSession(_RunSourceSession):
         )
         self.task = task
         self.latest_run = latest_run
+        self.stage_events = stage_events or []
         self.execute_statements: list[Any] = []
 
     async def __aenter__(self) -> _TaskViewSession:
@@ -118,18 +121,22 @@ class _TaskViewSession(_RunSourceSession):
 
     async def execute(self, statement: Any) -> SimpleNamespace:
         self.execute_statements.append(statement)
+        if "FROM app.domain_events" in str(statement):
+            return SimpleNamespace(all=lambda: self.stage_events)
         joined = (
             (self.latest_run, "official-thread-1")
             if self.latest_run is not None
             else None
         )
-        return SimpleNamespace(one_or_none=lambda: joined)
+        return SimpleNamespace(
+            all=lambda: [],
+            one_or_none=lambda: joined,
+        )
 
     async def scalars(self, statement: Any) -> _ScalarRows:
-        if (
-            "FROM app.interrupt_inbox" in str(statement)
-            or "FROM app.interrupt_pauses" in str(statement)
-        ):
+        if "FROM app.interrupt_inbox" in str(
+            statement
+        ) or "FROM app.interrupt_pauses" in str(statement):
             return _ScalarRows([])
         return await super().scalars(statement)
 
@@ -200,10 +207,146 @@ def test_task_view_exposes_explicit_empty_run_sources() -> None:
     assert view.model_dump(mode="json")["web_evidence"] == []
 
 
+def test_task_view_distinguishes_current_pause_from_resolved_historical_boundary() -> (
+    None
+):
+    current = _task_payload()
+    current["status"] = "waiting_human"
+    with pytest.raises(ValidationError, match="active pause"):
+        TaskView.model_validate(current)
+
+    selected_run_id = uuid4()
+    historical = {
+        **current,
+        "projection_scope": {
+            "mode": "selected_run",
+            "selected_run_id": selected_run_id,
+        },
+    }
+    view = TaskView.model_validate(historical)
+
+    assert view.status == "waiting_human"
+    assert view.pending_interrupts is None
+    assert view.projection_scope.selected_run_id == selected_run_id
+    with pytest.raises(ValidationError, match="requires its Run ID"):
+        TaskView.model_validate(
+            {
+                **historical,
+                "projection_scope": {
+                    "mode": "selected_run",
+                    "selected_run_id": None,
+                },
+            }
+        )
+
+
+def test_task_view_exposes_only_safe_persisted_stage_metadata() -> None:
+    payload = _task_payload()
+    run_id = uuid4()
+    payload["stage_history"] = {
+        "run_id": run_id,
+        "stages": [
+            {
+                "sequence": 11,
+                "stage": "market_snapshot",
+                "status": "committed",
+                "recorded_at": NOW,
+                "source": "official_stream",
+            },
+            {
+                "sequence": 12,
+                "stage": "run",
+                "status": "failed",
+                "recorded_at": NOW,
+                "source": "product_projection",
+            },
+        ],
+        "product_event_cursor": 12,
+        "official_stream_cursor": "opaque-stream-event-11",
+        "official_stream_cursor_at": NOW,
+    }
+
+    view = TaskView.model_validate(payload)
+    serialized = view.model_dump(mode="json")["stage_history"]
+
+    assert serialized is not None
+    assert serialized["run_id"] == str(run_id)
+    assert serialized["product_event_cursor"] == 12
+    assert set(serialized["stages"][0]) == {
+        "sequence",
+        "stage",
+        "status",
+        "recorded_at",
+        "source",
+    }
+    assert not {
+        "payload",
+        "payload_ref",
+        "payload_hash",
+        "checkpoint_id",
+        "source_event_key",
+        "source_event_id",
+        "model_content",
+    } & set(serialized["stages"][0])
+
+    unsafe_payload = _task_payload()
+    unsafe_payload["stage_history"] = {
+        "run_id": run_id,
+        "stages": [
+            {
+                "sequence": 11,
+                "stage": "market_snapshot",
+                "status": "committed",
+                "recorded_at": NOW,
+                "source": "official_stream",
+                "payload": {"authorization": "must-not-cross-product-api"},
+            }
+        ],
+        "product_event_cursor": 11,
+    }
+    with pytest.raises(ValidationError, match="payload"):
+        TaskView.model_validate(unsafe_payload)
+
+
+@pytest.mark.parametrize(
+    "history_update",
+    (
+        {"product_event_cursor": 10},
+        {
+            "official_stream_cursor": "opaque-stream-event-11",
+            "official_stream_cursor_at": None,
+        },
+    ),
+)
+def test_task_view_rejects_incoherent_stage_history_cursors(
+    history_update: dict[str, object],
+) -> None:
+    payload = _task_payload()
+    history: dict[str, object] = {
+        "run_id": uuid4(),
+        "stages": [
+            {
+                "sequence": 11,
+                "stage": "market_snapshot",
+                "status": "committed",
+                "recorded_at": NOW,
+                "source": "official_stream",
+            }
+        ],
+        "product_event_cursor": 11,
+    }
+    history.update(history_update)
+    payload["stage_history"] = history
+
+    with pytest.raises(ValidationError):
+        TaskView.model_validate(payload)
+
+
 def test_persistence_package_exports_task_run_projection_query() -> None:
     persistence_module = import_module("crypto_alert_v2.persistence")
 
     assert persistence_module.TaskRunProjectionRepository is not None
+    assert persistence_module.TaskRunStageEventRecord is not None
     assert persistence_module.TaskRunSourceRecords is not None
 
 
@@ -269,6 +412,51 @@ async def test_run_source_query_is_scoped_to_actor_task_and_product_run() -> Non
     assert "ORDER BY app.web_evidence.fetched_at ASC" in str(evidence_statement)
 
 
+@pytest.mark.asyncio
+async def test_stage_history_query_is_scoped_and_never_selects_event_payload() -> None:
+    repository_type = getattr(
+        repository_module,
+        "TaskRunProjectionRepository",
+        None,
+    )
+    assert repository_type is not None
+    actor = _resolved_actor()
+    task_id = uuid4()
+    run_id = uuid4()
+    session = _TaskViewSession(
+        task=_task(actor=actor),
+        latest_run=None,
+        market_snapshot=None,
+        web_evidence=[],
+        stage_events=[("market.snapshot.committed", 7, NOW, True)],
+    )
+
+    records = await repository_type(session, actor).get_stage_events(
+        task_id=task_id,
+        run_id=run_id,
+    )
+
+    assert len(records) == 1
+    assert records[0].event_type == "market.snapshot.committed"
+    assert records[0].sequence == 7
+    assert records[0].recorded_at == NOW
+    assert records[0].from_official_stream is True
+    statement = session.execute_statements[0]
+    _assert_complete_scope(
+        statement,
+        table_name="domain_events",
+        actor=actor,
+        task_id=task_id,
+        run_id=run_id,
+    )
+    selected_columns = str(statement).partition("FROM")[0]
+    assert "payload" not in selected_columns
+    assert "checkpoint_id" not in selected_columns
+    assert "source_event_key" not in selected_columns
+    assert "source_event_id IS NOT NULL" in selected_columns
+    assert "ORDER BY app.domain_events.sequence ASC" in str(statement)
+
+
 def test_run_source_projection_validates_persisted_payloads_as_typed_models() -> None:
     projection_module = import_module("crypto_alert_v2.projections.task")
     records = SimpleNamespace(
@@ -295,6 +483,8 @@ async def test_service_projects_sources_from_current_product_run(
         output_payload=None,
         official_assistant_id=None,
         official_run_id=None,
+        official_stream_last_event_id=None,
+        official_stream_last_event_at=None,
     )
     session = _TaskViewSession(
         task=task,
@@ -323,7 +513,7 @@ async def test_service_projects_sources_from_current_product_run(
         assert latest_run.id in statement.compile().params.values()
     cancel_statement = next(
         statement
-        for statement in session.scalar_statements
+        for statement in session.execute_statements
         if "app.task_commands" in str(statement)
     )
     cancel_params = cancel_statement.compile().params.values()
@@ -331,6 +521,79 @@ async def test_service_projects_sources_from_current_product_run(
     assert resolved.tenant_id in cancel_params
     assert resolved.workspace_id in cancel_params
     assert resolved.user_id in cancel_params
+
+
+@pytest.mark.asyncio
+async def test_service_projects_safe_stage_history_from_current_product_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_actor()
+    task = _task(actor=resolved)
+    run_id = uuid4()
+    latest_run = SimpleNamespace(
+        id=run_id,
+        status="failed",
+        finished_at=NOW,
+        output_payload={"errors": [{"code": "agent_run_error"}]},
+        official_assistant_id=None,
+        official_run_id=None,
+        official_stream_last_event_id="opaque-stream-event-21",
+        official_stream_last_event_at=NOW,
+    )
+    session = _TaskViewSession(
+        task=task,
+        latest_run=latest_run,
+        market_snapshot=None,
+        web_evidence=[],
+        stage_events=[
+            ("market.snapshot.committed", 20, NOW, True),
+            ("run.terminal", 21, NOW, False),
+        ],
+    )
+
+    async def resolve_actor_for_test(*_: object) -> ResolvedActor:
+        return resolved
+
+    monkeypatch.setattr(service_module, "resolve_actor", resolve_actor_for_test)
+    service = ProductAnalysisService(session_factory=lambda: session)
+
+    view = await service.get_task(_actor_context(), str(task.id))
+
+    assert view is not None
+    assert view["stage_history"] == {
+        "run_id": run_id,
+        "stages": [
+            {
+                "sequence": 20,
+                "stage": "market_snapshot",
+                "status": "committed",
+                "recorded_at": NOW,
+                "source": "official_stream",
+            },
+            {
+                "sequence": 21,
+                "stage": "run",
+                "status": "failed",
+                "recorded_at": NOW,
+                "source": "product_projection",
+            },
+        ],
+        "product_event_cursor": 21,
+        "official_stream_cursor": "opaque-stream-event-21",
+        "official_stream_cursor_at": NOW,
+    }
+    stage_statement = next(
+        statement
+        for statement in session.execute_statements
+        if "FROM app.domain_events" in str(statement)
+    )
+    _assert_complete_scope(
+        stage_statement,
+        table_name="domain_events",
+        actor=resolved,
+        task_id=task.id,
+        run_id=run_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -357,6 +620,10 @@ async def test_service_returns_explicit_empty_sources_when_task_has_no_run(
     assert view is not None
     assert view["market_snapshot"] is None
     assert view["web_evidence"] == []
-    assert len(session.scalar_statements) == 1
-    assert "app.task_commands" in str(session.scalar_statements[0])
+    assert view["stage_history"] is None
+    assert len(session.scalar_statements) == 0
+    assert any(
+        "app.task_commands" in str(statement)
+        for statement in session.execute_statements
+    )
     assert session.scalars_statements == []

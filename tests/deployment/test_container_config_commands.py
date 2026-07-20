@@ -110,6 +110,10 @@ def _render_scrubbed_compose(extra_env: dict[str, str]) -> dict:
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "HOME": os.environ["HOME"],
             "PATH": os.environ["PATH"],
+            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
+            "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
+            "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS": "{}",
+            "INTERNAL_JWT_PUBLIC_KEYS": "{}",
         }
         | extra_env,
         input=yaml.safe_dump(compose),
@@ -191,6 +195,8 @@ def _run_start_script(
             "PROJECT_CAPTURE": str(tmp_path / "compose-project"),
             "COMPOSE_PROJECT_NAME": "foreign-project",
             "FAIL_COMPOSE_UP": "1" if fail_compose_up else "0",
+            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
+            "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
         },
         capture_output=True,
         text=True,
@@ -230,7 +236,7 @@ def test_production_dependency_closure_excludes_cli_api_and_inmem_runtime():
     assert "langgraph-cli" not in production_names
     assert "langgraph-api" not in production_names
     assert "langgraph-cli[inmem]==0.4.31" in dev_dependencies
-    assert "langgraph-api==0.11.0" in dev_dependencies
+    assert "langgraph-api==0.11.1" in dev_dependencies
 
     exported = subprocess.run(
         [
@@ -369,7 +375,12 @@ def test_compose_owns_secure_durable_runtime_fields():
     result = subprocess.run(
         ["docker", "compose", "config", "--no-env-resolution", "--quiet"],
         cwd=ROOT,
-        env=os.environ | {"COMPOSE_DISABLE_ENV_FILE": "1"},
+        env=os.environ
+        | {
+            "COMPOSE_DISABLE_ENV_FILE": "1",
+            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
+            "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -447,13 +458,19 @@ def test_start_script_builds_locked_official_agent_and_scoped_stack(
 
     assert "set -euo pipefail" in script
     assert "uv run --frozen langgraph build" in script
-    assert '--config "$BACKEND_DIR/langgraph.json"' in script
+    assert (
+        'LANGGRAPH_CONFIG_FILE="${LANGGRAPH_CONFIG_FILE:-$BACKEND_DIR/langgraph.json}"'
+        in script
+    )
+    assert '--config "$LANGGRAPH_CONFIG_FILE"' in script
+    assert '"$BACKEND_DIR/langgraph.multi-interrupt.json"' in script
     assert '--api-version "0.11.0"' in script
     assert '--tag "$AGENT_LOCAL_IMAGE"' in script
     assert "--no-pull" in script
     assert "--wait" in script
     assert '--wait-timeout "$START_WAIT_TIMEOUT_SECONDS"' in script
     assert "START_WAIT_TIMEOUT_SECONDS=180" in script
+    assert "--allow-multi-interrupt-fixture" in script
     assert '"$AGENT_IMAGE_VERIFIER" "$AGENT_BASE_IMAGE" "$AGENT_LOCAL_IMAGE"' in script
     assert "cleanup_failed_start" in script
     assert '"$STOP_SCRIPT" || true' in script
@@ -592,6 +609,8 @@ def test_agent_image_verifier_binds_layers_mappings_and_dependencies():
     assert '"LANGGRAPH_AUTH"' in script
     assert '"LANGGRAPH_HTTP"' in script
     assert '"LANGSERVE_GRAPHS"' in script
+    assert "TASK8_ALLOW_MULTI_INTERRUPT_FIXTURE" in script
+    assert "--allow-multi-interrupt-fixture" in script
     assert '"langgraph-api": "0.11.0"' in script
     assert '"crypto-manual-alert-v2": "2.0.0"' in script
     assert '("langgraph-cli", "langgraph-runtime-inmem", "pytest")' in script
@@ -677,7 +696,7 @@ def test_compose_commands_use_product_helpers_and_no_custom_runtime():
     assert services["command-worker"]["command"] == [
         "python",
         "-m",
-        "crypto_alert_v2.commands.worker",
+        "crypto_alert_v2.workers",
         "--worker-id",
         "compose-worker",
     ]
@@ -704,6 +723,7 @@ def test_all_container_upstreams_use_the_official_api_service():
     assert services["frontend"]["environment"]["PRODUCT_API_BASE_URL"] == (
         "http://langgraph-api:8000/app"
     )
+    assert services["frontend"]["environment"]["PRODUCT_API_TIMEOUT_MS"] == "8000"
     assert services["frontend"]["ports"] == [
         "127.0.0.1:${FRONTEND_PORT:-3001}:3001"
     ]
@@ -729,6 +749,10 @@ def test_official_api_gets_product_state_auth_and_production_settings():
     assert environment["INTERNAL_JWT_PUBLIC_KEY_FILE"] == (
         "/run/internal-jwt-public/public.pem"
     )
+    assert environment["INTERNAL_JWT_PUBLIC_KEYS"] == "${INTERNAL_JWT_PUBLIC_KEYS:-{}}"
+    assert environment["NOTIFICATION_CREDENTIAL_DECRYPT_KEYS"] == (
+        "${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}"
+    )
     assert environment["PRODUCT_INBOX_CURSOR_KEY_FILE"] == (
         "/run/product-inbox-cursor-key/key"
     )
@@ -749,6 +773,23 @@ def test_official_api_gets_product_state_auth_and_production_settings():
             "read_only": True,
         },
     }
+
+
+def test_compose_passes_key_rotation_state_to_product_api_and_worker():
+    services = _load_compose()["services"]
+
+    # The official langgraph-api hosts the custom Product API HTTP app.
+    assert "product-api" not in services
+    expected = {
+        "INTERNAL_JWT_PUBLIC_KEYS": "${INTERNAL_JWT_PUBLIC_KEYS:-{}}",
+        "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS": (
+            "${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}"
+        ),
+    }
+    for service_name in ("langgraph-api", "command-worker"):
+        environment = services[service_name]["environment"]
+        for variable, value in expected.items():
+            assert environment[variable] == value
 
 
 def test_compose_accepts_complete_percent_encoded_database_uris():
@@ -784,11 +825,25 @@ def test_authenticated_readiness_targets_official_api_and_gates_worker():
     readiness = services["langgraph-api-readiness"]
     readiness_environment = readiness["environment"]
 
-    assert readiness["restart"] == "on-failure:12"
+    assert readiness["restart"] == "unless-stopped"
     assert readiness_environment["AGENT_SERVER_URL"] == "http://langgraph-api:8000"
+    assert readiness_environment["SEARCH_PROVIDER"] == (
+        "${SEARCH_PROVIDER:-builtin_web_search}"
+    )
+    assert readiness_environment["AGENT_READINESS_HOST"] == "0.0.0.0"
+    assert readiness_environment["AGENT_READINESS_PORT"] == "9091"
+    assert services["langgraph-api"]["environment"]["AGENT_READINESS_URL"] == (
+        "http://langgraph-api-readiness:9091/readyz"
+    )
     assert services["command-worker"]["depends_on"][
         "langgraph-api-readiness"
-    ] == {"condition": "service_completed_successfully"}
+    ] == {"condition": "service_healthy"}
+    readiness_healthcheck = readiness["healthcheck"]["test"]
+    assert readiness_healthcheck[:3] == ["CMD", "python", "-c"]
+    assert "http://127.0.0.1:9091/readyz" in readiness_healthcheck[-1]
+    worker_environment = services["command-worker"]["environment"]
+    assert worker_environment["WORKER_READINESS_FAILURE_THRESHOLD"] == "3"
+    assert worker_environment["WORKER_READINESS_STALE_AFTER_SECONDS"] == "30"
     assert {
         name: value
         for name, value in readiness_environment.items()
@@ -828,12 +883,12 @@ def test_compose_dependencies_gate_both_databases_auth_and_readiness_in_order():
             "migrate": "service_completed_successfully",
             "internal-jwt-keys": "service_completed_successfully",
             "development-bootstrap": "service_completed_successfully",
-            "langgraph-api-readiness": "service_completed_successfully",
+            "langgraph-api-readiness": "service_healthy",
         },
         "frontend": {
             "langgraph-api": "service_healthy",
-            "langgraph-api-readiness": "service_completed_successfully",
-            "command-worker": "service_started",
+            "langgraph-api-readiness": "service_healthy",
+            "command-worker": "service_healthy",
         },
     }
 
@@ -912,14 +967,57 @@ def test_compose_separates_bootstrap_from_production_services():
         assert environment["APP_ENVIRONMENT"] == "development"
         assert environment["DEVELOPMENT_BOOTSTRAP_ENABLED"] == "true"
         assert environment["DEVELOPMENT_BOOTSTRAP_PROFILE"] == "local-proof"
+        assert environment["DEVELOPMENT_BOOTSTRAP_SUBJECT"] == "dev-user"
+        assert environment["DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER"] == (
+            "crypto-alert-v2-compose"
+        )
+        assert environment["DEVELOPMENT_BOOTSTRAP_CONTEXT_ID"] == (
+            "99999999-9999-4999-8999-999999999999"
+        )
+
+    frontend_environment = services["frontend"]["environment"]
+    assert frontend_environment["INTERNAL_JWT_PRIVATE_KEY_FILE"] == (
+        "/run/internal-jwt-private/private.pem"
+    )
 
     assert services["langgraph-api"]["environment"]["MARKET_DATA_HTTP_PROXY"] == (
         "${MARKET_DATA_HTTP_PROXY:-}"
     )
-    for service_name in V2_SERVICES - {"langgraph-api"}:
-        assert "MARKET_DATA_HTTP_PROXY" not in services[service_name].get(
-            "environment", {}
-        )
+    assert services["langgraph-api"]["environment"]["SEARCH_PROVIDER"] == (
+        "${SEARCH_PROVIDER:-builtin_web_search}"
+    )
+    assert services["langgraph-api"]["environment"]["SEARCH_HTTP_PROXY"] == (
+        "${SEARCH_HTTP_PROXY:-}"
+    )
+    for service_name in V2_SERVICES - {
+        "langgraph-api",
+        "langgraph-api-readiness",
+    }:
+        environment = services[service_name].get("environment", {})
+        assert "MARKET_DATA_HTTP_PROXY" not in environment
+        assert "SEARCH_PROVIDER" not in environment
+        assert "SEARCH_HTTP_PROXY" not in environment
+    readiness_environment = services["langgraph-api-readiness"]["environment"]
+    assert readiness_environment["SEARCH_PROVIDER"] == (
+        "${SEARCH_PROVIDER:-builtin_web_search}"
+    )
+    assert "MARKET_DATA_HTTP_PROXY" not in readiness_environment
+    assert "SEARCH_HTTP_PROXY" not in readiness_environment
+
+
+def test_backend_environment_example_documents_v2_provider_egress_safely():
+    example = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+
+    for assignment in (
+        "SEARCH_PROVIDER=builtin_web_search",
+        "MARKET_DATA_HTTP_PROXY=",
+        "SEARCH_HTTP_PROXY=",
+        "OPENAI_API_KEY=",
+        "DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER=crypto-alert-v2-local-proof",
+        "DEVELOPMENT_BOOTSTRAP_CONTEXT_ID=99999999-9999-4999-8999-999999999999",
+    ):
+        assert assignment in example
+    assert "sk-" not in example
 
 
 def test_container_build_context_and_compose_avoid_secret_or_host_mounts():
@@ -999,7 +1097,7 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
     )
 
     assert 'testDir: "./tests/e2e-v2"' in config
-    assert {path.name for path in suite_directory.glob("*.spec.ts")} == {
+    required_specs = {
         "durable-cancel-flow.spec.ts",
         "hitl-review-flow.spec.ts",
         "official-stream-main-flow.spec.ts",
@@ -1008,13 +1106,14 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
         "runs-product.spec.ts",
         "work-product.spec.ts",
     }
+    assert required_specs <= {path.name for path in suite_directory.glob("*.spec.ts")}
     package = load_json((ROOT / "frontend" / "package.json").read_text())
     real_inbox_gate = package["scripts"]["test:e2e:real-inbox"]
     assert "REAL_PRODUCT_E2E=1" in real_inbox_gate
     assert "PLAYWRIGHT_EXTERNAL_SERVER=1" in real_inbox_gate
     assert "real-inbox-flow.spec.ts" in real_inbox_gate
     assert "forbidOnly: true" in config
-    assert 'trace: "retain-on-failure"' in config
+    assert 'trace: evidenceDirectory ? "on" : "retain-on-failure"' in config
     assert 'screenshot: "only-on-failure"' in config
     assert 'video: "retain-on-failure"' in config
     assert "forbiddenBrowserRequests" in official_flow

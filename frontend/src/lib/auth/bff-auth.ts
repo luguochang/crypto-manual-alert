@@ -34,6 +34,44 @@ export async function resolveInternalAuthorization(
   return `Bearer ${issueScopedToken(identity, internalTokenConfig(audience))}`;
 }
 
+export function developmentBootstrapAuthorization(
+  audience: string,
+): string | null {
+  if (!isDevelopmentBootstrapRuntime()) return null;
+  const subject = process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT?.trim();
+  const identityIssuer = process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER?.trim();
+  const contextId = process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID?.trim();
+  if (
+    !subject
+    || !identityIssuer
+    || !contextId
+    || !uuidPattern.test(contextId)
+  ) return null;
+  try {
+    return `Bearer ${issueScopedToken(
+      { subject, identityIssuer, contextId },
+      internalTokenConfig(audience),
+    )}`;
+  } catch {
+    return null;
+  }
+}
+
+export function developmentBootstrapIdentityAuthorization(): string | null {
+  if (!isDevelopmentBootstrapRuntime()) return null;
+  const subject = process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT?.trim();
+  const identityIssuer = process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER?.trim();
+  if (!subject || !identityIssuer) return null;
+  try {
+    return `Bearer ${issueIdentityToken(
+      { subject, identityIssuer },
+      internalTokenConfig(IDENTITY_DISCOVERY_AUDIENCE),
+    )}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveIdentityAuthorization(
   _request: Request,
   resolveSession: SessionResolver = () => getServerSession(authOptions),
@@ -65,3 +103,5 @@ export function isDevelopmentBootstrapRuntime(): boolean {
     && process.env.DEVELOPMENT_BOOTSTRAP_ENABLED === "true"
     && process.env.DEVELOPMENT_BOOTSTRAP_PROFILE === "local-proof";
 }
+
+const uuidPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;

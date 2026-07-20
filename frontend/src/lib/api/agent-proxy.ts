@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isDevelopmentBootstrapRuntime } from "@/lib/auth/bff-auth";
 import { requiresAuthenticatedRuntime } from "@/lib/runtime/app-environment";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -23,14 +24,21 @@ export async function proxyAgentRequest(
   fetcher: Fetcher = fetch,
   resolveAuthorization: AgentAuthorizationResolver = defaultAuthorizationResolver,
 ): Promise<Response> {
+  const requestId = transportRequestId();
   const route = matchAgentRoute(pathSegments);
   if (route === null) {
-    return Response.json({ detail: "Agent route not found." }, { status: 404 });
+    return withRequestId(
+      Response.json({ detail: "Agent route not found." }, { status: 404 }),
+      requestId,
+    );
   }
   if (request.method !== route.method) {
-    return Response.json(
-      { detail: "Method not allowed." },
-      { status: 405, headers: { allow: route.method } },
+    return withRequestId(
+      Response.json(
+        { detail: "Method not allowed." },
+        { status: 405, headers: { allow: route.method } },
+      ),
+      requestId,
     );
   }
 
@@ -41,15 +49,19 @@ export async function proxyAgentRequest(
     const baseUrl = agentServerBaseUrl(internalAuthorization);
     const authorization = internalAuthorization
       ? await resolveAuthorization(request, audience)
-      : localAuthorization(baseUrl);
+      : localAuthorization(baseUrl)
+        ?? await resolveBootstrapAuthorization(audience);
     if (authorization === null) {
-      return Response.json({ detail: "Authentication required." }, { status: 401 });
+      return withRequestId(
+        Response.json({ detail: "Authentication required." }, { status: 401 }),
+        requestId,
+      );
     }
 
     const body = route.method === "POST" ? await request.arrayBuffer() : undefined;
     const response = await fetcher(buildUpstreamUrl(baseUrl, pathSegments), {
       method: route.method,
-      headers: upstreamRequestHeaders(route, authorization),
+      headers: upstreamRequestHeaders(route, authorization, requestId),
       body: body && body.byteLength > 0 ? body : undefined,
       cache: "no-store",
       redirect: "manual",
@@ -59,12 +71,15 @@ export async function proxyAgentRequest(
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: controlledResponseHeaders(response.headers),
+      headers: controlledResponseHeaders(response.headers, requestId),
     });
   } catch {
-    return Response.json(
-      { detail: "Agent Server is temporarily unavailable." },
-      { status: 502 },
+    return withRequestId(
+      Response.json(
+        { detail: "Agent Server is temporarily unavailable." },
+        { status: 502 },
+      ),
+      requestId,
     );
   }
 }
@@ -105,10 +120,32 @@ function agentServerBaseUrl(authenticatedRuntime: boolean): URL {
   ) {
     throw new Error("Invalid Agent Server URL");
   }
-  if (!authenticatedRuntime && !isLoopbackHostname(baseUrl.hostname)) {
+  if (!authenticatedRuntime && baseUrl.protocol !== "http:") {
+    throw new Error("Local Agent Server URL must use HTTP");
+  }
+  if (
+    !authenticatedRuntime
+    && !isLoopbackHostname(baseUrl.hostname)
+    && !hasDevelopmentBootstrapSigningConfig()
+  ) {
     throw new Error("Local Agent Server URL must use loopback");
   }
   return baseUrl;
+}
+
+function hasDevelopmentBootstrapSigningConfig(): boolean {
+  return isDevelopmentBootstrapRuntime()
+    && Boolean(
+      process.env.DEVELOPMENT_BOOTSTRAP_SUBJECT?.trim()
+      && process.env.DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER?.trim()
+      && process.env.DEVELOPMENT_BOOTSTRAP_CONTEXT_ID?.trim()
+      && process.env.INTERNAL_JWT_KID?.trim()
+      && process.env.INTERNAL_JWT_ISSUER?.trim()
+      && (
+        process.env.INTERNAL_JWT_PRIVATE_KEY?.trim()
+        || process.env.INTERNAL_JWT_PRIVATE_KEY_FILE?.trim()
+      )
+    );
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -120,13 +157,12 @@ function isLoopbackHostname(hostname: string): boolean {
     && Number(octets[0]) === 127;
 }
 
-function localAuthorization(baseUrl: URL): string {
+function localAuthorization(baseUrl: URL): string | null {
   if (!isLoopbackHostname(baseUrl.hostname)) {
-    throw new Error("Local Agent Server URL must use loopback");
+    return null;
   }
   const token = process.env.AGENT_SERVER_LOCAL_TOKEN;
-  if (!token?.trim()) throw new Error("Missing local Agent Server token");
-  return `Bearer ${token}`;
+  return token?.trim() ? `Bearer ${token}` : null;
 }
 
 function agentAudience(): string {
@@ -144,25 +180,45 @@ async function defaultAuthorizationResolver(
   });
 }
 
+async function resolveBootstrapAuthorization(audience: string): Promise<string | null> {
+  const { developmentBootstrapAuthorization } = await import("@/lib/auth/bff-auth");
+  return developmentBootstrapAuthorization(audience);
+}
+
 function buildUpstreamUrl(baseUrl: URL, pathSegments: string[]): string {
   const encodedPath = pathSegments.map((segment) => encodeURIComponent(segment)).join("/");
   return new URL(encodedPath, baseUrl).toString();
 }
 
-function upstreamRequestHeaders(route: AgentRoute, authorization: string): Headers {
+function upstreamRequestHeaders(
+  route: AgentRoute,
+  authorization: string,
+  requestId: string,
+): Headers {
   const headers = new Headers({
     accept: route.kind === "events" ? "text/event-stream" : "application/json",
     authorization,
+    "x-request-id": requestId,
   });
   if (route.method === "POST") headers.set("content-type", "application/json");
   return headers;
 }
 
-function controlledResponseHeaders(upstream: Headers): Headers {
+function controlledResponseHeaders(upstream: Headers, requestId: string): Headers {
   const headers = new Headers();
   for (const name of ["content-type", "cache-control"]) {
     const value = upstream.get(name);
     if (value) headers.set(name, value);
   }
+  headers.set("x-request-id", requestId);
   return headers;
+}
+
+function transportRequestId(): string {
+  return crypto.randomUUID();
+}
+
+function withRequestId(response: Response, requestId: string): Response {
+  response.headers.set("x-request-id", requestId);
+  return response;
 }

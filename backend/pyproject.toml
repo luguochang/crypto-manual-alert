@@ -7,7 +7,6 @@ dependencies = [
     "alembic==1.18.5",
     "asyncpg==0.31.0",
     "cryptography==49.0.0",
-    "deepagents==0.6.12",
     "fastapi==0.139.0",
     "greenlet==3.5.3",
     "httpx==0.28.1",
@@ -25,7 +24,8 @@ dependencies = [
     "PyJWT==2.13.0",
     "SQLAlchemy==2.0.51",
     "uvicorn==0.51.0",
-    "ddgs==9.14.4",
+    "ddgs==9.14.3",
+    "deepagents==0.6.12",
 ]
 
 [project.scripts]
@@ -33,7 +33,7 @@ crypto-alert-provision = "crypto_alert_v2.commands.provision:main"
 
 [dependency-groups]
 dev = [
-    "langgraph-api==0.11.0",
+    "langgraph-api==0.11.1",
     "langgraph-cli[inmem]==0.4.31",
     "pytest>=8.4,<10",
     "pytest-asyncio>=1.2,<2",
@@ -50,7 +50,7 @@ packages = ["src/crypto_alert_v2"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["-ra"]
+addopts = ["-ra", "--import-mode=importlib"]
 asyncio_mode = "auto"
 
 [tool.uv]

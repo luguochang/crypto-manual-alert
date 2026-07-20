@@ -13,12 +13,16 @@ def _okx_envelopes() -> dict[str, dict[str, object]]:
         "ticker": {
             "code": "0",
             "msg": "",
-            "data": [{"instId": "BTC-USDT-SWAP", "last": "60123.4", "ts": "1720000000000"}],
+            "data": [
+                {"instId": "BTC-USDT-SWAP", "last": "60123.4", "ts": "1720000000000"}
+            ],
         },
         "mark": {
             "code": "0",
             "msg": "",
-            "data": [{"instId": "BTC-USDT-SWAP", "markPx": "60120.1", "ts": "1720000000001"}],
+            "data": [
+                {"instId": "BTC-USDT-SWAP", "markPx": "60120.1", "ts": "1720000000001"}
+            ],
         },
         "index": {
             "code": "0",
@@ -39,7 +43,9 @@ def _okx_envelopes() -> dict[str, dict[str, object]]:
         "open_interest": {
             "code": "0",
             "msg": "",
-            "data": [{"instId": "BTC-USDT-SWAP", "oi": "12345.67", "ts": "1720000000003"}],
+            "data": [
+                {"instId": "BTC-USDT-SWAP", "oi": "12345.67", "ts": "1720000000003"}
+            ],
         },
         "book": {
             "code": "0",
@@ -86,6 +92,7 @@ def test_okx_parser_returns_decimal_dtos_not_raw_envelopes() -> None:
     assert snapshot.order_book.asks[0].price == Decimal("60124.0")
     assert snapshot.order_book.bids[0].size == Decimal("3.5")
     assert snapshot.candles[0].close == Decimal("60123.4")
+    assert snapshot.candles[0].volume == Decimal("100")
     assert not hasattr(snapshot, "raw")
 
 
@@ -94,7 +101,9 @@ def test_okx_parser_returns_decimal_dtos_not_raw_envelopes() -> None:
     [
         (
             "ticker",
-            lambda payload: payload["ticker"].update(code="50001", msg="exchange failure"),
+            lambda payload: payload["ticker"].update(
+                code="50001", msg="exchange failure"
+            ),
             "code=50001",
         ),
         (
@@ -122,6 +131,11 @@ def test_okx_parser_returns_decimal_dtos_not_raw_envelopes() -> None:
             lambda payload: payload["candles"]["data"][0].__setitem__(4, "0"),
             "finite positive close",
         ),
+        (
+            "candles",
+            lambda payload: payload["candles"]["data"][0].__setitem__(5, "-1"),
+            "finite non-negative volume",
+        ),
     ],
 )
 def test_okx_parser_rejects_invalid_provider_data(
@@ -143,6 +157,70 @@ def test_okx_parser_rejects_invalid_provider_data(
     assert raised.value.endpoint == endpoint
     assert raised.value.retryable is False
     assert raised.value.correlation_id == "corr-parser"
+
+
+def test_okx_parser_accepts_zero_candle_volume() -> None:
+    payload = _okx_envelopes()
+    candles = payload["candles"]["data"]
+    assert isinstance(candles, list)
+    candles[0][5] = "0"
+
+    snapshot = parse_okx_snapshot("BTC-USDT-SWAP", payload)
+
+    assert snapshot.candles[0].volume == Decimal("0")
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "other_instrument_id"),
+    [
+        ("ticker", "ETH-USDT-SWAP"),
+        ("mark", "ETH-USDT-SWAP"),
+        ("index", "ETH-USDT"),
+        ("funding", "ETH-USDT-SWAP"),
+        ("open_interest", "ETH-USDT-SWAP"),
+    ],
+)
+def test_okx_parser_rejects_mixed_instruments_in_every_instrument_response(
+    endpoint: str,
+    other_instrument_id: str,
+) -> None:
+    payload = _okx_envelopes()
+    rows = payload[endpoint]["data"]
+    assert isinstance(rows, list)
+    mixed_record = deepcopy(rows[0])
+    assert isinstance(mixed_record, dict)
+    mixed_record["instId"] = other_instrument_id
+    rows.append(mixed_record)
+
+    with pytest.raises(ProviderUnavailable, match="instrument mismatch") as raised:
+        parse_okx_snapshot(
+            "BTC-USDT-SWAP",
+            payload,
+            correlation_id="corr-mixed",
+        )
+
+    assert raised.value.endpoint == endpoint
+    assert raised.value.correlation_id == "corr-mixed"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["ticker", "mark", "index", "funding", "open_interest"],
+)
+def test_okx_parser_requires_instrument_id_on_instrument_responses(
+    endpoint: str,
+) -> None:
+    payload = _okx_envelopes()
+    rows = payload[endpoint]["data"]
+    assert isinstance(rows, list)
+    record = rows[0]
+    assert isinstance(record, dict)
+    record.pop("instId")
+
+    with pytest.raises(ProviderUnavailable, match="instrument mismatch") as raised:
+        parse_okx_snapshot("BTC-USDT-SWAP", payload)
+
+    assert raised.value.endpoint == endpoint
 
 
 def test_okx_parser_rejects_unsupported_non_swap_symbol() -> None:

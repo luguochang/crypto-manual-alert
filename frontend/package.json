@@ -13,9 +13,18 @@
     "test:unit": "vitest run tests/unit",
     "build": "next build",
     "test:e2e": "playwright test",
-    "test:e2e:real-inbox": "REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-inbox-flow.spec.ts",
-    "test:e2e:real-fork": "REAL_FORK_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-fork-flow.spec.ts",
-    "test:e2e:real-multi-interrupt": "REAL_MULTI_INTERRUPT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-multi-interrupt-flow.spec.ts",
+    "test:e2e:real-provider": "V2_E2E_PROFILE=real-provider REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-product-flow.spec.ts --project=real-provider-desktop --project=real-provider-pixel-7",
+    "test:e2e:official-stream": "V2_E2E_PROFILE=real-official-stream REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/official-stream-main-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-cancel": "V2_E2E_PROFILE=real-cancel REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/durable-cancel-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-hitl": "V2_E2E_PROFILE=real-hitl REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/hitl-review-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-inbox": "V2_E2E_PROFILE=real-inbox REAL_PRODUCT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-inbox-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-library": "V2_E2E_PROFILE=real-library REAL_LIBRARY_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-library-run-detail.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-fork": "V2_E2E_PROFILE=real-fork REAL_FORK_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-fork-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-multi-interrupt": "V2_E2E_PROFILE=real-multi-interrupt REAL_MULTI_INTERRUPT_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-multi-interrupt-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:controlled-deep-research-hitl": "V2_E2E_PROFILE=controlled-deep-research-hitl REAL_PRODUCT_E2E=1 CONTROLLED_DEEP_RESEARCH_HITL_E2E=1 PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/deep-research-hitl-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-deep-research": "V2_E2E_PROFILE=real-deep-research REAL_PRODUCT_E2E=1 REAL_DEEP_RESEARCH_E2E=1 PLAYWRIGHT_EVIDENCE_DIR=${PLAYWRIGHT_EVIDENCE_DIR:?set an absolute evidence directory} PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-deep-research-flow.spec.ts --project=fixture-desktop --project=fixture-pixel-7",
+    "test:e2e:real-monitor": "V2_E2E_PROFILE=real-monitor REAL_MONITOR_E2E=1 PLAYWRIGHT_EVIDENCE_DIR=${PLAYWRIGHT_EVIDENCE_DIR:?set an absolute evidence directory} PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-monitor-flow.spec.ts --project=real-monitor-desktop --project=real-monitor-pixel-7",
+    "test:e2e:real-data-lifecycle": "V2_E2E_PROFILE=real-data-lifecycle REAL_DATA_LIFECYCLE_E2E=1 PLAYWRIGHT_EVIDENCE_DIR=${PLAYWRIGHT_EVIDENCE_DIR:?set an absolute evidence directory} PLAYWRIGHT_EXTERNAL_SERVER=1 PLAYWRIGHT_FRONTEND_BASE_URL=${PLAYWRIGHT_FRONTEND_BASE_URL:-http://127.0.0.1:3001} playwright test tests/e2e-v2/real-data-lifecycle.spec.ts --project=real-data-lifecycle-desktop --project=real-data-lifecycle-pixel-7",
     "e2e": "playwright test"
   },
   "dependencies": {
@@ -33,7 +42,7 @@
     "zod": "4.4.3"
   },
   "overrides": {
-    "postcss": "8.5.10",
+    "postcss": "8.5.18",
     "uuid": "11.1.1"
   },
   "devDependencies": {

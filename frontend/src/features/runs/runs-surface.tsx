@@ -80,10 +80,10 @@ export function RunsSurface() {
       <header className="work-header">
         <div>
           <p className="section-kicker">Runs / History</p>
-          <h1>分析记录</h1>
-          <p>查看当前工作区内已持久化的分析运行和最终状态。</p>
+          <h1>运行记录</h1>
+          <p>查看当前工作区内已持久化的分析与研究运行。</p>
         </div>
-        <span className="boundary-label">
+        <span className="boundary-label list-meta-label">
           <History size={17} aria-hidden="true" />
           最近 25 条
         </span>
@@ -92,7 +92,7 @@ export function RunsSurface() {
       {loading ? (
         <section className="empty-work-state" aria-live="polite">
           <span className="empty-state-line" aria-hidden="true" />
-          <div><h2>正在读取分析记录</h2><p>正在同步 Product 数据库中的持久投影。</p></div>
+          <div><h2>正在读取分析记录</h2><p>正在同步已保存的运行状态。</p></div>
         </section>
       ) : null}
 
@@ -116,6 +116,12 @@ export function RunsSurface() {
 
       {!loading && !error && runs.length > 0 ? (
         <section className="runs-list-section" aria-label="分析运行列表">
+          <div className="record-list-head" aria-hidden="true">
+            <span>标的</span>
+            <span>运行 / 时间</span>
+            <span>状态 / 结果</span>
+            <span>打开</span>
+          </div>
           <ol className="runs-list">
             {runs.map((run) => {
               const shortSymbol = run.symbol.replace("-USDT-SWAP", "");
@@ -123,7 +129,7 @@ export function RunsSurface() {
                 <li key={run.run_id}>
                   <Link
                     className="run-row"
-                    href={`/work?task=${encodeURIComponent(run.task_id)}&run=${encodeURIComponent(run.run_id)}`}
+                    href={`/runs/${encodeURIComponent(run.run_id)}`}
                     prefetch={false}
                     data-status={run.status}
                   >
@@ -133,8 +139,12 @@ export function RunsSurface() {
                       <small>{formatDateTime(run.finished_at ?? run.created_at)}</small>
                     </span>
                     <span className="run-outcome">
-                      <strong>{statusLabels[run.status]}</strong>
-                      <small>{run.main_action ? actionLabels[run.main_action] : "暂无最终动作"}</small>
+                      <strong>{run.task_type === "deep_research"
+                        ? researchStatusLabel(run.status)
+                        : statusLabels[run.status]}</strong>
+                      <small>{run.task_type === "deep_research"
+                        ? "深度研究报告"
+                        : run.main_action ? actionLabels[run.main_action] : "暂无最终动作"}</small>
                     </span>
                     <ArrowUpRight size={18} aria-hidden="true" />
                   </Link>
@@ -146,6 +156,16 @@ export function RunsSurface() {
       ) : null}
     </div>
   );
+}
+
+function researchStatusLabel(status: ProductRunSummary["status"]): string {
+  return {
+    ...statusLabels,
+    running: "研究中",
+    succeeded: "研究完成",
+    blocked: "研究阻断",
+    failed: "研究失败",
+  }[status];
 }
 
 function formatDateTime(value: string): string {

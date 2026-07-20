@@ -44,6 +44,8 @@ def test_retry_policy_caps_retryable_failures_at_three_attempts() -> None:
     assert raised.value.endpoint == "ticker"
     assert raised.value.retryable is True
     assert raised.value.correlation_id == "corr-retry"
+    assert raised.value.attempt == 3
+    assert raised.value.retry_exhausted is True
 
 
 def test_retry_policy_does_not_retry_non_retryable_failure() -> None:
@@ -55,10 +57,12 @@ def test_retry_policy_does_not_retry_non_retryable_failure() -> None:
         attempts += 1
         raise _unavailable(retryable=False)
 
-    with pytest.raises(ProviderUnavailable):
+    with pytest.raises(ProviderUnavailable) as raised:
         policy.execute(operation)
 
     assert attempts == 1
+    assert raised.value.attempt == 1
+    assert raised.value.retry_exhausted is False
 
 
 def test_retry_policy_never_starts_an_attempt_after_ten_second_budget() -> None:
@@ -79,6 +83,8 @@ def test_retry_policy_never_starts_an_attempt_after_ten_second_budget() -> None:
     assert clock.now <= 10
     assert raised.value.endpoint == "mark"
     assert raised.value.correlation_id == "corr-retry"
+    assert raised.value.attempt == 2
+    assert raised.value.retry_exhausted is True
 
 
 def test_retry_policy_returns_only_a_real_operation_success() -> None:
@@ -111,6 +117,33 @@ def test_retry_policy_configuration_cannot_exceed_provider_budget(
         RetryPolicy(**over_budget)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "invalid_budget",
+    [
+        {"max_attempts": 0},
+        {"max_attempts": -1},
+        {"total_budget_seconds": 0},
+        {"total_budget_seconds": -0.01},
+    ],
+)
+def test_retry_policy_configuration_requires_positive_budget_values(
+    invalid_budget: dict[str, float | int],
+) -> None:
+    with pytest.raises(ValueError, match="at least 1 attempt, a positive budget"):
+        RetryPolicy(**invalid_budget)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "backoff_seconds",
+    [(), (-0.01,), (0.0, -1.0)],
+)
+def test_retry_policy_configuration_requires_non_negative_backoff(
+    backoff_seconds: tuple[float, ...],
+) -> None:
+    with pytest.raises(ValueError, match="backoff must contain non-negative delays"):
+        RetryPolicy(backoff_seconds=backoff_seconds)
+
+
 def _research_unavailable(
     *, retryable: bool = True, retry_after_seconds: float | None = None
 ) -> ResearchUnavailable:
@@ -123,7 +156,9 @@ def _research_unavailable(
     )
 
 
-def test_search_retry_owner_caps_attempts_and_total_budget_at_three_and_thirty() -> None:
+def test_search_retry_owner_caps_attempts_and_total_budget_at_three_and_thirty() -> (
+    None
+):
     clock = FakeClock()
     records = []
     calls: list[tuple[int, float]] = []
@@ -146,6 +181,30 @@ def test_search_retry_owner_caps_attempts_and_total_budget_at_three_and_thirty()
     assert clock.now <= 30
     assert raised.value.attempt == 3
     assert [record.attempt for record in records] == [1, 2, 3]
+
+
+def test_search_timeout_cannot_consume_the_entire_budget_before_a_retry() -> None:
+    clock = FakeClock()
+    offered_timeouts: list[tuple[int, float]] = []
+    policy = SearchRetryPolicy(
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    def operation(timeout_seconds: float, attempt: int) -> None:
+        offered_timeouts.append((attempt, timeout_seconds))
+        clock.now += timeout_seconds
+        raise _research_unavailable()
+
+    with pytest.raises(ResearchUnavailable) as raised:
+        policy.execute(operation, provider="builtin_web_search")
+
+    assert raised.value.attempt == 3
+    assert [attempt for attempt, _ in offered_timeouts] == [1, 2, 3]
+    assert all(0 < timeout < 30 for _, timeout in offered_timeouts)
+    assert offered_timeouts[0][1] == pytest.approx(13.5)
+    assert offered_timeouts[0][1] > offered_timeouts[1][1]
+    assert clock.now == pytest.approx(30)
 
 
 def test_search_retry_owner_honors_retry_after_inside_the_same_budget() -> None:

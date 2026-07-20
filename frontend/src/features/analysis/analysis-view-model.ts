@@ -6,7 +6,7 @@ import type {
   WebEvidence,
 } from "@/lib/schemas/product-api";
 
-export type StatusTone = "pending" | "active" | "warning" | "danger" | "success" | "neutral";
+export type StatusTone = "pending" | "active" | "warning" | "blocked" | "danger" | "success" | "neutral";
 
 export interface AnalysisStatusViewModel {
   value: RunStatus;
@@ -26,6 +26,10 @@ export interface AnalysisFailureViewModel {
   provider: string | null;
   errorType: string | null;
   attempt: number | null;
+  endpoint: string | null;
+  fallbackFrom: string | null;
+  primaryAttempt: number | null;
+  correlationId: string;
 }
 
 export interface AnalysisSourceViewModel {
@@ -38,8 +42,18 @@ export interface AnalysisSourceViewModel {
   evidenceMatched: boolean;
 }
 
+export interface ModelExecutionAuditViewModel {
+  promptVersion: string;
+  callCount: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  latencyMs: number;
+  observationIds: string[];
+}
+
 export interface AnalysisResultViewModel {
-  state: "committed" | "historical" | "expired";
+  state: "committed" | "blocked" | "historical" | "expired";
   actionable: boolean;
   action: string;
   reference: number;
@@ -76,12 +90,23 @@ export interface AnalysisResultViewModel {
     blockedReasons: string[];
     warnings: string[];
   };
+  provenance: {
+    marketProvider: string;
+    searchProvider: string;
+    searchParserVersion: string;
+    modelProvider: string;
+    modelName: string;
+    modelEndpointHost: string | null;
+    modelAudits: ModelExecutionAuditViewModel[];
+  } | null;
   sources: AnalysisSourceViewModel[];
 }
 
 export interface MarketSnapshotViewModel {
   symbol: string;
+  sourceLevel: MarketSnapshot["source_level"];
   provider: string;
+  disclosure: string | null;
   fetchedAt: string;
   summary: string;
   metrics: Array<{ label: string; value: string }>;
@@ -99,7 +124,7 @@ export interface WebEvidenceViewModel {
 }
 
 export interface AnalysisResearchViewModel {
-  state: "available" | "collecting" | "unavailable" | "empty";
+  state: "available" | "partial" | "collecting" | "unavailable" | "empty";
   marketSnapshot: MarketSnapshotViewModel | null;
   webEvidence: WebEvidenceViewModel[];
 }
@@ -145,7 +170,7 @@ const statusMetadata: Record<RunStatus, Omit<AnalysisStatusViewModel, "value" | 
   blocked: {
     label: "已被风险门禁阻断",
     description: "风险或证据门禁阻止了当前计划。",
-    tone: "danger",
+    tone: "blocked",
     terminal: true,
   },
   failed: {
@@ -176,18 +201,52 @@ const actionLabels: Record<string, string> = {
   no_trade: "暂不操作",
 };
 
+const dataAvailabilityLabels: Record<string, string> = {
+  exchange_native_market_data: "交易所原生行情",
+  ticker: "最新成交价",
+  mark_price: "标记价格",
+  index_price: "指数价格",
+  order_book: "订单簿",
+  candles: "K 线",
+  funding_rate: "资金费率",
+  open_interest: "未平仓量",
+  vix: "VIX 波动率",
+  real_yield_10y: "美国 10 年期实际利率",
+  dxy: "美元指数 DXY",
+  macro_event_scan: "宏观事件扫描",
+  verified_web_evidence: "可验证 Web 来源",
+};
+
+function dataAvailabilityLabel(value: string): string {
+  return dataAvailabilityLabels[value] ?? value;
+}
+
 export function toAnalysisViewModel(task: ProductTask, now = new Date()): AnalysisViewModel {
   const artifact = task.artifact;
   const committedArtifact = artifact?.status === "committed" ? artifact : null;
-  const validity = committedArtifact
+  const blockedArtifact = task.status === "blocked" && artifact?.status === "draft" ? artifact : null;
+  const displayArtifact = committedArtifact ?? blockedArtifact;
+  const validity = displayArtifact
     ? toValidity(
         task.completed_at ?? task.created_at,
-        committedArtifact.analysis.expires_in_seconds,
+        displayArtifact.analysis.expires_in_seconds,
         now,
       )
     : null;
   const expired = task.status === "succeeded" && (validity?.expired ?? false);
-  const status: AnalysisStatusViewModel = expired
+  const resolvedHistoricalReview = task.status === "waiting_human"
+    && task.pending_interrupts === null
+    && task.projection_scope?.mode === "selected_run";
+  const status: AnalysisStatusViewModel = resolvedHistoricalReview
+    ? {
+        value: task.status,
+        label: "历史审核节点",
+        description: "该次审核已结束，后续运行状态请以当前任务为准。",
+        tone: "neutral",
+        terminal: true,
+        expired: false,
+      }
+    : expired
     ? {
         value: task.status,
         label: "分析已过期",
@@ -210,46 +269,76 @@ export function toAnalysisViewModel(task: ProductTask, now = new Date()): Analys
     completedAt: task.completed_at,
     status,
     failure: task.errors[0]
-      ? toFailure(task.errors[0], task.status, task.artifact?.status === "committed")
+      ? toFailure(
+          task.errors[0],
+          task.status,
+          task.artifact?.status === "committed",
+          task.web_evidence.filter(isEffectiveWebEvidence).length,
+        )
       : null,
     research: toResearch(task),
-    result: committedArtifact && validity
+    result: displayArtifact && validity
       ? {
-          state: task.status !== "succeeded" ? "historical" : expired ? "expired" : "committed",
+          state: blockedArtifact
+            ? "blocked"
+            : task.status !== "succeeded"
+              ? "historical"
+              : expired
+                ? "expired"
+                : "committed",
           actionable: task.status === "succeeded" && !expired,
-          action: actionLabels[committedArtifact.analysis.main_action] ?? committedArtifact.analysis.main_action,
-          reference: committedArtifact.analysis.reference_price,
-          entry: committedArtifact.analysis.entry_trigger,
-          stop: committedArtifact.analysis.stop_price,
-          targets: [committedArtifact.analysis.target_1, committedArtifact.analysis.target_2].filter(
+          action: actionLabels[displayArtifact.analysis.main_action] ?? displayArtifact.analysis.main_action,
+          reference: displayArtifact.analysis.reference_price,
+          entry: displayArtifact.analysis.entry_trigger,
+          stop: displayArtifact.analysis.stop_price,
+          targets: [displayArtifact.analysis.target_1, displayArtifact.analysis.target_2].filter(
             (value): value is number => value !== null,
           ),
-          probabilityPercent: Math.round(committedArtifact.analysis.probability * 100),
-          horizon: committedArtifact.analysis.horizon,
-          instrument: committedArtifact.analysis.instrument,
-          regime: committedArtifact.analysis.regime,
-          rationale: committedArtifact.analysis.root_cause_chain,
-          whyNotOpposite: committedArtifact.analysis.why_not_opposite,
-          invalidation: committedArtifact.analysis.invalidation,
-          unavailableData: committedArtifact.analysis.unavailable_data,
+          probabilityPercent: Math.round(displayArtifact.analysis.probability * 100),
+          horizon: displayArtifact.analysis.horizon,
+          instrument: displayArtifact.analysis.instrument,
+          regime: displayArtifact.analysis.regime,
+          rationale: displayArtifact.analysis.root_cause_chain,
+          whyNotOpposite: displayArtifact.analysis.why_not_opposite,
+          invalidation: displayArtifact.analysis.invalidation,
+          unavailableData: displayArtifact.analysis.unavailable_data.map(dataAvailabilityLabel),
           validity,
           evidence: {
-            sufficient: committedArtifact.evidence_verdict.sufficient,
-            confidenceCapPercent: Math.round(committedArtifact.evidence_verdict.confidence_cap * 100),
-            missingRequired: committedArtifact.evidence_verdict.missing_required,
-            missingOptional: committedArtifact.evidence_verdict.missing_optional,
-            warnings: committedArtifact.evidence_verdict.warnings,
+            sufficient: displayArtifact.evidence_verdict.sufficient,
+            confidenceCapPercent: Math.round(displayArtifact.evidence_verdict.confidence_cap * 100),
+            missingRequired: displayArtifact.evidence_verdict.missing_required,
+            missingOptional: displayArtifact.evidence_verdict.missing_optional,
+            warnings: displayArtifact.evidence_verdict.warnings,
           },
           risk: {
-            allowed: committedArtifact.risk_verdict.allowed,
-            confidenceCapPercent: Math.round(committedArtifact.risk_verdict.confidence_cap * 100),
-            maxLeverage: committedArtifact.analysis.max_leverage,
-            riskPercent: committedArtifact.analysis.risk_pct * 100,
-            positionSize: committedArtifact.analysis.position_size_class,
-            blockedReasons: committedArtifact.risk_verdict.blocked_reasons,
-            warnings: committedArtifact.risk_verdict.warnings,
+            allowed: displayArtifact.risk_verdict.allowed,
+            confidenceCapPercent: Math.round(displayArtifact.risk_verdict.confidence_cap * 100),
+            maxLeverage: displayArtifact.analysis.max_leverage,
+            riskPercent: displayArtifact.analysis.risk_pct * 100,
+            positionSize: displayArtifact.analysis.position_size_class,
+            blockedReasons: displayArtifact.risk_verdict.blocked_reasons,
+            warnings: displayArtifact.risk_verdict.warnings,
           },
-          sources: toAnalysisSources(committedArtifact.source_references, task.web_evidence),
+          provenance: displayArtifact.provenance
+            ? {
+                marketProvider: displayArtifact.provenance.market_provider,
+                searchProvider: displayArtifact.provenance.search_provider,
+                searchParserVersion: displayArtifact.provenance.search_parser_version,
+                modelProvider: displayArtifact.provenance.model_provider,
+                modelName: displayArtifact.provenance.model_name,
+                modelEndpointHost: displayArtifact.provenance.model_endpoint_host,
+                modelAudits: displayArtifact.provenance.model_audits.map((audit) => ({
+                  promptVersion: audit.prompt_version,
+                  callCount: audit.call_count,
+                  inputTokens: audit.input_tokens,
+                  outputTokens: audit.output_tokens,
+                  totalTokens: audit.total_tokens,
+                  latencyMs: audit.latency_ms,
+                  observationIds: audit.observation_ids,
+                })),
+              }
+            : null,
+          sources: toAnalysisSources(displayArtifact.source_references, task.web_evidence),
         }
       : null,
     incompleteMessage: toIncompleteMessage(task),
@@ -292,16 +381,57 @@ function toFailure(
   error: ProductError,
   status: RunStatus,
   hasHistoricalArtifact: boolean,
+  verifiedWebEvidenceCount: number,
 ): AnalysisFailureViewModel {
   const normalizedCode = error.code.toLowerCase();
   let title = status === "blocked" ? "风险门禁已阻断" : "分析服务失败";
+  let message = error.message;
   let explanation: string | null = null;
 
   if (normalizedCode === "research_unavailable") {
-    title = "研究检索不可用";
-    explanation = hasHistoricalArtifact
-      ? "本次运行没有获得可验证的 Web 来源，因此没有生成新的分析建议。历史成功报告仍保留，仅供回看。"
-      : "本次运行没有获得可验证的 Web 来源，因此没有生成新的分析建议。";
+    if (verifiedWebEvidenceCount > 0) {
+      title = "后续研究检索未完成";
+      message = `后续研究检索没有完成，系统未生成新的分析建议；本次运行已保留 ${verifiedWebEvidenceCount} 条可验证 Web 来源。`;
+      explanation = hasHistoricalArtifact
+        ? "已保留的 Web 来源属于本次运行；历史成功报告仍保留，仅供回看。"
+        : "已保留的 Web 来源仍可用于审计本次失败，但不能替代缺失的研究结论。";
+    } else {
+      title = "研究检索不可用";
+      explanation = hasHistoricalArtifact
+        ? "本次运行没有获得可验证的 Web 来源，因此没有生成新的分析建议。历史成功报告仍保留，仅供回看。"
+        : "本次运行没有获得可验证的 Web 来源，因此没有生成新的分析建议。";
+    }
+  } else if (
+    normalizedCode === "provider_unavailable"
+    && error.endpoint === "web_search_market"
+    && error.fallback_from !== null
+  ) {
+    title = "市场数据与后备检索均失败";
+    message = error.retryable
+      ? "交易所行情重试耗尽后仍不可用，后备 Web Search 行情检索也未完成，系统没有生成交易建议。请稍后重新分析。"
+      : "交易所行情重试耗尽后仍不可用，后备 Web Search 行情检索也未完成，系统没有生成交易建议。请使用关联 ID 联系支持。";
+    explanation = "失败诊断分别保留首选数据源和后备检索阶段，便于定位两层依赖。";
+  } else if (normalizedCode === "terminal_projection_unavailable") {
+    title = "最终结果暂时不可用";
+    explanation = "本次任务未生成可用分析结果；失败诊断中保留了支持排查所需的原始字段。";
+    message = error.retryable
+      ? "分析执行已结束，但最终结果未能保存，系统已回滚未完成的写入，没有留下部分报告。请点击“重新分析”重试。"
+      : "分析执行已结束，但最终结果未能保存，系统已回滚未完成的写入，没有留下部分报告。请稍后刷新，若仍未恢复请联系支持。";
+  } else if (["invalid_agent_output", "model_output_mismatch"].includes(normalizedCode)) {
+    title = "分析模型失败";
+    message = error.retryable
+      ? "模型返回内容未通过结构校验，系统没有生成交易建议。请重新分析；若持续失败，请使用关联 ID 联系支持。"
+      : "模型返回内容未通过结构校验，系统没有生成交易建议。请使用关联 ID 联系支持。";
+  } else if (normalizedCode === "agent_run_error") {
+    title = "分析执行失败";
+    message = error.retryable
+      ? "分析执行未能完成，系统没有生成交易建议。请重新分析；若持续失败，请使用关联 ID 联系支持。"
+      : "分析执行未能完成，系统没有生成交易建议。请使用关联 ID 联系支持。";
+  } else if (normalizedCode === "agent_server_unavailable") {
+    title = "分析执行服务不可用";
+    message = error.retryable
+      ? "分析执行服务当前不可用，系统没有生成交易建议。请稍后重试；若持续失败，请使用关联 ID 联系支持。"
+      : "分析执行服务当前不可用，系统没有生成交易建议。请使用关联 ID 联系支持。";
   } else if (normalizedCode.includes("search") || normalizedCode.includes("research")) {
     title = "信息检索失败";
   } else if (
@@ -320,13 +450,17 @@ function toFailure(
 
   return {
     title,
-    message: error.message,
+    message,
     code: error.code,
     retryable: error.retryable,
     explanation,
     provider: error.provider,
     errorType: error.error_type,
     attempt: error.attempt,
+    endpoint: error.endpoint,
+    fallbackFrom: error.fallback_from,
+    primaryAttempt: error.primary_attempt,
+    correlationId: error.correlation_id,
   };
 }
 
@@ -335,9 +469,12 @@ function toResearch(task: ProductTask): AnalysisResearchViewModel {
     (error) => error.code.toLowerCase() === "research_unavailable",
   );
   const webEvidence = task.web_evidence.map(toWebEvidence);
+  const effectiveEvidenceCount = task.web_evidence.filter(isEffectiveWebEvidence).length;
   const state: AnalysisResearchViewModel["state"] = researchUnavailable
-    ? "unavailable"
-    : webEvidence.length > 0
+    ? effectiveEvidenceCount > 0
+      ? "partial"
+      : "unavailable"
+    : effectiveEvidenceCount > 0
       ? "available"
       : statusMetadata[task.status].terminal
         ? "empty"
@@ -358,21 +495,26 @@ function toMarketSnapshot(snapshot: MarketSnapshot): MarketSnapshotViewModel {
     metric("最优买价", bestBid, formatMarketNumber),
     metric("最优卖价", bestAsk, formatMarketNumber),
     metric("24h 成交量", snapshot.ticker?.volume_24h, formatMarketNumber),
-  ].filter((item): item is { label: string; value: string } => item !== null);
+  ];
   const summary = [
     summaryPart("标记价", snapshot.mark_price, formatMarketNumber),
     summaryPart("指数价", snapshot.index_price, formatMarketNumber),
     summaryPart("资金费率", snapshot.funding_rate, formatFundingRate),
     summaryPart("未平仓量", snapshot.open_interest, formatMarketNumber),
-  ].filter((item): item is string => item !== null);
+  ];
+  const webSearchFallback = snapshot.source_level === "web_search_verified";
 
   return {
     symbol: snapshot.symbol,
-    provider: snapshot.source_level === "exchange_native" ? "交易所原生" : snapshot.source_level,
+    sourceLevel: snapshot.source_level,
+    provider: marketProviderLabel(snapshot.source_level),
+    disclosure: webSearchFallback
+      ? "交易所原生行情数据不可用；本次使用了带引用的 Web Search 市场证据。该证据不等同于交易所原生行情，缺失字段按不可用处理。"
+      : null,
     fetchedAt: snapshot.fetched_at,
     summary: summary.length > 0
       ? summary.join(" · ")
-      : `${snapshot.symbol} 市场快照已获取`,
+      : `${snapshot.symbol} 行情字段均不可用`,
     metrics,
   };
 }
@@ -393,6 +535,10 @@ function toWebEvidence(evidence: WebEvidence): WebEvidenceViewModel {
     author,
     relation: relation || "关系未标注",
   };
+}
+
+function isEffectiveWebEvidence(evidence: WebEvidence): boolean {
+  return evidence.evidence_relation.trim().toLowerCase() !== "excluded";
 }
 
 function toAnalysisSources(sourceReferences: string[], webEvidence: WebEvidence[]): AnalysisSourceViewModel[] {
@@ -457,7 +603,7 @@ function metric(
   value: number | null | undefined,
   formatter: (value: number) => string,
 ) {
-  return value === null || value === undefined ? null : { label, value: formatter(value) };
+  return { label, value: value === null || value === undefined ? "不可用" : formatter(value) };
 }
 
 function summaryPart(
@@ -465,7 +611,15 @@ function summaryPart(
   value: number | null | undefined,
   formatter: (value: number) => string,
 ) {
-  return value === null || value === undefined ? null : `${label} ${formatter(value)}`;
+  return `${label} ${value === null || value === undefined ? "不可用" : formatter(value)}`;
+}
+
+function marketProviderLabel(sourceLevel: MarketSnapshot["source_level"]): string {
+  return ({
+    exchange_native: "交易所原生",
+    controlled_dependency: "受控依赖",
+    web_search_verified: "Web Search 引用证据",
+  } as Record<MarketSnapshot["source_level"], string>)[sourceLevel];
 }
 
 function formatMarketNumber(value: number): string {
@@ -488,7 +642,7 @@ function providerLabel(value: string): string {
   if (!normalized) return "未知 Provider";
   const knownProviders: Record<string, string> = {
     openai_builtin_web_search: "OpenAI Web Search",
-    duckduckgo: "DuckDuckGo News",
+    ddgs_metasearch: "DDGS 元搜索",
     openai_web_search: "OpenAI Web Search",
     tavily: "Tavily",
     tavily_search: "Tavily",

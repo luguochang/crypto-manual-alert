@@ -13,11 +13,25 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
-import { listInbox, ProductApiError } from "@/lib/api/product-client";
+import {
+  listInbox,
+  ProductApiError,
+  respondInboxReview,
+} from "@/lib/api/product-client";
+import {
+  DeepResearchReviewPanel,
+} from "@/features/work/deep-research-review-panel";
+import {
+  HumanReviewPanel,
+  type ReviewSubmissionPhase,
+} from "@/features/work/human-review-panel";
+import { stableFingerprint } from "@/lib/stable-fingerprint";
 import type {
   InboxItem,
   InboxItemStatus,
   InboxQueryStatus,
+  InboxReviewReceipt,
+  InterruptResponse,
 } from "@/lib/schemas/product-api";
 
 type SurfaceFilter = Extract<InboxQueryStatus, "active" | "resolved" | "all">;
@@ -39,7 +53,9 @@ const statusLabels: Record<InboxItemStatus, string> = {
   cancelled: "已取消",
 };
 
-const actionLabels: Record<InboxItem["payload"]["artifact"]["analysis"]["main_action"], string> = {
+type AnalysisInboxPayload = Extract<InboxItem["payload"], { kind: "artifact_review" }>;
+
+const actionLabels: Record<AnalysisInboxPayload["artifact"]["analysis"]["main_action"], string> = {
   open_long: "开多",
   open_short: "开空",
   hold_long: "持有多头",
@@ -52,6 +68,58 @@ const actionLabels: Record<InboxItem["payload"]["artifact"]["analysis"]["main_ac
   trigger_short: "等待空头触发",
   no_trade: "暂不操作",
 };
+
+export type InboxReviewCardContent = {
+  factLabel: string;
+  factValue: string;
+  summaryMeta: string;
+  summaryText: string;
+  reviewType: "analysis" | "deep_research";
+  gates?: Array<{
+    label: "Evidence" | "Risk";
+    value: string;
+    tone: "positive" | "warning" | "blocked";
+  }>;
+};
+
+export function resolveInboxReviewCardContent(item: InboxItem): InboxReviewCardContent {
+  if (item.payload.kind === "deep_research_review") {
+    return {
+      factLabel: "研究来源",
+      factValue: `${item.payload.artifact.sources.length} 条`,
+      summaryMeta: `${item.payload.artifact.report.sections.length} 个章节 · 第 ${item.payload.review_iteration} 轮`,
+      summaryText: item.payload.artifact.report.executive_summary,
+      reviewType: "deep_research",
+    };
+  }
+
+  const analysis = item.payload.artifact.analysis;
+  const evidenceLabel = item.payload.artifact.evidence_verdict.sufficient
+    ? "证据充分"
+    : "证据待补充";
+  const riskLabel = item.payload.artifact.risk_verdict.allowed
+    ? "风险允许"
+    : "风险受限";
+  return {
+    factLabel: "建议动作",
+    factValue: actionLabels[analysis.main_action],
+    summaryMeta: `${evidenceLabel} · ${riskLabel}`,
+    summaryText: analysis.root_cause_chain.slice(0, 2).join("；"),
+    reviewType: "analysis",
+    gates: [
+      {
+        label: "Evidence",
+        value: evidenceLabel,
+        tone: item.payload.artifact.evidence_verdict.sufficient ? "positive" : "warning",
+      },
+      {
+        label: "Risk",
+        value: riskLabel,
+        tone: item.payload.artifact.risk_verdict.allowed ? "positive" : "blocked",
+      },
+    ],
+  };
+}
 
 const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "numeric",
@@ -71,6 +139,11 @@ export function InboxSurface() {
   const [error, setError] = useState<string | null>(null);
   const [paginationError, setPaginationError] = useState<string | null>(null);
   const requestVersion = useRef(0);
+  const itemsRef = useRef<InboxItem[]>([]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     let active = true;
@@ -96,6 +169,33 @@ export function InboxSurface() {
       active = false;
     };
   }, [filter]);
+
+  useEffect(() => {
+    let active = true;
+    const refreshVisibleItems = async () => {
+      if (!active || loading || loadingMore || error) return;
+      const version = requestVersion.current;
+      const currentCount = itemsRef.current.length;
+      const limit = Math.min(100, Math.max(pageSize, currentCount));
+      try {
+        const view = await listInbox({ status: filter, limit });
+        if (!active || requestVersion.current !== version) return;
+        setItems(view.items);
+        setNextCursor(view.next_cursor);
+        setPaginationError(null);
+      } catch (reason) {
+        if (!active || requestVersion.current !== version) return;
+        setPaginationError(readableInboxError(reason));
+      }
+    };
+    const timer = window.setInterval(() => void refreshVisibleItems(), 7_000);
+    window.addEventListener("focus", refreshVisibleItems);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshVisibleItems);
+    };
+  }, [error, filter, loading, loadingMore]);
 
   function selectFilter(nextFilter: SurfaceFilter) {
     if (nextFilter === filter) return;
@@ -236,7 +336,19 @@ export function InboxSurface() {
             {items.map((item) => (
               <InboxCard
                 item={item}
-                key={`${item.task_id}:${item.created_at}:${item.payload.review_iteration}`}
+                onResponded={(receipt) => {
+                  setItems((currentItems) => currentItems.map((currentItem) => (
+                    currentItem.pause_id === receipt.pause_id
+                      ? {
+                          ...currentItem,
+                          status: receipt.status,
+                          responded_at: receipt.responded_at,
+                          updated_at: receipt.responded_at,
+                        }
+                      : currentItem
+                  )));
+                }}
+                key={item.pause_id}
               />
             ))}
           </ol>
@@ -273,18 +385,52 @@ export function InboxSurface() {
   );
 }
 
-function InboxCard({ item }: Readonly<{ item: InboxItem }>) {
-  const analysis = item.payload.artifact.analysis;
+function InboxCard({
+  item,
+  onResponded,
+}: Readonly<{
+  item: InboxItem;
+  onResponded: (receipt: InboxReviewReceipt) => void;
+}>) {
   const shortSymbol = item.symbol.replace("-USDT-SWAP", "");
-  const evidenceLabel = item.payload.artifact.evidence_verdict.sufficient
-    ? "证据充分"
-    : "证据待补充";
-  const riskLabel = item.payload.artifact.risk_verdict.allowed
-    ? "风险允许"
-    : "风险受限";
+  const reviewContent = resolveInboxReviewCardContent(item);
+  const [phase, setPhase] = useState<ReviewSubmissionPhase>("idle");
+  const [failureMessage, setFailureMessage] = useState<string | null>(null);
+  const submissionKey = useRef<{ fingerprint: string; key: string } | null>(null);
+
+  function decide(response: InterruptResponse) {
+    if (item.status !== "pending" || item.member_count !== 1) return;
+    const fingerprint = stableFingerprint({
+      pause_version: item.pause_version,
+      response,
+    });
+    const existing = submissionKey.current;
+    const idempotencyKey = existing?.fingerprint === fingerprint
+      ? existing.key
+      : crypto.randomUUID();
+    submissionKey.current = { fingerprint, key: idempotencyKey };
+    setPhase("submitting");
+    setFailureMessage(null);
+    void respondInboxReview(
+      item.pause_id,
+      { pause_version: item.pause_version, response },
+      fetch,
+      idempotencyKey,
+    )
+      .then((receipt) => {
+        setPhase("accepted");
+        onResponded(receipt);
+      })
+      .catch((reason: unknown) => {
+        setPhase(reviewSubmissionPhase(reason));
+        setFailureMessage(readableReviewSubmissionError(reason));
+      });
+  }
+
+  const directReview = item.status === "pending" && item.member_count === 1;
 
   return (
-    <li className="inbox-item" data-status={item.status}>
+    <li className={`inbox-item${directReview ? " has-direct-review" : ""}`} data-status={item.status}>
       <div className="inbox-item-header">
         <div className="inbox-item-title">
           <span className="inbox-symbol">{shortSymbol}</span>
@@ -314,18 +460,56 @@ function InboxCard({ item }: Readonly<{ item: InboxItem }>) {
           <dd>{item.horizon}</dd>
         </div>
         <div>
-          <dt>建议动作</dt>
-          <dd>{actionLabels[analysis.main_action]}</dd>
+          <dt>{reviewContent.factLabel}</dt>
+          <dd>{reviewContent.factValue}</dd>
         </div>
       </dl>
 
       <div className="inbox-review-summary">
         <div className="inbox-summary-heading">
           <h3>审核摘要</h3>
-          <span>{evidenceLabel} · {riskLabel}</span>
+          {reviewContent.gates?.length ? (
+            <div className="inbox-gates" aria-label="审核门禁结果">
+              {reviewContent.gates.map((gate) => (
+                <span className="inbox-gate-badge" data-tone={gate.tone} key={gate.label}>
+                  <small>{gate.label}</small>
+                  {gate.value}
+                </span>
+              ))}
+            </div>
+          ) : <span>{reviewContent.summaryMeta}</span>}
         </div>
-        <p>{analysis.root_cause_chain.slice(0, 2).join("；")}</p>
+        <p>{reviewContent.summaryText}</p>
       </div>
+
+      {directReview ? (
+        <div className="inbox-direct-review">
+          {item.payload.kind === "artifact_review" ? (
+            <HumanReviewPanel
+              interrupt={{ payload: item.payload, status: "pending" }}
+              expiresAt={item.expires_at}
+              phase={phase}
+              failureMessage={failureMessage}
+              onDecide={decide}
+            />
+          ) : (
+            <DeepResearchReviewPanel
+              interrupt={{ payload: item.payload, status: "pending" }}
+              expiresAt={item.expires_at}
+              phase={phase}
+              failureMessage={failureMessage}
+              onDecide={decide}
+            />
+          )}
+        </div>
+      ) : null}
+
+      {item.status === "pending" && item.member_count > 1 ? (
+        <div className="inbox-multi-review-note" role="status">
+          <CircleAlert size={17} aria-hidden="true" />
+          <span>多个审核项将保持原子提交，请打开任务处理。</span>
+        </div>
+      ) : null}
 
       <div className="inbox-expiry">
         <CalendarClock size={17} aria-hidden="true" />
@@ -351,6 +535,25 @@ function InboxCard({ item }: Readonly<{ item: InboxItem }>) {
       </div>
     </li>
   );
+}
+
+function reviewSubmissionPhase(reason: unknown): ReviewSubmissionPhase {
+  if (reason instanceof ProductApiError) {
+    if (reason.status === 401 || reason.status === 403) return "auth_error";
+    if (reason.status === 409) return "conflict";
+    if (reason.status === 422) return "invalid_request";
+  }
+  return "network_error";
+}
+
+function readableReviewSubmissionError(reason: unknown): string {
+  if (reason instanceof ProductApiError) {
+    if (reason.status === 409) return "审核状态已变化，请刷新收件箱后重新确认。";
+    if (reason.status === 422) return "审核内容未通过校验，请检查后重新提交。";
+    if (reason.status === 401 || reason.status === 403) return "当前账号没有处理这条审核的权限。";
+    return reason.message;
+  }
+  return "提交结果暂时未知，请稍后使用相同决定重试。";
 }
 
 function expiryLabel(item: InboxItem): string {

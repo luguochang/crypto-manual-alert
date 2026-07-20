@@ -27,7 +27,7 @@
 
 - [ ] V2 应用目录不复制 V1 `src/crypto_manual_alert`。
 - [ ] Python 使用最新兼容的 LangChain/LangGraph 1.x stable 版本并锁定。
-- [ ] Deep Agents 锁定明确 0.x 版本。
+- [x] Deep Agents 采用正式 fallback 决策：当前 release 不激活 `create_deep_agent`，Research 使用官方 LangChain `create_agent`；如未来出现多阶段只读研究/受控委派需求，必须新增 ADR 后再锁定 Deep Agents 0.x 版本（见 ADR 0009）。
 - [ ] 前端使用 `@langchain/react` 和 `@langchain/langgraph-sdk`。
 - [ ] `langgraph.json` 和单一 canonical graph 可被 `langgraph dev` 加载。
 - [ ] PostgreSQL、Redis、Next.js 和 Agent Server 可在本地启动。

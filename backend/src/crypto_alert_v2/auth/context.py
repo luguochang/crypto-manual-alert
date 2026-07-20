@@ -43,6 +43,9 @@ def configured_development_actor(settings: "Settings") -> ActorContext | None:
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         user_id=subject,
+        identity_issuer=settings.development_bootstrap_identity_issuer.strip()
+        or "crypto-alert-v2-development",
+        context_id=settings.development_bootstrap_context_id,
         roles=roles,
         permissions=permissions,
     )

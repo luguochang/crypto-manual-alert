@@ -11,9 +11,7 @@ def as_chat_completions_model(
 
     if not isinstance(model, ChatOpenAI):
         return model
-    return model.model_copy(
-        update={"use_responses_api": False, "output_version": None}
-    )
+    return model.model_copy(update={"use_responses_api": False, "output_version": None})
 
 
 __all__ = ["as_chat_completions_model"]

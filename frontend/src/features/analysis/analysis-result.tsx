@@ -5,6 +5,7 @@ import type { AnalysisResultViewModel } from "@/features/analysis/analysis-view-
 export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) {
   const expired = result.state === "expired";
   const historical = result.state === "historical";
+  const blocked = result.state === "blocked";
 
   return (
     <section
@@ -16,23 +17,25 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
     >
       <header className="result-header">
         <div>
-          <p className="section-kicker">{historical ? "Historical analysis" : expired ? "Expired analysis" : "Committed analysis"}</p>
+          <p className="section-kicker">{historical ? "历史分析报告" : expired ? "已过期分析" : blocked ? "风险阻断草稿" : "当前分析结论"}</p>
           <h2 id="result-title">{result.instrument.replace("-USDT-SWAP", "")} · {result.horizon}</h2>
           <span>{regimeLabel(result.regime)}</span>
         </div>
         <div className="decision-summary">
-          <span>{expired || historical ? "Status" : "Action"}</span>
-          <strong className={expired ? "verdict-label is-danger" : historical ? "verdict-label is-warning" : undefined}>
+          <span>{expired || historical || blocked ? "状态" : "建议"}</span>
+          <strong className={expired ? "verdict-label is-danger" : blocked ? "verdict-label is-blocked" : historical ? "verdict-label is-warning" : undefined}>
             {expired
               ? <><TriangleAlert size={16} aria-hidden="true" />已过期</>
               : historical
                 ? <><History size={16} aria-hidden="true" />历史成功报告</>
-                : result.action}
+                : blocked
+                  ? <><TriangleAlert size={16} aria-hidden="true" />门禁阻断</>
+                  : result.action}
           </strong>
           <span>
-            {expired || historical
-              ? `原建议：${result.action} · ${result.probabilityPercent}% probability`
-              : `${result.probabilityPercent}% probability`}
+            {expired || historical || blocked
+              ? `${blocked ? "模型草稿" : "原建议"}：${result.action} · ${result.probabilityPercent}% 概率`
+              : `${result.probabilityPercent}% 概率`}
           </span>
         </div>
       </header>
@@ -44,17 +47,24 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
         </div>
       ) : null}
 
-      <div className="trade-plan-grid" aria-label={historical ? "历史分析快照" : expired ? "已过期分析快照" : "交易计划"}>
-        <Metric label="Reference" value={formatPrice(result.reference)} />
-        <Metric label="Entry" value={formatOptionalPrice(result.entry)} />
-        <Metric label="Stop" value={formatOptionalPrice(result.stop)} tone={expired || historical ? undefined : "danger"} />
+      {blocked ? (
+        <div className="historical-artifact-note" role="note">
+          <TriangleAlert size={18} aria-hidden="true" />
+          <p>这是被证据或风险门禁阻断的分析草稿，仅用于说明判断过程，不可执行，也不代表已提交建议。</p>
+        </div>
+      ) : null}
+
+      <div className="trade-plan-grid" aria-label={historical ? "历史分析快照" : expired ? "已过期分析快照" : blocked ? "风险阻断分析草稿" : "交易计划"}>
+        <Metric label="参考价" value={formatPrice(result.reference)} />
+        <Metric label="入场价" value={formatOptionalPrice(result.entry)} />
+        <Metric label="止损价" value={formatOptionalPrice(result.stop)} tone={expired || historical || blocked ? undefined : "danger"} />
         <Metric
-          label="Targets"
+          label="目标价"
           value={result.targets.length ? result.targets.map(formatPrice).join(" / ") : "未设置"}
-          tone={expired || historical ? undefined : "success"}
+          tone={expired || historical || blocked ? undefined : "success"}
         />
-        <Metric label="Probability" value={`${result.probabilityPercent}%`} />
-        <Metric label="TTL" value={`${result.validity.expiresInSeconds} 秒`} />
+        <Metric label="判断概率" value={`${result.probabilityPercent}%`} />
+        <Metric label="有效时长" value={`${result.validity.expiresInSeconds} 秒`} />
         <Metric
           label="有效至"
           value={expired ? `已过期 · ${formatValidity(result.validity.expiresAt)}` : formatValidity(result.validity.expiresAt)}
@@ -66,7 +76,7 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
         <div className="result-section-heading">
           <div>
             <p className="section-index">01</p>
-            <h2 id="evidence-heading">Evidence</h2>
+            <h2 id="evidence-heading">证据门禁</h2>
           </div>
           <span className={`verdict-label ${historical ? "is-warning" : result.evidence.sufficient ? "is-positive" : "is-warning"}`}>
             {historical
@@ -90,7 +100,7 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
         <div className="result-section-heading">
           <div>
             <p className="section-index">02</p>
-            <h2 id="risk-heading">Risk</h2>
+            <h2 id="risk-heading">风险门禁</h2>
           </div>
           <span className={`verdict-label ${historical ? "is-warning" : result.risk.allowed ? "is-positive" : "is-danger"}`}>
             {historical
@@ -144,7 +154,7 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
                     <small>{source.href}</small>
                     {source.evidenceMatched ? (
                       <dl className="source-metadata">
-                        <SourceMetadata label="Provider" value={source.provider ?? "未提供"} />
+                        <SourceMetadata label="来源" value={source.provider ?? "未提供"} />
                         <SourceMetadata label="关系" value={relationLabel(source.relation)} />
                         <SourceMetadata
                           label="发布时间"
@@ -166,6 +176,42 @@ export function AnalysisResult({ result }: { result: AnalysisResultViewModel }) 
           </ul>
         ) : <p className="muted-copy">当前结果未提供外部来源链接。</p>}
       </section>
+
+      {result.provenance ? (
+        <section className="result-section" aria-labelledby="provenance-heading">
+          <div className="result-section-heading">
+            <div>
+              <p className="section-index">05</p>
+              <h2 id="provenance-heading">数据溯源</h2>
+            </div>
+          </div>
+          <div className="detail-grid">
+            <Detail label="行情提供方" value={providerLabel(result.provenance.marketProvider)} />
+            <Detail label="Web 检索" value={providerLabel(result.provenance.searchProvider)} />
+            <Detail label="引用解析" value={result.provenance.searchParserVersion} />
+            <Detail label="模型服务" value={providerLabel(result.provenance.modelProvider)} />
+            <Detail label="模型" value={result.provenance.modelName} />
+            {result.provenance.modelEndpointHost ? (
+              <Detail label="服务节点" value={result.provenance.modelEndpointHost} />
+            ) : null}
+          </div>
+          {result.provenance.modelAudits.length ? (
+            <div className="detail-grid model-audit-grid" aria-label="模型调用审计">
+              {result.provenance.modelAudits.map((audit, index) => (
+                <div className="detail-item" key={`${audit.promptVersion}-${index}`}>
+                  <span>{`模型调用 ${index + 1}`}</span>
+                  <strong>
+                    {audit.promptVersion} · {audit.callCount} 次 · {formatTokens(audit.totalTokens)} · {formatLatency(audit.latencyMs)}
+                  </strong>
+                  {audit.observationIds.length ? (
+                    <small>{`观测 ${audit.observationIds.join(", ")}`}</small>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -186,6 +232,14 @@ function Detail({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatTokens(value: number | null) {
+  return value === null ? "token 未返回" : `${value.toLocaleString("zh-CN")} tokens`;
+}
+
+function formatLatency(value: number) {
+  return `${value.toLocaleString("zh-CN", { maximumFractionDigits: 0 })} ms`;
 }
 
 function NoticeList({ items, danger = false }: { items: string[]; danger?: boolean }) {
@@ -239,10 +293,22 @@ function positionLabel(value: string) {
 
 function regimeLabel(value: string) {
   return ({
-    risk_on: "Risk on",
-    risk_off: "Risk off",
-    event_compression: "Event compression",
-    surprise_repricing: "Surprise repricing",
+    risk_on: "风险偏好",
+    risk_off: "风险规避",
+    event_compression: "事件收敛",
+    surprise_repricing: "意外重定价",
+  } as Record<string, string>)[value] ?? value;
+}
+
+function providerLabel(value: string) {
+  return ({
+    okx: "OKX",
+    openai: "OpenAI",
+    "openai-compatible": "OpenAI 兼容网关",
+    openai_builtin_web_search: "内置 Web Search",
+    ddgs_metasearch: "DDGS 元搜索",
+    tavily: "Tavily",
+    web_search_market: "Web Search 引用行情",
   } as Record<string, string>)[value] ?? value;
 }
 
@@ -252,5 +318,7 @@ function relationLabel(value: string | null) {
     supports: "支持判断",
     contradicts: "反向证据",
     context: "背景信息",
+    market_snapshot: "市场行情",
+    excluded: "已排除（相关性不足）",
   } as Record<string, string>)[value] ?? value;
 }

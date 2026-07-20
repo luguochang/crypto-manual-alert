@@ -99,3 +99,32 @@ def test_probe_exercises_401_403_and_200_resource_auth() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "401/403/200 resource auth verified" in result.stdout
+
+
+def test_probe_protocol_extension_is_explicit_and_uses_the_official_node_probe() -> (
+    None
+):
+    source = PROBE_SCRIPT.read_text(encoding="utf-8")
+
+    assert '"${TASK8_PROTOCOL_V2_PROBE:-0}" == "1"' in source
+    assert 'NODE_PROBE="$ROOT_DIR/tools/v2/probe_protocol_v2.mjs"' in source
+    assert '"langgraph.multi-interrupt.json"' in source
+    assert "export CRYPTO_ALERT_DISABLE_DOTENV=1" in source
+    assert (
+        'PROTOCOL_TOKEN="$(issue_token \'["analysis:read","analysis:write"]\')"'
+        in source
+    )
+    assert 'READ_ONLY_CREATE_STATUS="$(curl --silent \\' in source
+    assert 'TASK8_AGENT_URL="$BASE_URL"' in source
+    assert 'TASK8_AGENT_TOKEN="$PROTOCOL_TOKEN"' in source
+    assert (
+        'TASK8_SINGLE_GRAPH_ID="${TASK8_PROTOCOL_SINGLE_GRAPH_ID:-crypto_analysis}"'
+        in source
+    )
+    assert (
+        'TASK8_BATCH_GRAPH_ID="${TASK8_PROTOCOL_BATCH_GRAPH_ID:-multi_interrupt_fixture}"'
+        in source
+    )
+    assert "TASK8_EXPECTED_BATCH_INTERRUPTS=2" in source
+    assert "TASK8_EXPECTED_PROTOCOL_VERSION" in source
+    assert 'node "$NODE_PROBE"' in source

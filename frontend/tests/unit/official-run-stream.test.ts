@@ -1,13 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  DurableRunProgress,
+  mergeExecutionProgress,
   officialAgentApiUrl,
   officialConnectionStatus,
   officialStreamSubtitle,
   projectOfficialValues,
 } from "../../src/features/agent-runtime/official-run-stream";
+import type { TaskStageHistory } from "../../src/lib/schemas/product-api";
 
 const componentPath = resolve(
   process.cwd(),
@@ -23,6 +28,9 @@ describe("official run stream", () => {
     const source = readFileSync(componentPath, "utf8");
 
     expect(source.match(/\buseStream\s*</g)).toHaveLength(1);
+    expect(source.match(/\buseChannel\s*\(/g)).toHaveLength(1);
+    expect(source).toContain("productCustomChannels");
+    expect(source).toContain("projectProductCustomEvents(customEvents, stageHistory?.run_id)");
     expect(source).toMatch(/\bassistantId\s*(?::|,)/);
     expect(source).toMatch(/\bthreadId\s*(?::|,)/);
     expect(source).toMatch(/apiUrl\s*:\s*officialAgentApiUrl\(window\.location\.origin\)/);
@@ -82,12 +90,109 @@ describe("official run stream", () => {
   it("projects a failed official execution as a terminal progress item", () => {
     expect(projectOfficialValues({ lifecycle: "completed_failed" })).toEqual([
       {
-        id: "lifecycle",
+        id: "run",
         label: "执行阶段",
         detail: "官方执行未完成",
         tone: "danger",
       },
     ]);
+  });
+
+  it("merges the latest durable stage version in canonical order", () => {
+    const history = durableHistory();
+
+    expect(mergeExecutionProgress(history, [])).toEqual([
+      {
+        id: "market_snapshot",
+        label: "市场快照",
+        detail: "市场快照已保存",
+        tone: "complete",
+      },
+      {
+        id: "web_evidence",
+        label: "Web 证据",
+        detail: "Web 证据已保存",
+        tone: "complete",
+      },
+      {
+        id: "run",
+        label: "执行阶段",
+        detail: "执行已完成",
+        tone: "complete",
+      },
+    ]);
+  });
+
+  it("lets live values enrich but never regress a durable committed stage", () => {
+    const history = durableHistory();
+    const activeMarket = {
+      id: "market_snapshot" as const,
+      label: "市场快照",
+      detail: "正在重新读取行情",
+      tone: "active" as const,
+    };
+
+    expect(mergeExecutionProgress(history, [activeMarket])[0]).toEqual({
+      id: "market_snapshot",
+      label: "市场快照",
+      detail: "市场快照已保存",
+      tone: "complete",
+    });
+    expect(mergeExecutionProgress(history, [
+      {
+        ...activeMarket,
+        detail: "BTC-USDT-SWAP · 标记价格 67,250.50",
+        tone: "complete",
+      },
+      {
+        id: "analysis",
+        label: "分析判断",
+        detail: "偏向开多 · 置信度 68%",
+        tone: "complete",
+      },
+    ])).toEqual([
+      {
+        id: "market_snapshot",
+        label: "市场快照",
+        detail: "BTC-USDT-SWAP · 标记价格 67,250.50",
+        tone: "complete",
+      },
+      {
+        id: "web_evidence",
+        label: "Web 证据",
+        detail: "Web 证据已保存",
+        tone: "complete",
+      },
+      {
+        id: "analysis",
+        label: "分析判断",
+        detail: "偏向开多 · 置信度 68%",
+        tone: "complete",
+      },
+      {
+        id: "run",
+        label: "执行阶段",
+        detail: "执行已完成",
+        tone: "complete",
+      },
+    ]);
+  });
+
+  it("renders persisted historical progress without exposing run or cursor identifiers", () => {
+    const history = durableHistory();
+    const html = renderToStaticMarkup(createElement(DurableRunProgress, {
+      history,
+      historical: true,
+    }));
+
+    expect(html).toContain("历史运行进度");
+    expect(html).toContain('data-testid="durable-run-progress"');
+    expect(html).not.toContain('data-testid="official-run-stream"');
+    expect(html).toContain("市场快照已保存");
+    expect(html).toContain("执行已完成");
+    expect(html).not.toContain(history.run_id);
+    expect(html).not.toContain(history.official_stream_cursor ?? "missing-cursor");
+    expect(html).not.toContain(String(history.product_event_cursor));
   });
 
   it("projects only explicitly named execution fields into human-readable progress", () => {
@@ -121,7 +226,6 @@ describe("official run stream", () => {
     });
 
     expect(projection).toEqual([
-      { id: "lifecycle", label: "执行阶段", detail: "分析推演已完成", tone: "active" },
       { id: "market_snapshot", label: "市场快照", detail: "BTC-USDT-SWAP · 标记价格 67,250.50", tone: "complete" },
       { id: "web_evidence", label: "Web 证据", detail: "已汇总 2 条来源", tone: "complete" },
       { id: "analysis", label: "分析判断", detail: "偏向开多 · 置信度 68%", tone: "complete" },
@@ -147,3 +251,42 @@ describe("official run stream", () => {
     })).toEqual([]);
   });
 });
+
+function durableHistory(): TaskStageHistory {
+  return {
+    run_id: "11111111-1111-4111-8111-111111111111",
+    stages: [
+      {
+        sequence: 1,
+        stage: "market_snapshot",
+        status: "planned",
+        recorded_at: "2026-07-18T10:00:01+08:00",
+        source: "official_stream",
+      },
+      {
+        sequence: 2,
+        stage: "web_evidence",
+        status: "committed",
+        recorded_at: "2026-07-18T10:00:02+08:00",
+        source: "official_stream",
+      },
+      {
+        sequence: 3,
+        stage: "market_snapshot",
+        status: "committed",
+        recorded_at: "2026-07-18T10:00:03+08:00",
+        source: "product_projection",
+      },
+      {
+        sequence: 987654321,
+        stage: "run",
+        status: "succeeded",
+        recorded_at: "2026-07-18T10:00:04+08:00",
+        source: "product_projection",
+      },
+    ],
+    product_event_cursor: 987654321,
+    official_stream_cursor: "opaque-stream-event-4",
+    official_stream_cursor_at: "2026-07-18T10:00:04+08:00",
+  };
+}

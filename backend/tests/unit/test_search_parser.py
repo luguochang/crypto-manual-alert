@@ -7,12 +7,12 @@ from openai import APITimeoutError
 
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
-    DuckDuckGoSearchProvider,
+    DdgsMetasearchProvider,
     ResearchUnavailable,
     SearchEvidenceUnavailable,
     TavilySearchProvider,
     parse_builtin_search_response,
-    parse_duckduckgo_response,
+    parse_ddgs_metasearch_response,
     parse_tavily_response,
 )
 from crypto_alert_v2.providers.retry_policy import SearchRetryPolicy
@@ -93,9 +93,258 @@ def test_builtin_search_parser_accepts_official_content_block_citations() -> Non
         "https://www.cmegroup.com/markets/cryptocurrencies/bitcoin/bitcoin.html"
     ]
     assert evidence[0].title == "Bitcoin market price"
+    assert evidence[0].excerpt == "Bitcoin is trading near the cited market price."
 
 
-def test_builtin_search_parser_rejects_model_text_url_after_successful_server_search() -> None:
+def test_completed_open_page_can_be_enabled_for_strict_gateway_compatibility() -> None:
+    url = "https://finance.yahoo.com/quote/BTC-USD/"
+    response = AIMessage(
+        content=[
+            {
+                "type": "server_tool_call",
+                "id": "search_1",
+                "name": "web_search",
+                "args": {"type": "search", "query": "current BTC price"},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "search_1",
+                "status": "success",
+            },
+            {
+                "type": "server_tool_call",
+                "id": "open_1",
+                "name": "web_search",
+                "args": {"type": "open_page", "url": url},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "open_1",
+                "status": "success",
+            },
+            {
+                "type": "text",
+                "text": f"Bitcoin is $64,169.21 USD ({url}).",
+                "annotations": [],
+            },
+        ]
+    )
+
+    evidence = parse_builtin_search_response(
+        query="current BTC price",
+        response=response,
+        fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+        allow_completed_open_page_evidence=True,
+    )
+
+    assert len(evidence) == 1
+    assert str(evidence[0].final_url) == url
+    assert evidence[0].excerpt == f"Bitcoin is $64,169.21 USD ({url})."
+    assert evidence[0].parser_version == "openai-responses-open-page-v1"
+
+
+def test_completed_open_page_is_merged_with_a_bare_search_annotation() -> None:
+    opened_url = "https://finance.yahoo.com/quote/BTC-USD/"
+    search_url = "https://coinmarketcap.com/currencies/bitcoin/"
+    response = AIMessage(
+        content=[
+            {
+                "type": "server_tool_call",
+                "id": "search_1",
+                "name": "web_search",
+                "args": {"type": "search", "query": "current BTC price"},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "search_1",
+                "status": "success",
+            },
+            {
+                "type": "text",
+                "text": "CoinMarketCap",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": search_url,
+                        "title": "Bitcoin price",
+                        "start_index": 0,
+                        "end_index": 13,
+                    }
+                ],
+            },
+            {
+                "type": "server_tool_call",
+                "id": "open_1",
+                "name": "web_search",
+                "args": {"type": "open_page", "url": opened_url},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "open_1",
+                "status": "success",
+            },
+            {
+                "type": "text",
+                "text": f"Bitcoin is $64,169.21 USD ({opened_url}).",
+                "annotations": [],
+            },
+        ]
+    )
+
+    evidence = parse_builtin_search_response(
+        query="current BTC price",
+        response=response,
+        fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+        allow_completed_open_page_evidence=True,
+    )
+
+    assert [str(item.final_url) for item in evidence] == [search_url, opened_url]
+    assert evidence[1].excerpt.startswith("Bitcoin is $64,169.21 USD")
+
+
+def test_completed_open_page_is_rejected_by_default_research_contract() -> None:
+    url = "https://finance.yahoo.com/quote/BTC-USD/"
+    response = AIMessage(
+        content=[
+            {
+                "type": "server_tool_call",
+                "id": "open_1",
+                "name": "web_search",
+                "args": {"type": "open_page", "url": url},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "open_1",
+                "status": "success",
+            },
+            {
+                "type": "text",
+                "text": f"Bitcoin is $64,169.21 USD ({url}).",
+                "annotations": [],
+            },
+        ]
+    )
+
+    with pytest.raises(ResearchUnavailable) as caught:
+        parse_builtin_search_response(
+            query="current BTC price",
+            response=response,
+            fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+        )
+
+    assert caught.value.error_type == "MissingProviderCitation"
+
+
+def test_open_page_compatibility_rejects_uncompleted_or_unlinked_pages() -> None:
+    url = "https://finance.yahoo.com/quote/BTC-USD/"
+    response = AIMessage(
+        content=[
+            {
+                "type": "server_tool_call",
+                "id": "open_1",
+                "name": "web_search",
+                "args": {"type": "open_page", "url": url},
+            },
+            {
+                "type": "server_tool_result",
+                "tool_call_id": "open_1",
+                "status": "failed",
+            },
+            {
+                "type": "text",
+                "text": "Bitcoin is $64,169.21 USD without its opened source URL.",
+                "annotations": [],
+            },
+        ]
+    )
+
+    with pytest.raises(ResearchUnavailable):
+        parse_builtin_search_response(
+            query="current BTC price",
+            response=response,
+            fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+            allow_completed_open_page_evidence=True,
+        )
+
+
+def test_builtin_search_parser_keeps_citation_excerpts_source_specific() -> None:
+    first_claim = "Bitcoin rose after softer inflation data."
+    second_claim = "ETF outflows later reduced near-term momentum."
+    text = f"- {first_claim}\n- {second_claim}"
+    response = AIMessage(
+        content=[
+            {"type": "web_search_call", "id": "search_1", "status": "completed"},
+            {
+                "type": "text",
+                "text": text,
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": "https://www.reuters.com/markets/inflation/",
+                        "title": "Inflation supports Bitcoin",
+                        "start_index": text.index(first_claim),
+                        "end_index": text.index(first_claim) + len(first_claim),
+                    },
+                    {
+                        "type": "url_citation",
+                        "url": "https://www.coindesk.com/markets/etf-outflows/",
+                        "title": "ETF outflows weigh on momentum",
+                        "start_index": text.index(second_claim),
+                        "end_index": text.index(second_claim) + len(second_claim),
+                    },
+                ],
+            },
+        ]
+    )
+
+    evidence = parse_builtin_search_response(
+        query="current Bitcoin macro news",
+        response=response,
+        fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    assert [item.excerpt for item in evidence] == [first_claim, second_claim]
+    assert evidence[0].content_hash != evidence[1].content_hash
+
+
+def test_builtin_search_parser_uses_title_without_provider_offsets() -> None:
+    response = AIMessage(
+        content=[
+            {"type": "web_search_call", "id": "search_1", "status": "completed"},
+            {
+                "type": "text",
+                "text": "One aggregate answer covering two unrelated sources.",
+                "annotations": [
+                    {
+                        "type": "url_citation",
+                        "url": "https://www.reuters.com/markets/rates/",
+                        "title": "Rates pressure risk assets",
+                    },
+                    {
+                        "type": "url_citation",
+                        "url": "https://www.coindesk.com/markets/liquidity/",
+                        "title": "Liquidity conditions improve",
+                    },
+                ],
+            },
+        ]
+    )
+
+    evidence = parse_builtin_search_response(
+        query="current Bitcoin macro news",
+        response=response,
+        fetched_at=datetime(2026, 7, 17, tzinfo=UTC),
+    )
+
+    assert [item.excerpt for item in evidence] == [
+        "Rates pressure risk assets",
+        "Liquidity conditions improve",
+    ]
+
+
+def test_builtin_search_parser_rejects_model_text_url_after_successful_server_search() -> (
+    None
+):
     response = AIMessage(
         content=[
             {
@@ -111,10 +360,7 @@ def test_builtin_search_parser_rejects_model_text_url_after_successful_server_se
             },
             {
                 "type": "text",
-                "text": (
-                    "Current macro coverage: "
-                    "https://example.com/bitcoin-macro."
-                ),
+                "text": ("Current macro coverage: https://example.com/bitcoin-macro."),
                 "annotations": [],
             },
         ]
@@ -314,8 +560,52 @@ def test_builtin_search_provider_normalizes_model_timeout_as_retryable() -> None
     ]
 
 
+def test_builtin_search_honors_retry_after_from_provider_error_body() -> None:
+    attempts = 0
+    records = []
+
+    class OriginBadGateway(Exception):
+        body = {"retryable": True, "retry_after": 60}
+
+    class FailingModel:
+        def bind_tools(
+            self,
+            tools: list[dict[str, str]],
+            **__: object,
+        ) -> object:
+            assert tools[0]["type"] == "web_search"
+
+            class BoundSearch:
+                def invoke(
+                    self,
+                    input: object,
+                    config: object = None,
+                    **kwargs: object,
+                ) -> AIMessage:
+                    nonlocal attempts
+                    del input, config, kwargs
+                    attempts += 1
+                    raise OriginBadGateway("Error 502: origin bad gateway")
+
+            return BoundSearch()
+
+    with pytest.raises(SearchEvidenceUnavailable) as raised:
+        BuiltinWebSearchProvider(  # type: ignore[arg-type]
+            FailingModel(),
+            retry_policy=SearchRetryPolicy(
+                sleep=lambda _: None,
+                record_attempt=records.append,
+            ),
+        ).search("current Bitcoin news")
+
+    assert raised.value.retryable is True
+    assert raised.value.retry_after_seconds == 60
+    assert attempts == 1
+    assert [record.outcome for record in records] == ["terminal_failure"]
+
+
 def test_builtin_search_provider_has_one_retry_owner_and_records_each_attempt() -> None:
-    bind_options: dict[str, object] = {}
+    bind_options: list[dict[str, object]] = []
     invocation_options: list[dict[str, object]] = []
     attempts = 0
     records = []
@@ -372,10 +662,8 @@ def test_builtin_search_provider_has_one_retry_owner_and_records_each_attempt() 
             return searched(input)
 
     class RecordingModel:
-        def bind_tools(
-            self, _: object, **kwargs: object
-        ) -> BoundSearch:
-            bind_options.update(kwargs)
+        def bind_tools(self, _: object, **kwargs: object) -> BoundSearch:
+            bind_options.append(dict(kwargs))
             return BoundSearch()
 
     evidence = BuiltinWebSearchProvider(  # type: ignore[arg-type]
@@ -391,7 +679,10 @@ def test_builtin_search_provider_has_one_retry_owner_and_records_each_attempt() 
 
     assert evidence
     assert attempts == 2
-    assert bind_options == {}
+    assert bind_options == [
+        {"tool_choice": "web_search", "parallel_tool_calls": False},
+        {"tool_choice": "web_search_preview", "parallel_tool_calls": False},
+    ]
     assert len(invocation_options) == 2
     assert all(0 < float(item["timeout"]) <= 30 for item in invocation_options)
     assert [record.attempt for record in records] == [1, 2]
@@ -403,6 +694,64 @@ def test_builtin_search_provider_has_one_retry_owner_and_records_each_attempt() 
         "corr-search-1",
         "corr-search-1",
     ]
+
+
+def test_builtin_search_compacts_long_cjk_queries_for_provider_transport() -> None:
+    prompts: list[str] = []
+
+    class BoundSearch:
+        def invoke(
+            self,
+            input: object,
+            config: object = None,
+            **kwargs: object,
+        ) -> AIMessage:
+            del config, kwargs
+            prompts.append(str(input))
+            return AIMessage(
+                content=[
+                    {
+                        "type": "web_search_call",
+                        "id": "search_compact",
+                        "status": "completed",
+                    },
+                    {
+                        "type": "text",
+                        "text": "Current Bitcoin market evidence.",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://www.reuters.com/markets/currencies/",
+                                "title": "Bitcoin market evidence",
+                            }
+                        ],
+                    },
+                ]
+            )
+
+    class RecordingModel:
+        def bind_tools(self, _: object, **kwargs: object) -> BoundSearch:
+            assert kwargs == {
+                "tool_choice": "web_search",
+                "parallel_tool_calls": False,
+            }
+            return BoundSearch()
+
+    original_query = (
+        "结合当前宏观事件、真实市场结构与可验证来源，判断 BTC 在未来 4 小时的方向、"
+        "主要风险和失效条件\nAsset: BTC\nMarket: cryptocurrency\nAnalysis horizon: 4h"
+    )
+
+    evidence = BuiltinWebSearchProvider(  # type: ignore[arg-type]
+        RecordingModel(),
+        retry_policy=SearchRetryPolicy(max_attempts=1),
+    ).search(original_query)
+
+    assert len(prompts) == 1
+    assert original_query not in prompts[0]
+    assert "BTC" in prompts[0]
+    assert "macro" in prompts[0]
+    assert evidence[0].query == original_query
 
 
 @pytest.mark.parametrize(
@@ -500,7 +849,10 @@ def test_builtin_search_uses_preview_on_the_same_retry_budget_after_unverified_e
             tools: list[dict[str, str]],
             **kwargs: object,
         ) -> BoundSearch:
-            assert kwargs == {}
+            assert kwargs == {
+                "tool_choice": tools[0]["type"],
+                "parallel_tool_calls": False,
+            }
             bound_tool_types.append(tools[0]["type"])
             return BoundSearch()
 
@@ -521,9 +873,9 @@ def test_builtin_search_uses_preview_on_the_same_retry_budget_after_unverified_e
 
     assert bound_tool_types == ["web_search", "web_search_preview"]
     assert len(invocation_timeouts) == 2
-    assert 0 < invocation_timeouts[1] < invocation_timeouts[0] <= 10.0
+    assert invocation_timeouts == pytest.approx([4.5, 8.75])
     assert [record.remaining_budget_seconds for record in records] == pytest.approx(
-        invocation_timeouts
+        [10.0, 8.75]
     )
     assert [record.attempt for record in records] == [1, 2]
     assert [record.outcome for record in records] == [
@@ -599,7 +951,10 @@ def test_builtin_search_switches_to_preview_only_after_evidence_failure() -> Non
             tools: list[dict[str, str]],
             **kwargs: object,
         ) -> BoundSearch:
-            assert kwargs == {}
+            assert kwargs == {
+                "tool_choice": tools[0]["type"],
+                "parallel_tool_calls": False,
+            }
             bound_tool_types.append(tools[0]["type"])
             return BoundSearch()
 
@@ -693,7 +1048,7 @@ def test_search_parser_deduplicates_repeated_urls() -> None:
                 "type": "text",
                 "text": "Same citation twice.",
                 "annotations": [annotation, annotation],
-            }
+            },
         ]
     )
 
@@ -729,12 +1084,12 @@ def test_tavily_parser_returns_normalized_web_evidence() -> None:
     assert evidence[0].excerpt == "Rates and the dollar moved before the event."
 
 
-def test_duckduckgo_parser_returns_normalized_provider_evidence() -> None:
-    evidence = parse_duckduckgo_response(
+def test_ddgs_metasearch_parser_returns_normalized_provider_evidence() -> None:
+    evidence = parse_ddgs_metasearch_response(
         query="bitcoin macro",
         response=[
             {
-                "link": "https://www.reuters.com/markets/currencies/",
+                "href": "https://www.reuters.com/markets/currencies/",
                 "title": "Bitcoin and macro markets",
                 "snippet": "Bitcoin moved as global rates and the dollar changed.",
                 "date": "2026-07-14T09:30:00+00:00",
@@ -745,17 +1100,14 @@ def test_duckduckgo_parser_returns_normalized_provider_evidence() -> None:
     )
 
     assert len(evidence) == 1
-    assert str(evidence[0].final_url) == (
-        "https://www.reuters.com/markets/currencies/"
-    )
-    assert evidence[0].source == "duckduckgo"
+    assert str(evidence[0].final_url) == ("https://www.reuters.com/markets/currencies/")
+    assert evidence[0].source == "ddgs_metasearch"
+    assert evidence[0].parser_version == "ddgs-metasearch-v1"
     assert evidence[0].author == "Reuters"
-    assert evidence[0].published_at == datetime(
-        2026, 7, 14, 9, 30, tzinfo=UTC
-    )
+    assert evidence[0].published_at == datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
 
 
-def test_duckduckgo_provider_invokes_the_official_tool_with_typed_input() -> None:
+def test_ddgs_metasearch_provider_invokes_the_official_tool_with_typed_input() -> None:
     class RecordingTool:
         def __init__(self) -> None:
             self.calls: list[tuple[object, object]] = []
@@ -771,7 +1123,7 @@ def test_duckduckgo_provider_invokes_the_official_tool_with_typed_input() -> Non
             ]
 
     tool = RecordingTool()
-    evidence = DuckDuckGoSearchProvider(
+    evidence = DdgsMetasearchProvider(
         tool=tool,  # type: ignore[arg-type]
         retry_policy=SearchRetryPolicy(max_attempts=1),
     ).search(
@@ -785,7 +1137,120 @@ def test_duckduckgo_provider_invokes_the_official_tool_with_typed_input() -> Non
             {"metadata": {"correlation_id": "corr-ddg-1"}},
         )
     ]
-    assert [item.source for item in evidence] == ["duckduckgo"]
+    assert [item.source for item in evidence] == ["ddgs_metasearch"]
+
+
+def test_ddgs_metasearch_provider_compacts_long_cjk_queries_for_transport() -> None:
+    class RecordingTool:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def invoke(self, input: object, config: object = None) -> object:
+            del config
+            self.calls.append(input)
+            return [
+                {
+                    "link": "https://www.reuters.com/markets/currencies/",
+                    "title": "Bitcoin market evidence",
+                    "snippet": "Current market evidence.",
+                }
+            ]
+
+    tool = RecordingTool()
+    original_query = (
+        "结合当前宏观事件、真实市场结构与可验证来源，判断 BTC 在未来 4 小时的方向、"
+        "主要风险和失效条件\nAsset: BTC\nMarket: cryptocurrency\nAnalysis horizon: 4h"
+    )
+
+    evidence = DdgsMetasearchProvider(
+        tool=tool,  # type: ignore[arg-type]
+        retry_policy=SearchRetryPolicy(max_attempts=1),
+    ).search(original_query)
+
+    assert len(tool.calls) == 1
+    provider_query = tool.calls[0]["query"]  # type: ignore[index]
+    assert len(provider_query) < len(original_query)
+    assert "BTC" in provider_query
+    assert "macro" in provider_query
+    assert evidence[0].query == original_query
+
+
+@pytest.mark.parametrize("result_kind", ["news", "text"])
+def test_ddgs_metasearch_explicitly_uses_the_auto_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    result_kind: str,
+) -> None:
+    client_options: list[dict[str, object]] = []
+    search_calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class RecordingDdgs:
+        def __init__(self, **kwargs: object) -> None:
+            client_options.append(kwargs)
+
+        def news(self, query: str, **kwargs: object) -> list[dict[str, object]]:
+            search_calls.append(("news", query, kwargs))
+            return provider_results()
+
+        def text(self, query: str, **kwargs: object) -> list[dict[str, object]]:
+            search_calls.append(("text", query, kwargs))
+            return provider_results()
+
+    def provider_results() -> list[dict[str, object]]:
+        return [
+            {
+                "url": "https://www.reuters.com/markets/currencies/",
+                "title": "Bitcoin market evidence",
+                "body": "Current public market evidence.",
+            }
+        ]
+
+    monkeypatch.setattr("ddgs.DDGS", RecordingDdgs)
+
+    evidence = DdgsMetasearchProvider(
+        result_kind=result_kind,  # type: ignore[arg-type]
+        retry_policy=SearchRetryPolicy(max_attempts=1),
+    ).search("current bitcoin market")
+
+    assert len(client_options) == 1
+    assert client_options[0]["proxy"] is None
+    assert 0 < int(client_options[0]["timeout"]) <= 30
+    assert search_calls == [
+        (
+            result_kind,
+            "current bitcoin market",
+            {"max_results": 8, "backend": "auto"},
+        )
+    ]
+    assert [item.source for item in evidence] == ["ddgs_metasearch"]
+
+
+def test_ddgs_metasearch_errors_preserve_honest_provider_provenance() -> None:
+    with pytest.raises(ResearchUnavailable) as raised:
+        parse_ddgs_metasearch_response(
+            query="bitcoin macro",
+            response={"not": "a DDGS result list"},
+            fetched_at=datetime.now(UTC),
+        )
+
+    assert raised.value.provider == "ddgs_metasearch"
+    assert "DDGS metasearch" in str(raised.value)
+
+
+def test_ddgs_metasearch_tool_failures_preserve_honest_provider_provenance() -> None:
+    class FailingTool:
+        def invoke(self, input: object, config: object = None) -> object:
+            del input, config
+            raise TimeoutError("metasearch timed out")
+
+    with pytest.raises(ResearchUnavailable) as raised:
+        DdgsMetasearchProvider(
+            tool=FailingTool(),  # type: ignore[arg-type]
+            retry_policy=SearchRetryPolicy(max_attempts=1),
+        ).search("current bitcoin market")
+
+    assert raised.value.provider == "ddgs_metasearch"
+    assert raised.value.error_type == "TimeoutError"
+    assert "DDGS metasearch" in str(raised.value)
 
 
 def test_tavily_error_is_not_a_successful_empty_result() -> None:
@@ -936,6 +1401,58 @@ async def test_async_tavily_retries_under_the_same_search_owner() -> None:
         "retryable_failure",
         "succeeded",
     ]
-    assert {record.correlation_id for record in records} == {
-        "corr-tavily-async"
-    }
+    assert {record.correlation_id for record in records} == {"corr-tavily-async"}
+
+
+@pytest.mark.asyncio
+async def test_async_tavily_retries_aiohttp_connector_failures() -> None:
+    class ClientConnectorError(Exception):
+        pass
+
+    class AsyncConnectorTool:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def ainvoke(self, input: object, config: object = None) -> object:
+            del input, config
+            self.calls += 1
+            if self.calls < 3:
+                raise ClientConnectorError("transient Tavily connection failure")
+            return {
+                "results": [
+                    {
+                        "url": "https://www.imf.org/en/Topics/fintech",
+                        "title": "Fintech",
+                        "content": "Public provider evidence.",
+                    }
+                ]
+            }
+
+    tool = AsyncConnectorTool()
+    records = []
+    evidence = await TavilySearchProvider(
+        tool=tool,  # type: ignore[arg-type]
+        retry_policy=SearchRetryPolicy(
+            backoff_seconds=(0.0,),
+            record_attempt=records.append,
+        ),
+    ).asearch(
+        "bitcoin macro",
+        config={"metadata": {"correlation_id": "corr-tavily-connector"}},
+    )
+
+    assert tool.calls == 3
+    assert [str(item.final_url) for item in evidence] == [
+        "https://www.imf.org/en/Topics/fintech"
+    ]
+    assert [record.error_type for record in records] == [
+        "ClientConnectorError",
+        "ClientConnectorError",
+        None,
+    ]
+    assert [record.outcome for record in records] == [
+        "retryable_failure",
+        "retryable_failure",
+        "succeeded",
+    ]
+    assert {record.correlation_id for record in records} == {"corr-tavily-connector"}

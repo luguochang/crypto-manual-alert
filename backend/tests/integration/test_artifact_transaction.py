@@ -22,6 +22,7 @@ from crypto_alert_v2.persistence.models import (
     ArtifactVersion,
     Decision,
     Membership,
+    NotificationOutbox,
     Run,
     Task,
     Tenant,
@@ -29,6 +30,7 @@ from crypto_alert_v2.persistence.models import (
     User,
     Workspace,
 )
+from crypto_alert_v2.notifications.outbox import plan_notification
 from crypto_alert_v2.persistence.unit_of_work import ProductUnitOfWork
 
 
@@ -64,7 +66,9 @@ async def database_connection() -> AsyncIterator[AsyncConnection]:
     async with engine.begin() as migration_connection:
         if migration_connection.dialect.name != "postgresql":
             raise AssertionError("PRODUCT_DATABASE_URL must point to PostgreSQL")
-        await migration_connection.execute(CreateSchema(PRODUCT_SCHEMA, if_not_exists=True))
+        await migration_connection.execute(
+            CreateSchema(PRODUCT_SCHEMA, if_not_exists=True)
+        )
         await migration_connection.run_sync(Base.metadata.create_all)
 
     connection = await engine.connect()
@@ -169,7 +173,7 @@ async def _seed_artifact_lineage(
 
 async def _row_counts(
     session_factory: async_sessionmaker[AsyncSession], artifact_id: object
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     async with session_factory() as session:
         version_count = await session.scalar(
             select(func.count())
@@ -181,11 +185,20 @@ async def _row_counts(
             .select_from(Decision)
             .where(Decision.artifact_id == artifact_id)
         )
-    return int(version_count or 0), int(decision_count or 0)
+        outbox_count = await session.scalar(
+            select(func.count())
+            .select_from(NotificationOutbox)
+            .where(NotificationOutbox.artifact_id == artifact_id)
+        )
+    return (
+        int(version_count or 0),
+        int(decision_count or 0),
+        int(outbox_count or 0),
+    )
 
 
 @pytest.mark.asyncio
-async def test_artifact_version_and_decision_commit_atomically(
+async def test_artifact_version_decision_and_outbox_commit_atomically(
     database_connection: AsyncConnection,
 ) -> None:
     session_factory = async_sessionmaker(
@@ -206,7 +219,8 @@ async def test_artifact_version_and_decision_commit_atomically(
 
     with pytest.raises(RuntimeError, match="force rollback"):
         async with ProductUnitOfWork(session_factory, actor) as unit_of_work:
-            await unit_of_work.artifacts.commit_version_and_decision(
+            assert unit_of_work.session is not None
+            commit = await unit_of_work.artifacts.commit_version_and_decision(
                 artifact_id=rolled_back_artifact.id,
                 run_id=run_id,
                 content={"status": "committed", "analysis": {"action": "no_trade"}},
@@ -214,9 +228,24 @@ async def test_artifact_version_and_decision_commit_atomically(
                 evidence_verdict={"sufficient": True},
                 risk_verdict={"allowed": True},
             )
+            await plan_notification(
+                unit_of_work.session,
+                tenant_id=commit.decision.tenant_id,
+                workspace_id=commit.decision.workspace_id,
+                owner_user_id=commit.decision.owner_user_id,
+                task_id=commit.decision.task_id,
+                run_id=commit.decision.run_id,
+                artifact_id=commit.decision.artifact_id,
+                artifact_version_id=commit.artifact_version.id,
+                decision_id=commit.decision.id,
+                decision_version=commit.decision.decision_version,
+                channel="bark",
+                notification_type="analysis_completed",
+                payload={"action": "no_trade", "task_id": str(commit.decision.task_id)},
+            )
             raise RuntimeError("force rollback")
 
-    assert await _row_counts(session_factory, rolled_back_artifact.id) == (0, 0)
+    assert await _row_counts(session_factory, rolled_back_artifact.id) == (0, 0, 0)
 
     async with ProductUnitOfWork(session_factory, actor) as unit_of_work:
         commit = await unit_of_work.artifacts.commit_version_and_decision(
@@ -227,8 +256,24 @@ async def test_artifact_version_and_decision_commit_atomically(
             evidence_verdict={"sufficient": True},
             risk_verdict={"allowed": True},
         )
+        assert unit_of_work.session is not None
+        await plan_notification(
+            unit_of_work.session,
+            tenant_id=commit.decision.tenant_id,
+            workspace_id=commit.decision.workspace_id,
+            owner_user_id=commit.decision.owner_user_id,
+            task_id=commit.decision.task_id,
+            run_id=commit.decision.run_id,
+            artifact_id=commit.decision.artifact_id,
+            artifact_version_id=commit.artifact_version.id,
+            decision_id=commit.decision.id,
+            decision_version=commit.decision.decision_version,
+            channel="bark",
+            notification_type="analysis_completed",
+            payload={"action": "no_trade", "task_id": str(commit.decision.task_id)},
+        )
         await unit_of_work.commit()
 
     assert commit.artifact_version.version_number == 1
     assert commit.decision.artifact_version_id == commit.artifact_version.id
-    assert await _row_counts(session_factory, committed_artifact.id) == (1, 1)
+    assert await _row_counts(session_factory, committed_artifact.id) == (1, 1, 1)

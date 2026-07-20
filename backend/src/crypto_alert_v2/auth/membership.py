@@ -69,8 +69,9 @@ class DatabaseMembershipAuthority:
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
-                    _membership_statement(identity)
-                    .order_by(Tenant.name, Workspace.name, Membership.id)
+                    _membership_statement(identity).order_by(
+                        Tenant.name, Workspace.name, Membership.id
+                    )
                 )
             ).all()
         return tuple(_membership_context(row) for row in rows)

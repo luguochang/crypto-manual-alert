@@ -13,7 +13,7 @@ import {
   resolveReviewStateAnnouncement,
   resolveReviewSourceReference,
 } from "../../src/features/work/human-review-panel";
-import type { PendingInterrupt } from "../../src/lib/schemas/product-api";
+import type { AnalysisPendingInterrupt } from "../../src/lib/schemas/product-api";
 
 const allReviewActions = ["approve", "reject", "edit"] as const;
 
@@ -190,6 +190,10 @@ describe("human review panel", () => {
         countdown: "01:05",
         locallyElapsed: false,
       });
+      expect(resolveReviewDeadlineHint("2026-07-15T11:01:05Z", now)).toEqual({
+        countdown: "01:01:05",
+        locallyElapsed: false,
+      });
     });
 
     it("marks local countdown completion without changing the interaction state", () => {
@@ -220,7 +224,7 @@ describe("human review panel", () => {
 });
 
 function renderReview(
-  interrupt: PendingInterrupt,
+  interrupt: AnalysisPendingInterrupt,
   overrides: Partial<ComponentProps<typeof HumanReviewPanel>> = {},
 ) {
   return renderToStaticMarkup(createElement(HumanReviewPanel, {
@@ -243,7 +247,7 @@ function reviewInterrupt({
 }: {
   riskAllowed: boolean;
   sources?: string[];
-}): PendingInterrupt {
+}): AnalysisPendingInterrupt {
   return {
     interrupt_id: "interrupt-review-1",
     response_version: 1,

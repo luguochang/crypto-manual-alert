@@ -63,6 +63,7 @@ def test_provider_fetches_all_seven_public_gets_and_strips_swap_for_index() -> N
     ) as provider:
         snapshot = provider.fetch_snapshot(
             "BTC-USDT-SWAP",
+            horizon="4h",
             correlation_id="corr-success",
         )
 
@@ -89,6 +90,7 @@ def test_provider_fetches_all_seven_public_gets_and_strips_swap_for_index() -> N
     ]
     index_request = requests[2]
     assert index_request.url.params["instId"] == "BTC-USDT"
+    assert requests[-1].url.params["bar"] == "4H"
     assert all(
         request.url.params.get("instId") == "BTC-USDT-SWAP"
         for request in requests[:2] + requests[3:]
@@ -101,7 +103,41 @@ def test_provider_fetches_all_seven_public_gets_and_strips_swap_for_index() -> N
         "ok-access-passphrase",
         "ok-access-timestamp",
     }
-    assert all(not forbidden_headers.intersection(request.headers) for request in requests)
+    assert all(
+        not forbidden_headers.intersection(request.headers) for request in requests
+    )
+
+
+def test_provider_fails_closed_when_okx_returns_mixed_instruments() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        data = _response_data(request.url.path)
+        if request.url.path == "/api/v5/public/mark-price":
+            data.append(
+                {
+                    "instId": "ETH-USDT-SWAP",
+                    "markPx": "3500",
+                    "ts": "1720000000001",
+                }
+            )
+        return httpx.Response(200, json={"code": "0", "msg": "", "data": data})
+
+    with OkxProvider(
+        transport=httpx.MockTransport(handler),
+        retry_policy=_no_wait_policy(),
+    ) as provider:
+        with pytest.raises(ProviderUnavailable, match="instrument mismatch") as raised:
+            provider.fetch_snapshot(
+                "BTC-USDT-SWAP",
+                correlation_id="corr-mixed",
+            )
+
+    assert len(requests) == 7
+    assert raised.value.endpoint == "mark"
+    assert raised.value.retryable is False
+    assert raised.value.correlation_id == "corr-mixed"
 
 
 @pytest.mark.parametrize("keyword", ["api_secret", "passphrase", "api_key"])
@@ -114,7 +150,9 @@ def test_provider_constructor_rejects_private_credentials(keyword: str) -> None:
     "failure",
     [
         lambda request: httpx.Response(500, json={"code": "500", "data": []}),
-        lambda request: (_ for _ in ()).throw(httpx.ReadTimeout("timeout", request=request)),
+        lambda request: (_ for _ in ()).throw(
+            httpx.ReadTimeout("timeout", request=request)
+        ),
     ],
 )
 def test_provider_retries_transient_failure_only_three_times(
@@ -140,7 +178,9 @@ def test_provider_retries_transient_failure_only_three_times(
     assert raised.value.correlation_id == "corr-failure"
 
 
-def test_default_httpx_transport_disables_its_own_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_httpx_transport_disables_its_own_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     configured: list[int] = []
 
     def transport_factory(*, retries: int) -> httpx.BaseTransport:

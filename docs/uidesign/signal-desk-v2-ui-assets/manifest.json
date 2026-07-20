@@ -1,0 +1,156 @@
+{
+  "package": "signal-desk-v2-ui-assets",
+  "version": "1.0.0",
+  "screens": [
+    {
+      "file": "screens/01-official-landing.png",
+      "source": "加密情报工作台首页设计.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/02-workspace-overview.png",
+      "source": "加密数据监控仪表盘截图.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/03-market-analysis-workbench.png",
+      "source": "市场分析工作台界面截图.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/04-runs-and-run-detail.png",
+      "source": "signal_desk_运行记录界面.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/05-review-inbox.png",
+      "source": "加密信号审核面板.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/06-report-library.png",
+      "source": "报告资料库界面展示.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/07-artifact-report-detail.png",
+      "source": "btc分析报告仪表盘截图.png",
+      "size": [
+        1448,
+        1086
+      ]
+    },
+    {
+      "file": "screens/08-settings.png",
+      "source": "信号工作台设置面板截图.png",
+      "size": [
+        1448,
+        1086
+      ]
+    }
+  ],
+  "icons": [
+    "alert",
+    "arrow-right",
+    "audit-log",
+    "bell",
+    "bitcoin",
+    "blocked",
+    "calendar",
+    "checkpoint",
+    "chevron-down",
+    "chevron-right",
+    "close",
+    "copy",
+    "data-lineage",
+    "download",
+    "edit",
+    "error",
+    "ethereum",
+    "evidence-gate",
+    "evidence-globe",
+    "export",
+    "external-link",
+    "eye",
+    "filter",
+    "fork",
+    "grid",
+    "help",
+    "home",
+    "human-review",
+    "inbox",
+    "info",
+    "key",
+    "library",
+    "list",
+    "lock",
+    "market-chart",
+    "monitor",
+    "more",
+    "pending",
+    "play",
+    "plus",
+    "refresh",
+    "report",
+    "retry",
+    "risk-shield",
+    "runs",
+    "save",
+    "search",
+    "settings",
+    "share",
+    "solana",
+    "success",
+    "tag",
+    "user",
+    "warning",
+    "watchlist",
+    "web-source",
+    "workspace"
+  ],
+  "iconCount": 57,
+  "pngThemes": [
+    "light",
+    "accent"
+  ],
+  "pngSizes": [
+    16,
+    20,
+    24,
+    32,
+    48,
+    64,
+    128
+  ],
+  "brandAssets": [
+    "app-icon-128.png",
+    "app-icon-16.png",
+    "app-icon-256.png",
+    "app-icon-32.png",
+    "app-icon-48.png",
+    "app-icon-512.png",
+    "app-icon-64.png",
+    "favicon.ico",
+    "signal-desk-lockup.png",
+    "signal-desk-lockup.svg",
+    "signal-desk-mark.svg"
+  ]
+}

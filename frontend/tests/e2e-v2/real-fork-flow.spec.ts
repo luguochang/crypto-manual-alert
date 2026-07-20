@@ -5,17 +5,27 @@ import { productTaskSchema } from "../../src/lib/schemas/product-api";
 
 
 const enabled = process.env.REAL_FORK_E2E === "1";
-const taskId = process.env.REAL_FORK_TASK_ID ?? "";
-const sourceRunId = process.env.REAL_FORK_SOURCE_RUN_ID ?? "";
 const uuidPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const writeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const expectedProjects = {
+  "fixture-desktop": {
+    taskEnvironmentVariable: "REAL_FORK_TASK_ID_DESKTOP",
+    runEnvironmentVariable: "REAL_FORK_SOURCE_RUN_ID_DESKTOP",
+    viewport: { width: 1440, height: 1000 },
+  },
+  "fixture-pixel-7": {
+    taskEnvironmentVariable: "REAL_FORK_TASK_ID_MOBILE",
+    runEnvironmentVariable: "REAL_FORK_SOURCE_RUN_ID_MOBILE",
+    viewport: { width: 412, height: 915 },
+  },
+} as const;
 
 test.skip(!enabled, "set REAL_FORK_E2E=1 with a real forkable Product Run");
 
 test("forks a historical Product Run through the rendered UI", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
-  expect(taskId).toMatch(uuidPattern);
-  expect(sourceRunId).toMatch(uuidPattern);
+  const { taskId, sourceRunId, viewport } = forkContextForProject(testInfo);
+  expect(page.viewportSize()).toEqual(viewport);
   const writes: Request[] = [];
   page.on("request", (request) => {
     if (writeMethods.has(request.method())) writes.push(request);
@@ -67,6 +77,22 @@ test("forks a historical Product Run through the rendered UI", async ({ page }, 
   await assertPageQuality(page, "forked run waiting for review");
   await attachScreenshot(page, testInfo);
 });
+
+function forkContextForProject(testInfo: TestInfo) {
+  const project = expectedProjects[testInfo.project.name as keyof typeof expectedProjects];
+  if (project === undefined) {
+    throw new Error(`real Fork E2E does not support ${testInfo.project.name}`);
+  }
+  const taskId = process.env[project.taskEnvironmentVariable]?.trim().toLowerCase() ?? "";
+  const sourceRunId = process.env[project.runEnvironmentVariable]?.trim().toLowerCase() ?? "";
+  if (!uuidPattern.test(taskId)) {
+    throw new Error(`${project.taskEnvironmentVariable} must contain a Product Task UUID`);
+  }
+  if (!uuidPattern.test(sourceRunId)) {
+    throw new Error(`${project.runEnvironmentVariable} must contain a Product Run UUID`);
+  }
+  return { taskId, sourceRunId, viewport: project.viewport };
+}
 
 async function assertPageQuality(page: Page, phase: string) {
   await page.addScriptTag({ content: axe.source });

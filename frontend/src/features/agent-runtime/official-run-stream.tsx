@@ -1,13 +1,26 @@
 "use client";
 
-import { useStream } from "@langchain/react";
+import { useChannel, useStream } from "@langchain/react";
 import { Activity, CircleAlert, CircleCheck, LoaderCircle } from "lucide-react";
 
-import type { AgentStreamBinding } from "@/lib/schemas/product-api";
+import type {
+  AgentStreamBinding,
+  TaskStage,
+  TaskStageHistory,
+} from "@/lib/schemas/product-api";
+import {
+  productCustomChannels,
+  projectProductCustomEvents,
+} from "@/features/agent-runtime/product-custom-events";
 
 interface OfficialRunStreamProps {
   binding: AgentStreamBinding;
-  onCompleted: () => void;
+  stageHistory?: TaskStageHistory | null;
+}
+
+interface DurableRunProgressProps {
+  history: TaskStageHistory;
+  historical?: boolean;
 }
 
 interface OfficialExecutionValues extends Record<string, unknown> {
@@ -20,11 +33,36 @@ interface OfficialExecutionValues extends Record<string, unknown> {
 }
 
 export interface OfficialProgressItem {
-  id: "lifecycle" | "market_snapshot" | "web_evidence" | "analysis" | "evidence_verdict" | "risk_verdict";
+  id: "lifecycle" | "usage" | "quality" | TaskStage["stage"];
   label: string;
   detail: string;
   tone: "active" | "complete" | "warning" | "danger";
 }
+
+const progressOrder: readonly OfficialProgressItem["id"][] = [
+  "lifecycle",
+  "market_snapshot",
+  "web_evidence",
+  "analysis",
+  "usage",
+  "evidence_verdict",
+  "risk_verdict",
+  "quality",
+  "artifact",
+  "notification",
+  "run",
+];
+
+const stageLabels: Record<TaskStage["stage"], string> = {
+  market_snapshot: "市场快照",
+  web_evidence: "Web 证据",
+  analysis: "分析判断",
+  evidence_verdict: "证据门禁",
+  risk_verdict: "风险门禁",
+  artifact: "分析报告",
+  notification: "通知发送",
+  run: "执行阶段",
+};
 
 const terminalLifecyclePresentation: Record<string, { label: string; subtitle: string }> = {
   completed: {
@@ -71,17 +109,17 @@ export function officialStreamSubtitle(
   return terminalLifecycle(lifecycle)?.subtitle ?? "正在同步本次分析的最新执行状态。";
 }
 
-const lifecycleProjection: Record<string, Pick<OfficialProgressItem, "detail" | "tone">> = {
-  request_validated: { detail: "分析请求已校验", tone: "active" },
-  market_collected: { detail: "市场快照已获取", tone: "active" },
-  research_collected: { detail: "Web 证据已汇总", tone: "active" },
-  analysis_completed: { detail: "分析推演已完成", tone: "active" },
-  evidence_validated: { detail: "证据门禁已完成", tone: "active" },
-  risk_validated: { detail: "风险门禁已完成", tone: "active" },
-  artifact_built: { detail: "分析报告正在提交", tone: "active" },
-  completed: { detail: "官方执行已完成", tone: "complete" },
-  completed_blocked: { detail: "官方执行已被门禁阻断", tone: "warning" },
-  completed_failed: { detail: "官方执行未完成", tone: "danger" },
+const lifecycleProjection: Record<string, OfficialProgressItem> = {
+  request_validated: { id: "lifecycle", label: "执行阶段", detail: "分析请求已校验", tone: "active" },
+  market_collected: { id: "market_snapshot", label: "市场快照", detail: "市场快照已获取", tone: "active" },
+  research_collected: { id: "web_evidence", label: "Web 证据", detail: "Web 证据已汇总", tone: "active" },
+  analysis_completed: { id: "analysis", label: "分析判断", detail: "分析推演已完成", tone: "active" },
+  evidence_validated: { id: "evidence_verdict", label: "证据门禁", detail: "证据门禁已完成", tone: "active" },
+  risk_validated: { id: "risk_verdict", label: "风险门禁", detail: "风险门禁已完成", tone: "active" },
+  artifact_built: { id: "artifact", label: "分析报告", detail: "分析报告正在提交", tone: "active" },
+  completed: { id: "run", label: "执行阶段", detail: "官方执行已完成", tone: "complete" },
+  completed_blocked: { id: "run", label: "执行阶段", detail: "官方执行已被门禁阻断", tone: "warning" },
+  completed_failed: { id: "run", label: "执行阶段", detail: "官方执行未完成", tone: "danger" },
 };
 
 const actionLabels: Record<string, string> = {
@@ -110,9 +148,12 @@ export function projectOfficialValues(values: OfficialExecutionValues): Official
   const projection: OfficialProgressItem[] = [];
 
   if (typeof lifecycle === "string") {
-    const mapped = lifecycleProjection[lifecycle]
-      ?? { detail: "执行状态已更新", tone: "active" as const };
-    projection.push({ id: "lifecycle", label: "执行阶段", ...mapped });
+    projection.push(lifecycleProjection[lifecycle] ?? {
+      id: "lifecycle",
+      label: "执行阶段",
+      detail: "执行状态已更新",
+      tone: "active",
+    });
   }
 
   if (isRecord(marketSnapshot)) {
@@ -209,10 +250,111 @@ export function projectOfficialValues(values: OfficialExecutionValues): Official
     });
   }
 
-  return projection;
+  return orderLatestProgress(projection);
 }
 
-export function OfficialRunStream({ binding, onCompleted }: OfficialRunStreamProps) {
+export function mergeExecutionProgress(
+  stageHistory: TaskStageHistory | null | undefined,
+  liveProgress: readonly OfficialProgressItem[],
+): OfficialProgressItem[] {
+  const latestDurableStages = latestDurableStagesByName(stageHistory);
+  const merged = new Map<OfficialProgressItem["id"], OfficialProgressItem>();
+
+  for (const item of projectDurableStageHistory(latestDurableStages)) {
+    merged.set(item.id, item);
+  }
+  for (const item of liveProgress) {
+    const durableStage = isDurableStageName(item.id)
+      ? latestDurableStages.get(item.id)
+      : undefined;
+    const durableItem = merged.get(item.id);
+    if (
+      durableStage !== undefined
+      && durableItem !== undefined
+      && durableStage.status !== "planned"
+      && item.tone !== durableItem.tone
+    ) {
+      continue;
+    }
+    merged.set(item.id, item);
+  }
+  return orderLatestProgress([...merged.values()]);
+}
+
+function isDurableStageName(
+  value: OfficialProgressItem["id"],
+): value is TaskStage["stage"] {
+  return value in stageLabels;
+}
+
+function latestDurableStagesByName(
+  history: TaskStageHistory | null | undefined,
+): Map<TaskStage["stage"], TaskStage> {
+  const latest = new Map<TaskStage["stage"], TaskStage>();
+  for (const stage of history?.stages ?? []) {
+    const current = latest.get(stage.stage);
+    if (current === undefined || stage.sequence > current.sequence) {
+      latest.set(stage.stage, stage);
+    }
+  }
+  return latest;
+}
+
+function projectDurableStageHistory(
+  latestStages: ReadonlyMap<TaskStage["stage"], TaskStage>,
+): OfficialProgressItem[] {
+  return orderLatestProgress([...latestStages.values()].map((stage) => ({
+    id: stage.stage,
+    label: stageLabels[stage.stage],
+    detail: durableStageDetail(stage),
+    tone: durableStageTone(stage.status),
+  })));
+}
+
+function durableStageDetail(stage: TaskStage): string {
+  if (stage.stage === "run") {
+    return {
+      committed: "执行状态已保存",
+      planned: "执行已进入计划",
+      succeeded: "执行已完成",
+      blocked: "执行已阻断",
+      failed: "执行失败",
+      cancelled: "执行已取消",
+    }[stage.status];
+  }
+  if (stage.stage === "notification" && stage.status === "planned") {
+    return "通知已进入发送队列";
+  }
+  const label = stageLabels[stage.stage];
+  return {
+    committed: `${label}已保存`,
+    planned: `${label}已进入计划`,
+    succeeded: `${label}已完成`,
+    blocked: `${label}已阻断`,
+    failed: `${label}失败`,
+    cancelled: `${label}已取消`,
+  }[stage.status];
+}
+
+function durableStageTone(status: TaskStage["status"]): OfficialProgressItem["tone"] {
+  if (status === "committed" || status === "succeeded") return "complete";
+  if (status === "planned") return "active";
+  if (status === "blocked") return "warning";
+  return "danger";
+}
+
+function orderLatestProgress(
+  progress: readonly OfficialProgressItem[],
+): OfficialProgressItem[] {
+  const latest = new Map<OfficialProgressItem["id"], OfficialProgressItem>();
+  for (const item of progress) latest.set(item.id, item);
+  return progressOrder.flatMap((id) => {
+    const item = latest.get(id);
+    return item === undefined ? [] : [item];
+  });
+}
+
+export function OfficialRunStream({ binding, stageHistory = null }: OfficialRunStreamProps) {
   const { assistant_id: assistantId, thread_id: threadId } = binding;
   const stream = useStream<OfficialExecutionValues>({
     assistantId,
@@ -220,9 +362,18 @@ export function OfficialRunStream({ binding, onCompleted }: OfficialRunStreamPro
     apiUrl: officialAgentApiUrl(window.location.origin),
     transport: "sse",
     optimistic: false,
-    onCompleted,
   });
-  const progress = projectOfficialValues(stream.values);
+  const customEvents = useChannel(stream, productCustomChannels, undefined, {
+    bufferSize: 256,
+    replay: true,
+  });
+  const progress = mergeExecutionProgress(
+    stageHistory,
+    [
+      ...projectOfficialValues(stream.values),
+      ...projectProductCustomEvents(customEvents, stageHistory?.run_id),
+    ],
+  );
   const connectionStatus = officialConnectionStatus(
     stream.isThreadLoading,
     stream.error,
@@ -233,25 +384,85 @@ export function OfficialRunStream({ binding, onCompleted }: OfficialRunStreamPro
     stream.error,
     stream.values.lifecycle,
   );
+  const subagents = Array.from(stream.subagents.values())
+    .filter((subagent) => subagent.name === "verified-source-researcher")
+    .map((subagent) => ({
+      id: subagent.id,
+      status: subagent.status,
+    }));
 
+  return <ExecutionProgressPanel
+    testId="official-run-stream"
+    title="官方执行进度"
+    subtitle={subtitle}
+    status={connectionStatus}
+    progress={progress}
+    subagents={subagents}
+    streamInterrupted={Boolean(stream.error)}
+    emptyMessage="正在等待官方执行事件。"
+  />;
+}
+
+export function DurableRunProgress({
+  history,
+  historical = false,
+}: DurableRunProgressProps) {
+  return <ExecutionProgressPanel
+    testId="durable-run-progress"
+    title={historical ? "历史运行进度" : "执行进度"}
+    subtitle={historical
+      ? "所选运行的已保存执行阶段。"
+      : "本次执行的已保存阶段。"}
+    status={{ label: "已保存", tone: "connected" }}
+    progress={mergeExecutionProgress(history, [])}
+    subagents={[]}
+    streamInterrupted={false}
+    emptyMessage="暂未保存执行阶段。"
+  />;
+}
+
+interface ExecutionProgressPanelProps {
+  testId: "official-run-stream" | "durable-run-progress";
+  title: string;
+  subtitle: string;
+  status: { label: string; tone: "active" | "connected" | "warning" };
+  progress: readonly OfficialProgressItem[];
+  subagents: readonly {
+    id: string;
+    status: "running" | "complete" | "error";
+  }[];
+  streamInterrupted: boolean;
+  emptyMessage: string;
+}
+
+function ExecutionProgressPanel({
+  testId,
+  title,
+  subtitle,
+  status,
+  progress,
+  subagents,
+  streamInterrupted,
+  emptyMessage,
+}: ExecutionProgressPanelProps) {
   return (
-    <section className="official-run-stream" data-testid="official-run-stream" aria-live="polite">
+    <section className="official-run-stream" data-testid={testId} aria-live="polite">
       <div className="official-stream-heading">
         <div>
           <span className="official-stream-icon" aria-hidden="true"><Activity size={18} /></span>
           <div>
-            <h2>官方执行进度</h2>
+            <h2>{title}</h2>
             <p>{subtitle}</p>
           </div>
         </div>
-        <span className="official-stream-status" data-tone={connectionStatus.tone}>
-          {connectionStatus.tone === "active" ? <LoaderCircle className="spinning-icon" size={15} aria-hidden="true" /> : null}
-          {connectionStatus.tone === "warning" ? <CircleAlert size={15} aria-hidden="true" /> : null}
-          {connectionStatus.label}
+        <span className="official-stream-status" data-tone={status.tone}>
+          {status.tone === "active" ? <LoaderCircle className="spinning-icon" size={15} aria-hidden="true" /> : null}
+          {status.tone === "warning" ? <CircleAlert size={15} aria-hidden="true" /> : null}
+          {status.label}
         </span>
       </div>
 
-      {stream.error ? (
+      {streamInterrupted ? (
         <div className="official-stream-notice" role="status">
           <CircleAlert size={17} aria-hidden="true" />
           <span>实时执行连接暂时中断；产品状态仍会继续更新。</span>
@@ -277,10 +488,39 @@ export function OfficialRunStream({ binding, onCompleted }: OfficialRunStreamPro
           ))}
         </ol>
       ) : (
-        <p className="official-stream-empty">正在等待官方执行事件。</p>
+        <p className="official-stream-empty">{emptyMessage}</p>
       )}
+
+      {subagents.length > 0 ? (
+        <div className="official-subagent-section" aria-label="研究子任务">
+          <h3>来源研究</h3>
+          <ul>
+            {subagents.map((subagent) => (
+              <li key={subagent.id} data-status={subagent.status}>
+                <span aria-hidden="true">
+                  {subagent.status === "running"
+                    ? <LoaderCircle className="spinning-icon" size={15} />
+                    : subagent.status === "complete"
+                      ? <CircleCheck size={15} />
+                      : <CircleAlert size={15} />}
+                </span>
+                <strong>可验证来源研究员</strong>
+                <small>{subagentStatusLabel(subagent.status)}</small>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function subagentStatusLabel(status: "running" | "complete" | "error") {
+  return {
+    running: "正在核验来源",
+    complete: "来源核验完成",
+    error: "来源核验失败",
+  }[status];
 }
 
 function terminalLifecycle(lifecycle: unknown) {

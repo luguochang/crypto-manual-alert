@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { AnalysisProjection } from "../../src/features/analysis/analysis-projection";
 import { productTaskSchema } from "../../src/lib/schemas/product-api";
 
+const correlationId = "22222222-2222-5222-8222-222222222222";
+
 describe("analysis projection", () => {
   it("renders typed market and Web evidence as readable product content", () => {
     const html = renderToStaticMarkup(createElement(AnalysisProjection, {
@@ -28,6 +30,44 @@ describe("analysis projection", () => {
     expect(html).not.toContain("BTC macro event risk");
   });
 
+  it("labels DDGS automatic metasearch provenance without claiming DuckDuckGo", () => {
+    const payload = successTask();
+    payload.web_evidence[0].source = "ddgs_metasearch";
+    payload.web_evidence[0].parser_version = "ddgs-metasearch-v1";
+    Object.assign(payload.artifact, {
+      provenance: {
+        market_provider: "okx",
+        search_provider: "ddgs_metasearch",
+        search_parser_version: "ddgs-metasearch-v1",
+        model_provider: "openai-compatible",
+        model_name: "gpt-5.5",
+        model_endpoint_host: null,
+        model_audits: [],
+      },
+    });
+
+    const html = renderToStaticMarkup(createElement(AnalysisProjection, {
+      task: productTaskSchema.parse(payload),
+    }));
+
+    expect(html).toContain("DDGS 元搜索");
+    expect(html).toContain("ddgs-metasearch-v1");
+    expect(html).not.toContain("DuckDuckGo");
+  });
+
+  it("renders typed unavailable capabilities without raw machine codes", () => {
+    const payload = successTask();
+    payload.artifact.analysis.unavailable_data = ["vix", "dxy"];
+
+    const html = renderToStaticMarkup(createElement(AnalysisProjection, {
+      task: productTaskSchema.parse(payload),
+    }));
+
+    expect(html).toContain("VIX 波动率、美元指数 DXY");
+    expect(html).not.toContain(">vix<");
+    expect(html).not.toContain(">dxy<");
+  });
+
   it("states research failure honestly while preserving the earlier artifact as history", () => {
     const payload = successTask();
     payload.status = "failed";
@@ -35,6 +75,7 @@ describe("analysis projection", () => {
       code: "research_unavailable",
       message: "检索服务没有返回可验证来源，当前未生成分析结果。",
       retryable: true,
+      correlation_id: correlationId,
     }];
     payload.web_evidence = [];
     const html = renderToStaticMarkup(createElement(AnalysisProjection, {
@@ -42,6 +83,7 @@ describe("analysis projection", () => {
     }));
 
     expect(html).toContain("研究检索不可用");
+    expect(html).toContain(correlationId);
     expect(html).toContain("本次运行没有获得可验证的 Web 来源，因此没有生成新的分析建议。");
     expect(html).toContain("本次检索未返回可验证来源");
     expect(html).toContain("历史成功报告");
@@ -59,6 +101,7 @@ describe("analysis projection", () => {
         code: "research_unavailable",
         message: "检索服务没有返回可验证来源，当前未生成分析结果。",
         retryable: true,
+        correlation_id: correlationId,
         provider: "builtin_web_search",
         error_type: "UnverifiedServerToolCall",
         attempt: 3,
@@ -74,6 +117,92 @@ describe("analysis projection", () => {
     expect(html).toContain("第 3 次尝试");
   });
 
+  it("renders preserved evidence without claiming Web Search is unavailable", () => {
+    const payload = {
+      ...successTask(),
+      status: "failed",
+      artifact: null,
+      errors: [{
+        code: "research_unavailable",
+        message: "检索服务没有返回可验证来源，当前未生成分析结果。",
+        retryable: true,
+        correlation_id: correlationId,
+      }],
+    };
+
+    const html = renderToStaticMarkup(createElement(AnalysisProjection, {
+      task: productTaskSchema.parse(payload),
+    }));
+
+    expect(html).toContain("后续研究检索未完成");
+    expect(html).toContain("本次运行已保留 1 条可验证 Web 来源");
+    expect(html).toContain("已保留 1 条来源，研究未完成");
+    expect(html).toContain("Fed calendar keeps event risk elevated");
+    expect(html).not.toContain("检索不可用");
+    expect(html).not.toContain("本次检索未返回可验证来源");
+  });
+
+  it("renders both layers of a failed market fallback", () => {
+    const payload = {
+      ...successTask(),
+      status: "failed",
+      artifact: null,
+      errors: [{
+        code: "provider_unavailable",
+        message: "Market data provider failed.",
+        retryable: true,
+        correlation_id: correlationId,
+        provider: "builtin_web_search",
+        error_type: "SearchEvidenceUnavailable",
+        endpoint: "web_search_market",
+        fallback_from: "okx",
+        primary_attempt: 3,
+      }],
+    };
+
+    const html = renderToStaticMarkup(createElement(AnalysisProjection, {
+      task: productTaskSchema.parse(payload),
+    }));
+
+    expect(html).toContain("市场数据与后备检索均失败");
+    expect(html).toContain("首选数据源");
+    expect(html).toContain("okx");
+    expect(html).toContain("首选源尝试");
+    expect(html).toContain("第 3 次尝试");
+    expect(html).toContain("后备 Provider");
+    expect(html).toContain("builtin_web_search");
+    expect(html).toContain("失败阶段");
+    expect(html).toContain("web_search_market");
+  });
+
+  it("keeps database rollback failures actionable while collapsing raw diagnostics", () => {
+    const payload = {
+      ...successTask(),
+      status: "failed",
+      artifact: null,
+      errors: [{
+        code: "terminal_projection_unavailable",
+        message: "The terminal Product projection could not be committed.",
+        retryable: true,
+        correlation_id: correlationId,
+        error_type: "DatabaseOperationalError",
+        attempt: 3,
+      }],
+    };
+
+    const html = renderToStaticMarkup(createElement(AnalysisProjection, {
+      task: productTaskSchema.parse(payload),
+    }));
+
+    expect(html).toContain("最终结果暂时不可用");
+    expect(html).toContain("系统已回滚未完成的写入，没有留下部分报告");
+    expect(html).toContain("请点击“重新分析”重试");
+    expect(html).toContain("<details");
+    expect(html).toContain("<summary>查看失败诊断</summary>");
+    expect(html).toMatch(/<details[^>]*>[\s\S]*terminal_projection_unavailable[\s\S]*DatabaseOperationalError[\s\S]*<\/details>/);
+    expect(html).not.toContain("<h2>terminal_projection_unavailable</h2>");
+  });
+
   it("renders retryable failures as a real button only when retry is operable", () => {
     const payload = {
       ...successTask(),
@@ -82,6 +211,7 @@ describe("analysis projection", () => {
         code: "search_timeout",
         message: "搜索服务超时。",
         retryable: true,
+        correlation_id: correlationId,
       }],
       artifact: null,
     };
@@ -105,12 +235,18 @@ describe("analysis projection", () => {
 function successTask() {
   return {
     task_id: "task-research-content",
+    correlation_id: correlationId,
     status: "succeeded",
     symbol: "BTC-USDT-SWAP",
     horizon: "4h",
     created_at: "2026-07-13T08:30:00Z",
     completed_at: "2026-07-13T08:30:00Z",
-    errors: [] as Array<{ code: string; message: string; retryable: boolean }>,
+    errors: [] as Array<{
+      code: string;
+      message: string;
+      retryable: boolean;
+      correlation_id: string;
+    }>,
     agent_stream: null,
     market_snapshot: {
       symbol: "BTC-USDT-SWAP",
@@ -178,7 +314,7 @@ function successTask() {
         root_cause_chain: ["Momentum improved"],
         why_not_opposite: "Short momentum lacks confirmation.",
         invalidation: "A 4h close below 65800 invalidates the setup.",
-        unavailable_data: [],
+        unavailable_data: [] as string[],
         manual_execution_required: true,
         expires_in_seconds: 14400,
       },

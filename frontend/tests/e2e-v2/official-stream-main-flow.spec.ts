@@ -19,7 +19,7 @@ const officialAgentReadPattern = new RegExp(
   `^/api/agent/threads/(${uuidSource})/(state|history|stream/events)$`,
   "i",
 );
-const terminalStatusPattern = /^(?:分析完成|分析失败)$/;
+const settledStatusPattern = /^(?:分析完成|分析失败|等待人工确认)$/;
 const productStatuses = new Set([
   "queued",
   "running",
@@ -30,10 +30,39 @@ const productStatuses = new Set([
   "cancelled",
 ]);
 const terminalProductStatuses = new Set(["succeeded", "blocked", "failed", "cancelled"]);
+const settledProductStatuses = new Set([...terminalProductStatuses, "waiting_human"]);
+const productStageNames = new Set([
+  "market_snapshot",
+  "web_evidence",
+  "analysis",
+  "evidence_verdict",
+  "risk_verdict",
+  "artifact",
+  "notification",
+  "run",
+]);
+const productStageStatuses = new Set([
+  "committed",
+  "planned",
+  "succeeded",
+  "blocked",
+  "failed",
+  "cancelled",
+]);
+const productStageLabels = new Map([
+  ["market_snapshot", "市场快照"],
+  ["web_evidence", "Web 证据"],
+  ["analysis", "分析判断"],
+  ["evidence_verdict", "证据门禁"],
+  ["risk_verdict", "风险门禁"],
+  ["artifact", "分析报告"],
+  ["notification", "通知发送"],
+  ["run", "执行阶段"],
+]);
 const officialEvidenceProviders = new Set([
   "openai_builtin_web_search",
   "tavily",
-  "duckduckgo",
+  "ddgs_metasearch",
 ]);
 const expectedDeviceProjects: Record<string, { width: number; height: number }> = {
   "fixture-desktop": { width: 1440, height: 1000 },
@@ -58,16 +87,54 @@ test("observes the official stream main flow without browser-side commands", asy
   await page.getByRole("button", { name: "开始分析" }).click();
   await assertOfficialLiveStreamDom(page);
 
+  const taskUrl = new URL(page.url());
+  const taskId = taskUrl.searchParams.get("task");
+  expect(taskUrl.pathname).toBe("/work");
+  expect(taskId).not.toBeNull();
+  expect(taskId ?? "").toMatch(uuidPattern);
+  const resolvedTaskId = taskId ?? "";
+
+  const runningProjection = await waitForRunningDurableProjection(
+    page,
+    observer,
+    resolvedTaskId,
+  );
+  await assertPersistedStagesVisible(page, runningProjection.stageNames);
+  await settleProductResponseInspections(observer);
+  assertRunningReloadStillEligible(observer, runningProjection);
+  const productPostsBeforeRunningReload = productAnalysisRequests(observer).length;
+  const projectionCountBeforeRunningReload = observer.productProjections.length;
+
+  await page.reload();
+
+  await expect(page).toHaveURL(taskUrl.toString());
+  const recoveredRunningProjection = await waitForFirstTaskProjection(
+    page,
+    observer,
+    resolvedTaskId,
+    projectionCountBeforeRunningReload,
+  );
+  expect(recoveredRunningProjection.taskId).toBe(runningProjection.taskId);
+  expect(recoveredRunningProjection.binding).toEqual(runningProjection.binding);
+  expect(recoveredRunningProjection.stageNames).toEqual(
+    expect.arrayContaining(runningProjection.stageNames),
+  );
+  await assertPersistedStagesVisible(page, runningProjection.stageNames);
+  expect(productAnalysisRequests(observer)).toHaveLength(productPostsBeforeRunningReload);
+  expect(productAnalysisRequests(observer)).toHaveLength(1);
+
   const statusHeading = page.getByTestId("task-status").getByRole("heading");
-  await expect(statusHeading).toHaveText(terminalStatusPattern, { timeout: 300_000 });
-  const terminalStatus = (await statusHeading.innerText()).trim();
+  await expect(statusHeading).toHaveText(settledStatusPattern, { timeout: 300_000 });
+  const settledStatus = (await statusHeading.innerText()).trim();
   let visibleFailure: string | null = null;
 
-  await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
-  if (terminalStatus === "分析完成") {
+  const settledProgressBeforeReload = await assertSettledProgressDom(page, settledStatus);
+  if (settledStatus === "分析完成") {
     await assertNaturalLanguageSuccess(page);
-  } else {
+  } else if (settledStatus === "分析失败") {
     visibleFailure = await reportVisibleFailure(page, testInfo);
+  } else {
+    await assertHumanReviewReady(page);
   }
 
   await settleProductResponseInspections(observer);
@@ -80,15 +147,11 @@ test("observes the official stream main flow without browser-side commands", asy
     contentType: "image/png",
   });
 
-  const taskUrl = new URL(page.url());
-  const taskId = taskUrl.searchParams.get("task");
-  expect(taskUrl.pathname).toBe("/work");
-  expect(taskId).not.toBeNull();
-  expect(taskId ?? "").toMatch(uuidPattern);
-  const resolvedTaskId = taskId ?? "";
-  const initialTerminalProjection = terminalProjectionForTask(observer, resolvedTaskId);
-  expect(initialTerminalProjection.status).toBe(
-    terminalStatus === "分析完成" ? "succeeded" : "failed",
+  const initialSettledProjection = settledProjectionForTask(observer, resolvedTaskId);
+  expect(initialSettledProjection.status).toBe(
+    settledStatus === "分析完成"
+      ? "succeeded"
+      : settledStatus === "分析失败" ? "failed" : "waiting_human",
   );
 
   const productPostsBeforeReload = productAnalysisRequests(observer).length;
@@ -99,11 +162,17 @@ test("observes the official stream main flow without browser-side commands", asy
 
   await expect(page).toHaveURL(taskUrl.toString());
   await expect(page.getByTestId("task-status").getByRole("heading")).toHaveText(
-    terminalStatus,
+    settledStatus,
     { timeout: 30_000 },
   );
-  await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
-  const refreshedFailure = terminalStatus === "分析失败"
+  const settledProgressAfterReload = await assertSettledProgressDom(page, settledStatus);
+  expect(settledProgressAfterReload).toEqual(
+    expect.arrayContaining(settledProgressBeforeReload),
+  );
+  if (settledStatus === "等待人工确认") {
+    await assertHumanReviewReady(page);
+  }
+  const refreshedFailure = settledStatus === "分析失败"
     ? await reportVisibleFailure(page, testInfo, "after-reload")
     : null;
   await settleProductResponseInspections(observer);
@@ -117,18 +186,21 @@ test("observes the official stream main flow without browser-side commands", asy
   await assertNoRawPayload(page);
   await assertPageQuality(page);
 
-  const refreshedTerminalProjection = terminalProjectionForTask(
+  const refreshedSettledProjection = settledProjectionForTask(
     observer,
     resolvedTaskId,
     projectionCountBeforeReload,
   );
-  expect(refreshedTerminalProjection.status).toBe(initialTerminalProjection.status);
-  expect(refreshedTerminalProjection.binding).toEqual(initialTerminalProjection.binding);
+  expect(refreshedSettledProjection.status).toBe(initialSettledProjection.status);
+  expect(refreshedSettledProjection.binding).toEqual(initialSettledProjection.binding);
+  expect(refreshedSettledProjection.stageSignature).toBe(
+    initialSettledProjection.stageSignature,
+  );
 
   if (visibleFailure !== null) {
     expect(refreshedFailure).toBe(visibleFailure);
-    expect(refreshedTerminalProjection.errorSignature).toBe(
-      initialTerminalProjection.errorSignature,
+    expect(refreshedSettledProjection.errorSignature).toBe(
+      initialSettledProjection.errorSignature,
     );
     throw new Error(`Real Product flow failed: ${visibleFailure}`);
   }
@@ -162,6 +234,8 @@ interface ProductProjectionObservation {
   status: string;
   binding: AgentStreamBinding | null;
   errorSignature: string | null;
+  stageSignature: string | null;
+  stageNames: string[];
 }
 
 interface OfficialAgentRead {
@@ -264,12 +338,15 @@ async function inspectProductProjection(
   const errorSignature = status === "failed"
     ? failureErrorSignature(projection.errors)
     : null;
+  const stageHistory = inspectStageHistory(projection.stage_history, status);
 
   observer.productProjections.push({
     taskId,
     status,
     binding,
     errorSignature,
+    stageSignature: stageHistory?.signature ?? null,
+    stageNames: stageHistory?.stageNames ?? [],
   });
 }
 
@@ -359,7 +436,134 @@ function failureErrorSignature(value: unknown) {
   return JSON.stringify(errors);
 }
 
-function terminalProjectionForTask(
+function inspectStageHistory(value: unknown, taskStatus: string) {
+  if (value === null || value === undefined) {
+    if (terminalProductStatuses.has(taskStatus)) {
+      throw new Error(`terminal Product projection ${taskStatus} must contain stage_history`);
+    }
+    return null;
+  }
+  if (!isRecord(value)) throw new Error("stage_history must be an object");
+
+  requiredUuid(value.run_id, "stage_history.run_id");
+  if (!Array.isArray(value.stages)) throw new Error("stage_history.stages must be an array");
+
+  let previousSequence = 0;
+  const stages = value.stages.map((item, index) => {
+    const path = `stage_history.stages[${index}]`;
+    if (!isRecord(item)) throw new Error(`${path} must be an object`);
+    const allowedKeys = new Set(["sequence", "stage", "status", "recorded_at", "source"]);
+    const unsafeKey = Object.keys(item).find((key) => !allowedKeys.has(key));
+    if (unsafeKey !== undefined) throw new Error(`${path}.${unsafeKey} is not public`);
+    if (!Number.isInteger(item.sequence) || (item.sequence as number) <= previousSequence) {
+      throw new Error(`${path}.sequence must be positive, unique, and ascending`);
+    }
+    previousSequence = item.sequence as number;
+    const stage = requiredString(item.stage, `${path}.stage`);
+    const status = requiredString(item.status, `${path}.status`);
+    if (!productStageNames.has(stage)) throw new Error(`${path}.stage is unsupported`);
+    if (!productStageStatuses.has(status)) throw new Error(`${path}.status is unsupported`);
+    requiredTimestamp(item.recorded_at, `${path}.recorded_at`);
+    if (item.source !== "official_stream" && item.source !== "product_projection") {
+      throw new Error(`${path}.source is unsupported`);
+    }
+    return { sequence: previousSequence, stage, status, source: item.source };
+  });
+
+  const expectedCursor = stages.length === 0 ? null : previousSequence;
+  if (value.product_event_cursor !== expectedCursor) {
+    throw new Error("stage_history.product_event_cursor must identify the last stage");
+  }
+  const hasOfficialCursor = typeof value.official_stream_cursor === "string"
+    && value.official_stream_cursor.trim().length > 0;
+  const hasOfficialCursorAt = typeof value.official_stream_cursor_at === "string"
+    && Number.isFinite(Date.parse(value.official_stream_cursor_at));
+  if (hasOfficialCursor !== hasOfficialCursorAt) {
+    throw new Error("stage_history official cursor and timestamp must be paired");
+  }
+
+  if (terminalProductStatuses.has(taskStatus)) {
+    const terminal = stages.findLast((stage) => stage.stage === "run");
+    if (terminal?.status !== taskStatus) {
+      throw new Error("terminal Product projection must contain its persisted run stage");
+    }
+  }
+  return {
+    signature: JSON.stringify(stages),
+    stageNames: [...new Set(stages.map((stage) => stage.stage))],
+  };
+}
+
+async function waitForRunningDurableProjection(
+  page: Page,
+  observer: FlowObserver,
+  taskId: string,
+) {
+  const deadline = Date.now() + 60_000;
+  let inspected = 0;
+  while (Date.now() < deadline) {
+    await settleProductResponseInspections(observer);
+    const projections = observer.productProjections.slice(inspected);
+    inspected = observer.productProjections.length;
+    for (const projection of projections) {
+      if (projection.taskId !== taskId) continue;
+      if (terminalProductStatuses.has(projection.status)) {
+        throw new Error(
+          "real flow reached terminal status before a non-terminal persisted stage could be reloaded",
+        );
+      }
+      if (projection.stageNames.length > 0) {
+        if (projection.binding === null) {
+          throw new Error("non-terminal persisted stage must retain its official stream binding");
+        }
+        return projection;
+      }
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error(
+    "timed out before observing stage_history with a queued/running/waiting_human status",
+  );
+}
+
+function assertRunningReloadStillEligible(
+  observer: FlowObserver,
+  expected: ProductProjectionObservation,
+) {
+  const latest = observer.productProjections.findLast(
+    (projection) => projection.taskId === expected.taskId,
+  );
+  if (
+    latest === undefined
+    || terminalProductStatuses.has(latest.status)
+    || latest.stageNames.length === 0
+  ) {
+    throw new Error(
+      "real flow became terminal before the running-stage reload; refusing terminal fallback",
+    );
+  }
+  expect(latest.binding).toEqual(expected.binding);
+}
+
+async function waitForFirstTaskProjection(
+  page: Page,
+  observer: FlowObserver,
+  taskId: string,
+  startIndex: number,
+) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await settleProductResponseInspections(observer);
+    const projection = observer.productProjections
+      .slice(startIndex)
+      .find((candidate) => candidate.taskId === taskId);
+    if (projection !== undefined) return projection;
+    await page.waitForTimeout(100);
+  }
+  throw new Error("reload did not recover the same Product Task projection");
+}
+
+function settledProjectionForTask(
   observer: FlowObserver,
   taskId: string,
   startIndex = 0,
@@ -367,10 +571,10 @@ function terminalProjectionForTask(
   const projections = observer.productProjections
     .slice(startIndex)
     .filter((projection) =>
-      projection.taskId === taskId && terminalProductStatuses.has(projection.status));
+      projection.taskId === taskId && settledProductStatuses.has(projection.status));
   const projection = projections[projections.length - 1];
   if (projection === undefined) {
-    throw new Error(`no terminal Product projection observed for task ${taskId}`);
+    throw new Error(`no settled Product projection observed for task ${taskId}`);
   }
   return projection;
 }
@@ -524,11 +728,64 @@ async function assertOfficialLiveStreamDom(page: Page) {
   await expect(stream.getByText("执行阶段", { exact: true })).toBeVisible();
 }
 
+async function assertPersistedStagesVisible(page: Page, stageNames: readonly string[]) {
+  expect(stageNames.length).toBeGreaterThan(0);
+  const progress = page.getByTestId("official-run-stream");
+  await expect(progress).toBeVisible({ timeout: 30_000 });
+  for (const stageName of stageNames) {
+    const label = productStageLabels.get(stageName);
+    if (label === undefined) throw new Error(`missing UI label for persisted stage ${stageName}`);
+    await expect(
+      progress.locator(".official-progress-list").getByText(label, { exact: true }),
+    ).toBeVisible();
+  }
+}
+
+async function assertDurableProgressDom(page: Page) {
+  const progress = page.getByTestId("durable-run-progress");
+  await expect(progress).toBeVisible({ timeout: 30_000 });
+  await expect(progress.getByRole("heading", { name: "执行进度" })).toBeVisible();
+  await expect(progress.locator(".official-stream-status")).toHaveText("已保存");
+  await expect(progress.locator(".official-progress-list")).toBeVisible();
+
+  const stages = (await progress.locator(".official-progress-list > li").allTextContents())
+    .map((stage) => stage.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  expect(stages.length).toBeGreaterThan(0);
+  expect(stages.some((stage) => stage.includes("执行阶段"))).toBe(true);
+  expect(await progress.innerText()).not.toMatch(
+    /(?:product_event_cursor|official_stream_cursor|run_id|opaque-stream-event)/,
+  );
+  return stages;
+}
+
+async function assertSettledProgressDom(page: Page, settledStatus: string) {
+  if (settledStatus !== "等待人工确认") {
+    return assertDurableProgressDom(page);
+  }
+
+  const progress = page.getByTestId("official-run-stream");
+  await expect(progress).toBeVisible({ timeout: 30_000 });
+  await expect(progress.getByRole("heading", { name: "官方执行进度" })).toBeVisible();
+  await expect(progress.locator(".official-stream-status")).toHaveText("实时同步中");
+  await expect(progress.locator(".official-progress-list")).toBeVisible();
+
+  const stages = (await progress.locator(".official-progress-list > li strong").allTextContents())
+    .map((stage) => stage.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  expect(stages.length).toBeGreaterThan(0);
+  expect(stages).toContain("市场快照");
+  expect(await progress.innerText()).not.toMatch(
+    /(?:product_event_cursor|official_stream_cursor|run_id|opaque-stream-event)/,
+  );
+  return stages;
+}
+
 async function assertNaturalLanguageSuccess(page: Page) {
   const result = page.getByTestId("analysis-result");
   await expect(result).toBeVisible();
-  await expect(result.getByRole("heading", { name: "Evidence" })).toBeVisible();
-  await expect(result.getByRole("heading", { name: "Risk" })).toBeVisible();
+  await expect(result.getByRole("heading", { name: "证据门禁" })).toBeVisible();
+  await expect(result.getByRole("heading", { name: "风险门禁" })).toBeVisible();
   await expect(result.getByRole("heading", { name: "判断依据" })).toBeVisible();
 
   const action = (await result.locator(".decision-summary strong").innerText()).trim();
@@ -543,6 +800,15 @@ async function assertNaturalLanguageSuccess(page: Page) {
   await expect(httpsSource).toBeVisible();
   await expect(httpsSource).toHaveAttribute("href", /^https:\/\//);
   await expect(result.locator("pre")).toHaveCount(0);
+}
+
+async function assertHumanReviewReady(page: Page) {
+  const panel = page.locator("section.hitl-review-panel");
+  await expect(panel).toHaveCount(1);
+  await expect(
+    panel.getByRole("heading", { name: "分析草稿待人工确认", exact: true }),
+  ).toBeVisible();
+  await expect(panel.getByRole("button", { name: "拒绝", exact: true })).toBeEnabled();
 }
 
 async function reportVisibleFailure(

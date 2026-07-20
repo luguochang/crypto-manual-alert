@@ -48,6 +48,16 @@ test("durably cancels a live Product task without browser-side Run commands", as
   );
   await expect(page.getByRole("button", { name: "取消分析" })).toHaveCount(0);
   await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
+  await expect(page.getByTestId("durable-run-progress")).toBeVisible();
+  await expect(
+    page.getByTestId("durable-run-progress").getByRole("heading", { name: "执行进度" }),
+  ).toBeVisible();
+  const terminalRequestBoundary = requests.length;
+  await page.waitForTimeout(1_500);
+  expect(
+    requests.slice(terminalRequestBoundary).filter((request) =>
+      request.pathname.startsWith("/api/agent/")),
+  ).toEqual([]);
 
   const taskUrl = new URL(page.url());
   expect(taskUrl.pathname).toBe("/work");
@@ -78,10 +88,18 @@ test("durably cancels a live Product task without browser-side Run commands", as
     document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(horizontalOverflow).toBeLessThanOrEqual(0);
 
+  const reloadRequestBoundary = requests.length;
   await page.reload();
   await expect(page).toHaveURL(taskUrl.toString());
   await expect(page.getByTestId("task-status").getByRole("heading")).toHaveText(
     "已取消",
     { timeout: 15_000 },
   );
+  await expect(page.getByTestId("official-run-stream")).toHaveCount(0);
+  await expect(page.getByTestId("durable-run-progress")).toBeVisible();
+  await page.waitForTimeout(1_500);
+  expect(
+    requests.slice(reloadRequestBoundary).filter((request) =>
+      request.pathname.startsWith("/api/agent/")),
+  ).toEqual([]);
 });

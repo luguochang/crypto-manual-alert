@@ -56,6 +56,28 @@ def test_market_snapshot_accepts_provider_abbreviations() -> None:
     assert snapshot.candles[0].open == Decimal("64900")
 
 
+def test_market_snapshot_accepts_partial_verified_web_search_fallback() -> None:
+    snapshot = MarketSnapshot.model_validate(
+        {
+            "symbol": "BTC-USDT-SWAP",
+            "fetched_at": "2026-07-17T08:00:00Z",
+            "source_level": "web_search_verified",
+            "ticker": {"last": "65000.25"},
+            "mark_price": None,
+            "index_price": None,
+            "funding_rate": None,
+            "open_interest": None,
+            "order_book": None,
+            "candles": [],
+        }
+    )
+
+    assert snapshot.source_level == "web_search_verified"
+    assert snapshot.ticker is not None
+    assert snapshot.order_book is None
+    assert snapshot.candles == []
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -65,7 +87,9 @@ def test_market_snapshot_accepts_provider_abbreviations() -> None:
         (("candles", 0, "high"), "64800"),
     ],
 )
-def test_market_snapshot_rejects_invalid_provider_values(path: tuple, value: object) -> None:
+def test_market_snapshot_rejects_invalid_provider_values(
+    path: tuple, value: object
+) -> None:
     payload = complete_market_snapshot()
     target = payload
     for key in path[:-1]:

@@ -12,6 +12,9 @@ from crypto_alert_v2.api.agent_server import (
 )
 from crypto_alert_v2.commands.seed_hitl_e2e import (
     ARTIFACT,
+    DEEP_RESEARCH_ARTIFACT,
+    DEEP_RESEARCH_GRAPH_STATE,
+    DEEP_RESEARCH_REQUEST,
     FIXTURE_ASSISTANTS,
     FIXTURE_INTERRUPT_COUNTS,
     GRAPH_STATE,
@@ -21,6 +24,7 @@ from crypto_alert_v2.commands.seed_hitl_e2e import (
     _request_hash,
 )
 from crypto_alert_v2.domain.models import Artifact
+from crypto_alert_v2.domain.deep_research import DeepResearchArtifact
 
 
 @pytest.mark.parametrize(
@@ -98,12 +102,25 @@ def test_seed_state_contains_a_valid_reviewable_artifact() -> None:
 def test_seed_fixture_registry_requires_real_official_interrupt_counts() -> None:
     assert FIXTURE_ASSISTANTS == {
         "canonical": "crypto_analysis",
+        "deep_research": "crypto_analysis",
         "multi_interrupt": "multi_interrupt_fixture",
     }
     assert FIXTURE_INTERRUPT_COUNTS == {
         "canonical": 1,
+        "deep_research": 1,
         "multi_interrupt": 2,
     }
+
+
+def test_seed_deep_research_state_contains_a_typed_reviewable_draft() -> None:
+    artifact = DeepResearchArtifact.model_validate(DEEP_RESEARCH_ARTIFACT)
+
+    assert artifact.status == "draft"
+    assert artifact.report.referenced_source_indexes() == {1}
+    assert DEEP_RESEARCH_GRAPH_STATE["task_type"] == "deep_research"
+    assert DEEP_RESEARCH_GRAPH_STATE["review_policy"] == "required"
+    assert DEEP_RESEARCH_GRAPH_STATE["terminal_status"] == "running"
+    assert len(_request_hash(DEEP_RESEARCH_REQUEST)) == 64
 
 
 def test_interrupt_member_set_hash_uses_root_checkpoint_and_sorted_members() -> None:

@@ -1,0 +1,39 @@
+.headerActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.createLink {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid var(--green);
+  border-radius: 7px;
+  background: var(--green);
+  color: #03110b;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.createLink:hover {
+  border-color: var(--sd-brand-hover);
+  background: var(--sd-brand-hover);
+}
+
+@media (max-width: 820px) {
+  .headerActions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .createLink {
+    width: 100%;
+  }
+}

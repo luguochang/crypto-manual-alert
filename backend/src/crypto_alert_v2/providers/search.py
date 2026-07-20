@@ -1,11 +1,12 @@
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 import ipaddress
-from typing import Any, Protocol
+import re
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from langchain_core.messages import AIMessage
@@ -15,7 +16,7 @@ from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
 from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError
 
-from crypto_alert_v2.domain.models import ResearchBundle
+from crypto_alert_v2.domain.models import ModelExecutionAudit, ResearchBundle
 from crypto_alert_v2.providers.errors import (
     ResearchUnavailable,
     TRANSIENT_MODEL_ERRORS,
@@ -62,6 +63,7 @@ class WebEvidence(BaseModel):
 class ResearchResult:
     bundle: ResearchBundle
     evidence: tuple[WebEvidence, ...]
+    model_audit: ModelExecutionAudit | None = None
 
 
 class BuiltinWebSearchProvider:
@@ -70,26 +72,50 @@ class BuiltinWebSearchProvider:
         model: ChatOpenAI,
         *,
         retry_policy: SearchRetryPolicy | None = None,
+        result_requirements: str | None = None,
+        allow_completed_open_page_evidence: bool = False,
+        evidence_validator: Callable[[list[WebEvidence]], None] | None = None,
     ) -> None:
         self._model = model
         self._retry_policy = retry_policy or SearchRetryPolicy()
+        self._result_requirements = " ".join((result_requirements or "").split())
+        if len(self._result_requirements) > 1000:
+            raise ValueError(
+                "built-in search result requirements exceed 1000 characters"
+            )
+        self._allow_completed_open_page_evidence = allow_completed_open_page_evidence
+        self._evidence_validator = evidence_validator
 
     def search(
         self, query: str, config: RunnableConfig | None = None
     ) -> list[WebEvidence]:
-        prompt = (
-            "You must use web search. Cite only provider-returned URL citation "
-            "annotations. Use no more than four sources and stop once those sources "
-            "are found.\n\n"
-            f"{query}"
-        )
+        provider_query = _compact_search_query(query)
+        if self._allow_completed_open_page_evidence:
+            prompt = (
+                f"{self._result_requirements}\n\n"
+                "Use the web_search tool, open exactly one public source page, and "
+                "include that exact opened HTTPS URL in the final sentence.\n\n"
+                f"Question: {provider_query}"
+            )
+        else:
+            prompt = (
+                "You must use web search. Cite only provider-returned URL citation "
+                "annotations. Write one short factual bullet per source and keep each "
+                "citation on the same bullet as the claim it supports. Use no more than "
+                "four sources and stop once those sources are found.\n\n"
+                f"Search query: {provider_query}"
+            )
+            if self._result_requirements:
+                prompt = f"{prompt}\n\nResult requirements: {self._result_requirements}"
         search_tool_type = "web_search"
 
         def invoke(remaining_seconds: float, _: int) -> list[WebEvidence]:
             nonlocal search_tool_type
             try:
                 bound_search = self._model.bind_tools(
-                    [{"type": search_tool_type}]
+                    [{"type": search_tool_type}],
+                    tool_choice=search_tool_type,
+                    parallel_tool_calls=False,
                 )
                 response = bound_search.invoke(
                     prompt,
@@ -103,11 +129,17 @@ class BuiltinWebSearchProvider:
                     label="built-in web search",
                 ) from exc
             try:
-                return parse_builtin_search_response(
+                evidence = parse_builtin_search_response(
                     query=query,
                     response=response,
                     fetched_at=datetime.now(UTC),
+                    allow_completed_open_page_evidence=(
+                        self._allow_completed_open_page_evidence
+                    ),
                 )
+                if self._evidence_validator is not None:
+                    self._evidence_validator(evidence)
+                return evidence
             except ResearchUnavailable as exc:
                 if exc.error_type in {
                     "UnverifiedServerToolCall",
@@ -141,6 +173,7 @@ class TavilySearchProvider:
         api_key: str | None = None,
         tool: SearchTool | None = None,
         retry_policy: SearchRetryPolicy | None = None,
+        evidence_validator: Callable[[list[WebEvidence]], None] | None = None,
     ) -> None:
         if tool is None:
             if not api_key:
@@ -160,6 +193,7 @@ class TavilySearchProvider:
             )
         self._tool = tool
         self._retry_policy = retry_policy or SearchRetryPolicy()
+        self._evidence_validator = evidence_validator
 
     def search(
         self, query: str, config: RunnableConfig | None = None
@@ -178,11 +212,14 @@ class TavilySearchProvider:
                     provider="tavily",
                     label="Tavily search",
                 ) from exc
-            return parse_tavily_response(
+            evidence = parse_tavily_response(
                 query=query,
                 response=response,
                 fetched_at=datetime.now(UTC),
             )
+            if self._evidence_validator is not None:
+                self._evidence_validator(evidence)
+            return evidence
 
         return self._retry_policy.execute(
             invoke,
@@ -210,11 +247,14 @@ class TavilySearchProvider:
                     provider="tavily",
                     label="Tavily search",
                 ) from exc
-            return parse_tavily_response(
+            evidence = parse_tavily_response(
                 query=query,
                 response=response,
                 fetched_at=datetime.now(UTC),
             )
+            if self._evidence_validator is not None:
+                self._evidence_validator(evidence)
+            return evidence
 
         return await self._retry_policy.execute_async(
             invoke,
@@ -223,8 +263,8 @@ class TavilySearchProvider:
         )
 
 
-class DuckDuckGoSearchProvider:
-    """No-key search through a maintained client behind a LangChain tool."""
+class DdgsMetasearchProvider:
+    """No-key automatic metasearch through DDGS behind a LangChain tool."""
 
     def __init__(
         self,
@@ -232,38 +272,79 @@ class DuckDuckGoSearchProvider:
         proxy: str | None = None,
         tool: SearchTool | None = None,
         retry_policy: SearchRetryPolicy | None = None,
+        evidence_validator: Callable[[list[WebEvidence]], None] | None = None,
+        result_kind: Literal["news", "text"] = "news",
     ) -> None:
+        if result_kind not in {"news", "text"}:
+            raise ValueError("DDGS metasearch result kind must be news or text")
         self._proxy = proxy
         self._tool = tool
         self._retry_policy = retry_policy or SearchRetryPolicy()
+        self._evidence_validator = evidence_validator
+        self._result_kind = result_kind
 
     def search(
         self, query: str, config: RunnableConfig | None = None
     ) -> list[WebEvidence]:
+        provider_query = _compact_search_query(query)
+
         def invoke(remaining_seconds: float, _: int) -> list[WebEvidence]:
-            tool = self._tool or _create_duckduckgo_tool(
+            tool = self._tool or _create_ddgs_metasearch_tool(
                 proxy=self._proxy,
                 timeout=remaining_seconds,
+                result_kind=self._result_kind,
             )
             try:
-                response = tool.invoke({"query": query}, config=config)
+                response = tool.invoke({"query": provider_query}, config=config)
             except Exception as exc:
                 raise _normalize_search_error(
                     exc,
-                    provider="duckduckgo",
-                    label="DuckDuckGo search",
+                    provider="ddgs_metasearch",
+                    label="DDGS metasearch",
                 ) from exc
-            return parse_duckduckgo_response(
+            evidence = parse_ddgs_metasearch_response(
                 query=query,
                 response=response,
                 fetched_at=datetime.now(UTC),
             )
+            if self._evidence_validator is not None:
+                self._evidence_validator(evidence)
+            return evidence
 
         return self._retry_policy.execute(
             invoke,
-            provider="duckduckgo",
+            provider="ddgs_metasearch",
             correlation_id=_search_correlation_id(config),
         )
+
+
+def _compact_search_query(query: str) -> str:
+    """Keep provider URLs bounded while preserving the original evidence query."""
+
+    normalized = " ".join(query.split())
+    if len(normalized) <= 160 and all(ord(char) < 128 for char in normalized):
+        return normalized
+
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", normalized)
+    asset = next(
+        (token.upper() for token in tokens if token.upper() in {"BTC", "ETH", "SOL"}),
+        None,
+    )
+    terms = [
+        "current",
+        *([asset] if asset else []),
+        "cryptocurrency",
+        "market",
+        "macro",
+        "news",
+    ]
+    if not asset:
+        for token in tokens:
+            if token.lower() not in {term.lower() for term in terms}:
+                terms.append(token)
+                break
+
+    return " ".join(terms)[:160].rstrip()
 
 
 def _content_hash(*parts: str) -> str:
@@ -271,11 +352,58 @@ def _content_hash(*parts: str) -> str:
     return sha256(payload).hexdigest()
 
 
+def _citation_excerpt(
+    text: str,
+    annotation: Mapping[str, Any],
+    *,
+    title: str,
+    single_citation: bool,
+) -> str:
+    """Return only the provider text attributable to one citation.
+
+    Responses Web Search can attach several URL citations to one aggregate text
+    block. Persisting that entire block once per URL makes distinct sources appear
+    to contain the same evidence. Prefer the official annotation span and fall back
+    to its containing bullet/sentence. When the provider supplies no offsets, the
+    citation title is the only source-specific text we can safely attribute.
+    """
+
+    start = annotation.get("start_index")
+    end = annotation.get("end_index")
+    if not isinstance(start, int) or isinstance(start, bool):
+        return (_clean_citation_text(text) if single_citation else title)[:1000]
+    if not isinstance(end, int) or isinstance(end, bool):
+        return (_clean_citation_text(text) if single_citation else title)[:1000]
+    if start < 0 or end <= start or start >= len(text):
+        return (_clean_citation_text(text) if single_citation else title)[:1000]
+
+    bounded_end = min(end, len(text))
+    annotated = _clean_citation_text(text[start:bounded_end])
+    if len(annotated) >= 24:
+        return annotated[:1000]
+
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", bounded_end)
+    if line_end < 0:
+        line_end = len(text)
+    line = _clean_citation_text(text[line_start:line_end])
+    if line:
+        return line[:1000]
+    return title[:1000]
+
+
+def _clean_citation_text(value: str) -> str:
+    normalized = " ".join(value.split()).strip()
+    normalized = re.sub(r"^(?:[-*]|\d+[.)])\s+", "", normalized)
+    return normalized.strip()
+
+
 def parse_builtin_search_response(
     *,
     query: str,
     response: AIMessage,
     fetched_at: datetime,
+    allow_completed_open_page_evidence: bool = False,
 ) -> list[WebEvidence]:
     blocks: list[Any] = response.content_blocks
     if not _successful_web_search(blocks):
@@ -294,7 +422,14 @@ def parse_builtin_search_response(
         if not isinstance(block, dict) or block.get("type") != "text":
             continue
         text = str(block.get("text") or "").strip()
-        for annotation in block.get("annotations") or []:
+        annotations = block.get("annotations") or []
+        citation_count = sum(
+            1
+            for annotation in annotations
+            if isinstance(annotation, dict)
+            and annotation.get("type") in {"citation", "url_citation"}
+        )
+        for annotation in annotations:
             if not isinstance(annotation, dict):
                 continue
             if annotation.get("type") not in {"citation", "url_citation"}:
@@ -303,28 +438,110 @@ def parse_builtin_search_response(
             if not _is_public_https_url(url) or url in seen_urls:
                 continue
             title = str(annotation.get("title") or url).strip()
+            excerpt = _citation_excerpt(
+                text,
+                annotation,
+                title=title,
+                single_citation=citation_count == 1,
+            )
             seen_urls.add(url)
             try:
                 item = WebEvidence(
                     query=query,
                     final_url=url,
                     fetched_at=fetched_at,
-                    content_hash=_content_hash(url, title, text),
+                    content_hash=_content_hash(url, title, excerpt),
                     title=title,
                     source="openai_builtin_web_search",
-                    excerpt=text[:1000],
+                    excerpt=excerpt,
                     evidence_relation="supports",
                 )
             except ValidationError:
                 continue
             evidence.append(item)
 
+    if allow_completed_open_page_evidence:
+        for opened_page in _completed_open_page_evidence(
+            query=query,
+            blocks=blocks,
+            fetched_at=fetched_at,
+        ):
+            opened_url = str(opened_page.final_url)
+            evidence = [item for item in evidence if str(item.final_url) != opened_url]
+            evidence.append(opened_page)
     if not evidence:
         raise ResearchUnavailable(
             "built-in web search returned no verified provider URL citation",
             provider="builtin_web_search",
             retryable=False,
             error_type="MissingProviderCitation",
+        )
+    return evidence
+
+
+def _completed_open_page_evidence(
+    *,
+    query: str,
+    blocks: list[Any],
+    fetched_at: datetime,
+) -> list[WebEvidence]:
+    normalized = [_unwrap_content_block(block) for block in blocks]
+    open_page_calls: dict[str, str] = {}
+    for block in normalized:
+        if (
+            not isinstance(block, Mapping)
+            or block.get("type") != "server_tool_call"
+            or block.get("name") != "web_search"
+            or not isinstance(block.get("args"), Mapping)
+        ):
+            continue
+        args = block["args"]
+        call_id = block.get("id")
+        url = args.get("url")
+        if (
+            args.get("type") == "open_page"
+            and isinstance(call_id, str)
+            and isinstance(url, str)
+            and _is_public_https_url(url)
+        ):
+            open_page_calls[call_id] = url
+    completed_urls = {
+        open_page_calls[str(block.get("tool_call_id"))]
+        for block in normalized
+        if isinstance(block, Mapping)
+        and block.get("type") == "server_tool_result"
+        and block.get("status") in {"completed", "success"}
+        and str(block.get("tool_call_id")) in open_page_calls
+    }
+    if not completed_urls:
+        return []
+
+    evidence: list[WebEvidence] = []
+    seen_urls: set[str] = set()
+    for block in normalized:
+        if not isinstance(block, Mapping) or block.get("type") != "text":
+            continue
+        text = _clean_citation_text(str(block.get("text") or ""))
+        matching_urls = [url for url in completed_urls if url in text]
+        if len(matching_urls) != 1 or not text:
+            continue
+        url = matching_urls[0]
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        hostname = urlsplit(url).hostname or url
+        evidence.append(
+            WebEvidence(
+                query=query,
+                final_url=url,
+                fetched_at=fetched_at,
+                content_hash=_content_hash(url, hostname, text),
+                parser_version="openai-responses-open-page-v1",
+                title=hostname,
+                source="openai_builtin_web_search",
+                excerpt=text[:1000],
+                evidence_relation="supports",
+            )
         )
     return evidence
 
@@ -471,7 +688,7 @@ def parse_tavily_response(
     return evidence
 
 
-def parse_duckduckgo_response(
+def parse_ddgs_metasearch_response(
     *,
     query: str,
     response: Any,
@@ -479,8 +696,8 @@ def parse_duckduckgo_response(
 ) -> list[WebEvidence]:
     if not isinstance(response, list):
         raise ResearchUnavailable(
-            "DuckDuckGo search returned an invalid response",
-            provider="duckduckgo",
+            "DDGS metasearch returned an invalid response",
+            provider="ddgs_metasearch",
             retryable=True,
             error_type="InvalidProviderResponse",
         )
@@ -490,7 +707,7 @@ def parse_duckduckgo_response(
     for raw in response:
         if not isinstance(raw, Mapping):
             continue
-        url = str(raw.get("url") or raw.get("link") or "").strip()
+        url = str(raw.get("url") or raw.get("link") or raw.get("href") or "").strip()
         if not _is_public_https_url(url) or url in seen_urls:
             continue
         title = str(raw.get("title") or url).strip()
@@ -505,10 +722,10 @@ def parse_duckduckgo_response(
                 fetched_at=fetched_at,
                 published_at=published_at,
                 content_hash=_content_hash(url, title, excerpt),
-                parser_version="langchain-ddgs-v1",
+                parser_version="ddgs-metasearch-v1",
                 title=title,
                 author=str(raw.get("source") or "").strip() or None,
-                source="duckduckgo",
+                source="ddgs_metasearch",
                 excerpt=excerpt[:1000],
                 evidence_relation="supports",
             )
@@ -519,8 +736,8 @@ def parse_duckduckgo_response(
 
     if not evidence:
         raise ResearchUnavailable(
-            "DuckDuckGo search returned no valid public HTTPS evidence",
-            provider="duckduckgo",
+            "DDGS metasearch returned no valid public HTTPS evidence",
+            provider="ddgs_metasearch",
             retryable=True,
             error_type="EmptyEvidence",
         )
@@ -540,24 +757,26 @@ def _provider_datetime(value: Any, *, fetched_at: datetime) -> datetime | None:
     return parsed if parsed <= fetched_at else None
 
 
-def _create_duckduckgo_tool(
+def _create_ddgs_metasearch_tool(
     *,
     proxy: str | None,
     timeout: float,
+    result_kind: Literal["news", "text"],
 ) -> BaseTool:
-    def search_duckduckgo(query: str) -> list[dict[str, Any]]:
+    def search_ddgs_metasearch(query: str) -> list[dict[str, Any]]:
         from ddgs import DDGS
 
-        return DDGS(proxy=proxy, timeout=max(1, int(timeout))).news(
-            query,
-            max_results=8,
-        )
+        client = DDGS(proxy=proxy, timeout=max(1, int(timeout)))
+        if result_kind == "text":
+            return client.text(query, max_results=8, backend="auto")
+        return client.news(query, max_results=8, backend="auto")
 
     return StructuredTool.from_function(
-        func=search_duckduckgo,
-        name="duckduckgo_search",
+        func=search_ddgs_metasearch,
+        name="ddgs_metasearch",
         description=(
-            "Search current public news with DuckDuckGo and return provider URLs, "
+            f"Search current public {result_kind} results with DDGS automatic "
+            "metasearch and return provider URLs, "
             "titles, excerpts, publication timestamps, and source names."
         ),
     )
@@ -636,7 +855,9 @@ def _is_retryable_search_error(exc: Exception) -> bool:
     if type(exc).__module__.startswith("ddgs."):
         return True
     name = type(exc).__name__.lower()
-    if any(marker in name for marker in ("timeout", "connection", "ratelimit")):
+    if any(
+        marker in name for marker in ("timeout", "connection", "connector", "ratelimit")
+    ):
         return True
     message = str(exc).lower()
     return any(
@@ -654,11 +875,24 @@ def _is_retryable_search_error(exc: Exception) -> bool:
 
 def _retry_after_seconds(exc: Exception) -> float | None:
     direct = getattr(exc, "retry_after", None)
-    if direct is not None:
-        try:
-            return max(0.0, float(direct))
-        except (TypeError, ValueError):
-            pass
+    parsed = _parse_retry_after_value(direct)
+    if parsed is not None:
+        return parsed
+    body = getattr(exc, "body", None)
+    if isinstance(body, Mapping):
+        candidates = [body.get("retry_after"), body.get("retry_after_seconds")]
+        nested_error = body.get("error")
+        if isinstance(nested_error, Mapping):
+            candidates.extend(
+                [
+                    nested_error.get("retry_after"),
+                    nested_error.get("retry_after_seconds"),
+                ]
+            )
+        for candidate in candidates:
+            parsed = _parse_retry_after_value(candidate)
+            if parsed is not None:
+                return parsed
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
     if headers is None:
@@ -676,6 +910,15 @@ def _retry_after_seconds(exc: Exception) -> float | None:
             return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
         except (TypeError, ValueError, OverflowError):
             return None
+
+
+def _parse_retry_after_value(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _search_correlation_id(config: RunnableConfig | None) -> str | None:

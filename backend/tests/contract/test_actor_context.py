@@ -39,6 +39,7 @@ def test_configured_development_actor_strips_identity_fields() -> None:
         tenant_id="compose-tenant",
         workspace_id="compose-workspace",
         user_id="compose-user",
+        identity_issuer="crypto-alert-v2-development",
         roles=("member", "operator"),
         permissions=("analysis:read", "analysis:write"),
     )

@@ -98,7 +98,9 @@ class Candle(DomainModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> Self:
-        if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):
+        if self.high < max(self.open, self.close) or self.low > min(
+            self.open, self.close
+        ):
             raise ValueError("candle OHLC values are inconsistent")
         if self.low > self.high:
             raise ValueError("candle low cannot exceed high")
@@ -108,7 +110,11 @@ class Candle(DomainModel):
 class MarketSnapshot(DomainModel):
     symbol: Symbol
     fetched_at: datetime
-    source_level: Literal["exchange_native"]
+    source_level: Literal[
+        "exchange_native",
+        "web_search_verified",
+        "controlled_dependency",
+    ]
     ticker: Ticker | None = None
     mark_price: PositiveDecimal | None = None
     index_price: PositiveDecimal | None = None
@@ -179,7 +185,9 @@ class EvidenceVerdict(DomainModel):
         if self.sufficient and self.missing_required:
             raise ValueError("sufficient evidence cannot have missing required fields")
         if not self.sufficient and not self.missing_required:
-            raise ValueError("insufficient evidence must identify missing required fields")
+            raise ValueError(
+                "insufficient evidence must identify missing required fields"
+            )
         if not self.sufficient and self.confidence_cap != 0:
             raise ValueError("insufficient evidence must have a zero confidence cap")
         return self
@@ -207,6 +215,30 @@ class RiskVerdict(DomainModel):
         return self
 
 
+class ModelExecutionAudit(DomainModel):
+    """Non-sensitive audit metadata for one official LangChain agent result."""
+
+    prompt_version: str = Field(min_length=1, max_length=128)
+    call_count: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    latency_ms: float = Field(ge=0, allow_inf_nan=False)
+    observation_ids: list[str] = Field(default_factory=list, max_length=32)
+
+
+class ArtifactProvenance(DomainModel):
+    """Auditable provider identity without credentials or runtime internals."""
+
+    market_provider: str = Field(min_length=1, max_length=64)
+    search_provider: str = Field(min_length=1, max_length=128)
+    search_parser_version: str = Field(min_length=1, max_length=128)
+    model_provider: str = Field(min_length=1, max_length=64)
+    model_name: str = Field(min_length=1, max_length=128)
+    model_endpoint_host: str | None = Field(default=None, max_length=255)
+    model_audits: list[ModelExecutionAudit] = Field(default_factory=list)
+
+
 class Artifact(DomainModel):
     artifact_type: Literal["analysis_report"] = "analysis_report"
     schema_version: str = "1.0"
@@ -216,3 +248,4 @@ class Artifact(DomainModel):
     evidence_verdict: EvidenceVerdict
     risk_verdict: RiskVerdict
     source_references: list[str] = Field(default_factory=list)
+    provenance: ArtifactProvenance | None = None

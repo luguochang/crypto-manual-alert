@@ -1,16 +1,25 @@
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+import httpx
+from langgraph_sdk.schema import StreamPart
 from langgraph_sdk.errors import (
     APIConnectionError,
     APITimeoutError,
     ConflictError,
+    InternalServerError,
     NotFoundError,
 )
 
-from crypto_alert_v2.api.schemas import AnalysisSubmission
+from crypto_alert_v2.api.request_identity import (
+    execution_metadata,
+    new_request_id,
+    resolve_request_id,
+    transport_headers,
+)
+from crypto_alert_v2.api.schemas import AnalysisSubmission, ProductSubmission
 from crypto_alert_v2.auth.context import ActorContext
 
 
@@ -37,6 +46,8 @@ RemoteRunStatus = Literal[
     "timeout",
     "interrupted",
 ]
+
+INITIAL_RESUMABLE_EVENT_ID = "0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +103,10 @@ class RemoteForkIndeterminateError(RuntimeError):
     """A checkpoint fork may have succeeded and must only be reconciled."""
 
 
+class RemoteSubmitIndeterminateError(RuntimeError):
+    """A submit create may have succeeded and must only be reconciled."""
+
+
 class AgentServerRunner:
     def __init__(
         self,
@@ -100,17 +115,24 @@ class AgentServerRunner:
         assistant_id: str,
         authorization_provider: Callable[[ActorContext], str] | None = None,
         resume_reconciliation_delays: Sequence[float] = (0.05, 0.2, 0.5),
+        request_id_factory: Callable[[], str] = new_request_id,
     ) -> None:
         if any(delay < 0 for delay in resume_reconciliation_delays):
             raise ValueError("resume reconciliation delays cannot be negative")
         self._client = client
         self._assistant_id = assistant_id
         self._authorization_provider = authorization_provider
+        self._request_id_factory = request_id_factory
         self._resume_reconciliation_delays = tuple(resume_reconciliation_delays)
+        self._indeterminate_starts: set[tuple[str, str, str, str, str]] = set()
         self._indeterminate_resumes: set[tuple[str, str, str, str, str]] = set()
         self._indeterminate_forks: set[tuple[str, str, str, str, str]] = set()
+        self._start_lock = asyncio.Lock()
         self._resume_lock = asyncio.Lock()
         self._fork_lock = asyncio.Lock()
+
+    def _next_request_id(self) -> str:
+        return resolve_request_id(self._request_id_factory())
 
     async def run(
         self,
@@ -118,6 +140,7 @@ class AgentServerRunner:
         actor: ActorContext,
         task_id: str,
         submission: AnalysisSubmission,
+        durability: Literal["sync", "exit"] = "sync",
     ) -> RemoteRunResult:
         handle = await self.start(
             actor=actor,
@@ -125,6 +148,8 @@ class AgentServerRunner:
             product_thread_id=None,
             product_run_id=task_id,
             submission=submission,
+            task_type="market_analysis",
+            durability=durability,
         )
         output = await self.join(handle)
         return RemoteRunResult(
@@ -140,10 +165,36 @@ class AgentServerRunner:
         task_id: str,
         product_thread_id: str | None,
         product_run_id: str,
-        submission: AnalysisSubmission,
+        submission: ProductSubmission,
+        task_type: Literal["market_analysis", "deep_research"] = "market_analysis",
         review_policy: Literal["bypass", "required"] = "bypass",
+        durability: Literal["sync", "exit"] = "sync",
     ) -> RemoteRunHandle:
-        metadata = {
+        async with self._start_lock:
+            return await self._start_once(
+                actor=actor,
+                task_id=task_id,
+                product_thread_id=product_thread_id,
+                product_run_id=product_run_id,
+                submission=submission,
+                task_type=task_type,
+                review_policy=review_policy,
+                durability=durability,
+            )
+
+    async def _start_once(
+        self,
+        *,
+        actor: ActorContext,
+        task_id: str,
+        product_thread_id: str | None,
+        product_run_id: str,
+        submission: ProductSubmission,
+        task_type: Literal["market_analysis", "deep_research"],
+        review_policy: Literal["bypass", "required"],
+        durability: Literal["sync", "exit"],
+    ) -> RemoteRunHandle:
+        base_metadata = {
             "tenant_id": actor.tenant_id,
             "workspace_id": actor.workspace_id,
             "user_id": actor.user_id,
@@ -154,7 +205,18 @@ class AgentServerRunner:
                 else {}
             ),
             "task_id": task_id,
+            "task_type": task_type,
             "product_run_id": product_run_id,
+        }
+        thread_request_id = self._next_request_id()
+        metadata = {
+            **base_metadata,
+            **execution_metadata(
+                task_id=task_id,
+                request_id=thread_request_id,
+                operation="submit",
+                product_run_id=product_run_id,
+            ),
         }
         thread_options: dict[str, Any] = {
             "metadata": metadata,
@@ -165,9 +227,10 @@ class AgentServerRunner:
             if self._authorization_provider is not None
             else None
         )
-        headers = {"authorization": authorization} if authorization else None
-        if headers is not None:
-            thread_options["headers"] = headers
+        thread_options["headers"] = transport_headers(
+            request_id=thread_request_id,
+            authorization=authorization,
+        )
         if product_thread_id is not None:
             thread_options.update(
                 thread_id=product_thread_id,
@@ -175,6 +238,13 @@ class AgentServerRunner:
             )
         thread = await self._client.threads.create(**thread_options)
         thread_id = str(thread["thread_id"])
+        start_key = (
+            actor.tenant_id,
+            actor.workspace_id,
+            actor.user_id,
+            thread_id,
+            product_run_id,
+        )
         if product_thread_id is not None:
             existing = await self._find_existing_run(
                 actor=actor,
@@ -184,22 +254,112 @@ class AgentServerRunner:
                 authorization=authorization,
             )
             if existing is not None:
+                self._indeterminate_starts.discard(start_key)
                 return existing
+        if start_key in self._indeterminate_starts:
+            existing = await self._reconcile_existing_run(
+                actor=actor,
+                task_id=task_id,
+                product_run_id=product_run_id,
+                thread_id=thread_id,
+                authorization=authorization,
+            )
+            if existing is not None:
+                self._indeterminate_starts.discard(start_key)
+                return existing
+            raise RemoteSubmitIndeterminateError(
+                "Agent Server submit creation remains indeterminate; refusing a "
+                "duplicate create"
+            )
+        run_request_id = self._next_request_id()
+        run_metadata = {
+            **base_metadata,
+            "thread_id": thread_id,
+            **execution_metadata(
+                task_id=task_id,
+                request_id=run_request_id,
+                operation="submit",
+                product_run_id=product_run_id,
+            ),
+        }
+        request_payload = submission.model_dump(mode="json")
+        if task_type == "deep_research":
+            request_payload["task_type"] = "deep_research"
         run_options: dict[str, Any] = {
             "input": {
-                "request": submission.model_dump(mode="json"),
+                "request": request_payload,
                 "review_policy": review_policy,
             },
-            "durability": "sync",
-            "metadata": metadata,
+            "durability": durability,
+            "stream_mode": ["updates", "custom"],
+            "stream_resumable": True,
+            "if_not_exists": "reject",
+            "multitask_strategy": "reject",
+            "metadata": run_metadata,
+            "headers": transport_headers(
+                request_id=run_request_id,
+                authorization=authorization,
+            ),
         }
-        if headers is not None:
-            run_options["headers"] = headers
-        run = await self._client.runs.create(
-            thread_id,
-            self._assistant_id,
-            **run_options,
-        )
+        created_run: dict[str, str] = {}
+
+        def remember_created_run(created: Mapping[str, Any]) -> None:
+            run_id = created.get("run_id")
+            created_thread_id = created.get("thread_id")
+            if (
+                isinstance(run_id, str)
+                and run_id.strip()
+                and (created_thread_id is None or created_thread_id == thread_id)
+            ):
+                created_run["run_id"] = run_id.strip()
+
+        run_options["on_run_created"] = remember_created_run
+        try:
+            run = await self._client.runs.create(
+                thread_id,
+                self._assistant_id,
+                **run_options,
+            )
+        except (APIConnectionError, InternalServerError, httpx.TransportError) as exc:
+            if accepted_run_id := created_run.get("run_id"):
+                self._indeterminate_starts.discard(start_key)
+                return RemoteRunHandle(
+                    assistant_id=self._assistant_id,
+                    thread_id=thread_id,
+                    run_id=accepted_run_id,
+                    authorization=authorization,
+                )
+            if isinstance(
+                exc,
+                (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+            ):
+                raise
+            self._indeterminate_starts.add(start_key)
+            try:
+                existing = await self._reconcile_existing_run(
+                    actor=actor,
+                    task_id=task_id,
+                    product_run_id=product_run_id,
+                    thread_id=thread_id,
+                    authorization=authorization,
+                )
+            except (
+                APIConnectionError,
+                InternalServerError,
+                httpx.TransportError,
+            ) as reconcile_exc:
+                raise RemoteSubmitIndeterminateError(
+                    "Agent Server submit reconciliation is unavailable; refusing "
+                    "a duplicate create"
+                ) from reconcile_exc
+            if existing is not None:
+                self._indeterminate_starts.discard(start_key)
+                return existing
+            raise RemoteSubmitIndeterminateError(
+                "Agent Server submit creation is indeterminate after bounded "
+                "reconciliation; refusing a duplicate create"
+            ) from exc
+        self._indeterminate_starts.discard(start_key)
         run_id = str(run["run_id"])
         return RemoteRunHandle(
             assistant_id=_required_remote_id(run, "assistant_id"),
@@ -261,6 +421,7 @@ class AgentServerRunner:
                 checkpoint_id=checkpoint_id,
             )
 
+            request_id = self._next_request_id()
             metadata = {
                 "tenant_id": actor.tenant_id,
                 "workspace_id": actor.workspace_id,
@@ -273,13 +434,24 @@ class AgentServerRunner:
                 ),
                 "task_id": task_id,
                 "product_run_id": product_run_id,
+                "thread_id": handle.thread_id,
                 "forked_from_official_run_id": handle.run_id,
                 "forked_from_checkpoint_id": checkpoint_id,
+                **execution_metadata(
+                    task_id=task_id,
+                    request_id=request_id,
+                    operation="fork",
+                    product_run_id=product_run_id,
+                    parent_official_run_id=handle.run_id,
+                    checkpoint_id=checkpoint_id,
+                ),
             }
             options: dict[str, Any] = {
                 "input": None,
                 "checkpoint_id": checkpoint_id,
                 "durability": "sync",
+                "stream_mode": ["updates", "custom"],
+                "stream_resumable": True,
                 "metadata": metadata,
             }
             created_run: dict[str, str] = {}
@@ -295,8 +467,10 @@ class AgentServerRunner:
                     created_run["run_id"] = run_id.strip()
 
             options["on_run_created"] = remember_created_run
-            if authorization:
-                options["headers"] = {"authorization": authorization}
+            options["headers"] = transport_headers(
+                request_id=request_id,
+                authorization=authorization,
+            )
             try:
                 run = await self._client.runs.create(
                     handle.thread_id,
@@ -437,6 +611,25 @@ class AgentServerRunner:
             **_authorization_options(handle),
         )
 
+    async def join_stream(
+        self,
+        handle: RemoteRunHandle,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[StreamPart]:
+        resume_after = last_event_id or INITIAL_RESUMABLE_EVENT_ID
+        async for part in self._client.runs.join_stream(
+            handle.thread_id,
+            handle.run_id,
+            cancel_on_disconnect=False,
+            stream_mode=["updates"],
+            last_event_id=resume_after,
+            **_authorization_options(handle),
+        ):
+            if not isinstance(part, StreamPart):
+                raise RuntimeError("Agent Server returned an invalid stream event")
+            yield part
+
     async def get_interrupts(
         self,
         handle: RemoteRunHandle,
@@ -501,14 +694,6 @@ class AgentServerRunner:
             if self._authorization_provider is not None
             else None
         )
-        metadata = {
-            "tenant_id": actor.tenant_id,
-            "workspace_id": actor.workspace_id,
-            "user_id": actor.user_id,
-            "task_id": task_id,
-            "product_run_id": product_run_id,
-            "resume_of_official_run_id": handle.run_id,
-        }
         resume_key = (
             actor.tenant_id,
             actor.workspace_id,
@@ -551,9 +736,28 @@ class AgentServerRunner:
             response=response,
             checkpoint_id=checkpoint_id,
         )
+        request_id = self._next_request_id()
+        metadata = {
+            "tenant_id": actor.tenant_id,
+            "workspace_id": actor.workspace_id,
+            "user_id": actor.user_id,
+            "task_id": task_id,
+            "product_run_id": product_run_id,
+            "thread_id": handle.thread_id,
+            "resume_of_official_run_id": handle.run_id,
+            **execution_metadata(
+                task_id=task_id,
+                request_id=request_id,
+                operation="resume",
+                product_run_id=product_run_id,
+                parent_official_run_id=handle.run_id,
+            ),
+        }
         options: dict[str, Any] = {
             "command": {"resume": resume_mapping},
             "durability": "sync",
+            "stream_mode": ["updates", "custom"],
+            "stream_resumable": True,
             "multitask_strategy": "reject",
             "metadata": metadata,
         }
@@ -570,8 +774,10 @@ class AgentServerRunner:
                 created_run["run_id"] = run_id.strip()
 
         options["on_run_created"] = remember_created_run
-        if authorization:
-            options["headers"] = {"authorization": authorization}
+        options["headers"] = transport_headers(
+            request_id=request_id,
+            authorization=authorization,
+        )
         try:
             run = await self._client.runs.create(
                 handle.thread_id,
@@ -1046,4 +1252,5 @@ __all__ = [
     "RemoteRunResult",
     "RemoteRunState",
     "RemoteRunStatus",
+    "RemoteSubmitIndeterminateError",
 ]

@@ -97,7 +97,10 @@ def valid_market_analysis(**overrides: object) -> dict:
         "position_size_class": "light",
         "max_leverage": 2,
         "risk_pct": 0.10,
-        "root_cause_chain": ["Price reclaimed resistance", "Liquidity supports continuation"],
+        "root_cause_chain": [
+            "Price reclaimed resistance",
+            "Liquidity supports continuation",
+        ],
         "why_not_opposite": "The bearish invalidation has not triggered.",
         "invalidation": "Close below 64500.",
         "manual_execution_required": True,

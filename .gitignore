@@ -12,6 +12,7 @@ dist/
 .ruff_cache/
 .mypy_cache/
 .langgraph_api/
+**/.langgraph-*.json
 .tmp/
 *.egg-info/
 .venv/
@@ -54,7 +55,8 @@ frontend/npm-debug.log*
 frontend/yarn-error.log*
 
 # Generated test reports and local proof artifacts
-artifacts/
+/artifacts/
+/frontend/artifacts/
 test-results/
 playwright-report/
 frontend/test-results/

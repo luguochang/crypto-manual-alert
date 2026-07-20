@@ -129,9 +129,9 @@ def test_structured_model_routes_to_chat_completions_transport() -> None:
             output_version="responses/v1",
             max_retries=0,
         )
-        structured = as_chat_completions_model(
-            responses_model
-        ).with_structured_output(TransportStructuredResult)
+        structured = as_chat_completions_model(responses_model).with_structured_output(
+            TransportStructuredResult
+        )
 
         result = structured.invoke("Return supported true.")
     finally:
@@ -169,6 +169,8 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
     clock = Clock()
     timeouts: list[float] = []
     tool_types: list[str] = []
+    tool_choices: list[object] = []
+    parallel_tool_calls: list[object] = []
     generations = [
         AIMessage(content=[{"type": "text", "text": "No provider evidence."}]),
         AIMessage(
@@ -197,10 +199,10 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
         del self, messages, stop, run_manager
         timeouts.append(float(kwargs["timeout"]))
         tool_types.append(kwargs["tools"][0]["type"])
+        tool_choices.append(kwargs["tool_choice"])
+        parallel_tool_calls.append(kwargs["parallel_tool_calls"])
         clock.advance(0.25)
-        return ChatResult(
-            generations=[ChatGeneration(message=generations.pop(0))]
-        )
+        return ChatResult(generations=[ChatGeneration(message=generations.pop(0))])
 
     monkeypatch.setattr(ChatOpenAI, "_generate", fake_generate)
     model = ChatOpenAI(
@@ -224,8 +226,13 @@ def test_official_bound_chat_model_receives_per_attempt_search_timeout(
 
     assert evidence
     assert tool_types == ["web_search", "web_search_preview"]
+    assert tool_choices == [
+        {"type": "web_search"},
+        {"type": "web_search_preview"},
+    ]
+    assert parallel_tool_calls == [False, False]
     assert len(timeouts) == 2
-    assert 0 < timeouts[1] < timeouts[0] <= 10
+    assert timeouts == pytest.approx([4.0, 3.875])
 
 
 def test_openai_transport_receives_search_budget_as_actual_request_timeout() -> None:
@@ -303,9 +310,7 @@ def test_openai_transport_receives_search_budget_as_actual_request_timeout() -> 
     assert request_paths == ["/v1/responses"]
     assert len(request_timeouts) == 1
     assert request_timeouts[0]
-    assert all(
-        0 < timeout <= 30 for timeout in request_timeouts[0].values()
-    )
+    assert all(0 < timeout <= 30 for timeout in request_timeouts[0].values())
 
 
 @pytest.mark.parametrize(
@@ -395,7 +400,7 @@ def test_explicit_tavily_provider_requires_its_key() -> None:
         collector.collect("bounded research")
 
 
-def test_explicit_duckduckgo_provider_uses_the_official_collector(
+def test_explicit_ddgs_metasearch_provider_uses_the_named_collector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import crypto_alert_v2.agents.research as research_module
@@ -403,13 +408,13 @@ def test_explicit_duckduckgo_provider_uses_the_official_collector(
     selected = RecordingResearchCollector()
     monkeypatch.setattr(
         research_module,
-        "DuckDuckGoResearchCollector",
+        "DdgsMetasearchResearchCollector",
         lambda _, **__: selected,
     )
     collector = CapabilityAwareResearchCollector(
         object(),  # type: ignore[arg-type]
         tavily_api_key=None,
-        provider=SearchProvider.DUCKDUCKGO,
+        provider=SearchProvider.DDGS_METASEARCH,
     )
 
     result = collector.collect("bounded research")
@@ -452,11 +457,137 @@ def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
         readiness.selected_provider = SearchProvider.TAVILY  # type: ignore[misc]
 
 
+def test_auto_readiness_falls_back_to_connected_tavily() -> None:
+    readiness = establish_search_readiness(
+        model=object(),  # type: ignore[arg-type]
+        model_name="capability-test",
+        base_url=None,
+        tavily_api_key="configured-tavily-key",
+        capability_probe=lambda _: ready_capabilities(
+            builtin_web_search_invoked=False,
+            builtin_web_search_citation_count=0,
+        ),
+        tavily_probe=lambda _: True,
+        requested_provider=None,
+    )
+
+    assert readiness.selected_provider is SearchProvider.TAVILY
+    assert readiness.tavily_connected is True
+
+
+def test_explicit_builtin_readiness_cannot_fall_back_to_tavily() -> None:
+    capabilities = ready_capabilities(
+        builtin_web_search_invoked=False,
+        builtin_web_search_citation_count=0,
+    )
+    tavily_probe_calls = 0
+
+    def unexpected_tavily_probe(_: str) -> bool:
+        nonlocal tavily_probe_calls
+        tavily_probe_calls += 1
+        return True
+
+    with pytest.raises(SearchReadinessError, match="built-in web search"):
+        establish_search_readiness(
+            model=object(),  # type: ignore[arg-type]
+            model_name="capability-test",
+            base_url=None,
+            tavily_api_key="configured-tavily-key",
+            capability_probe=lambda _: capabilities,
+            tavily_probe=unexpected_tavily_probe,
+            requested_provider=SearchProvider.BUILTIN,
+        )
+
+    assert tavily_probe_calls == 0
+
+
+def test_explicit_tavily_readiness_is_selected_even_when_builtin_is_ready() -> None:
+    tavily_probe_calls: list[str] = []
+
+    def tavily_probe(api_key: str) -> bool:
+        tavily_probe_calls.append(api_key)
+        return True
+
+    readiness = establish_search_readiness(
+        model=object(),  # type: ignore[arg-type]
+        model_name="capability-test",
+        base_url=None,
+        tavily_api_key="configured-tavily-key",
+        capability_probe=lambda _: ready_capabilities(),
+        tavily_probe=tavily_probe,
+        requested_provider=SearchProvider.TAVILY,
+    )
+
+    assert readiness.selected_provider is SearchProvider.TAVILY
+    assert readiness.tavily_connected is True
+    assert tavily_probe_calls == ["configured-tavily-key"]
+
+
 @pytest.mark.asyncio
-async def test_explicit_duckduckgo_readiness_is_probed_and_frozen() -> None:
+async def test_explicit_tavily_async_readiness_requires_its_key() -> None:
+    async def unexpected_tavily_probe(_: str) -> bool:
+        raise AssertionError("Tavily connectivity cannot run without a key")
+
+    with pytest.raises(SearchReadinessError, match="Tavily is not configured"):
+        await establish_search_readiness_async(
+            model=object(),  # type: ignore[arg-type]
+            model_name="capability-test",
+            base_url=None,
+            tavily_api_key=None,
+            capability_probe=lambda _: ready_capabilities(),
+            tavily_probe=unexpected_tavily_probe,
+            requested_provider=SearchProvider.TAVILY,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_tavily_async_readiness_probes_and_selects_tavily() -> None:
+    tavily_probe_calls: list[str] = []
+
+    async def tavily_probe(api_key: str) -> bool:
+        tavily_probe_calls.append(api_key)
+        return True
+
+    readiness = await establish_search_readiness_async(
+        model=object(),  # type: ignore[arg-type]
+        model_name="capability-test",
+        base_url=None,
+        tavily_api_key="configured-tavily-key",
+        capability_probe=lambda _: ready_capabilities(),
+        tavily_probe=tavily_probe,
+        requested_provider=SearchProvider.TAVILY,
+    )
+
+    assert readiness.selected_provider is SearchProvider.TAVILY
+    assert readiness.tavily_connected is True
+    assert tavily_probe_calls == ["configured-tavily-key"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_builtin_async_readiness_cannot_select_tavily() -> None:
+    async def unexpected_tavily_probe(_: str) -> bool:
+        raise AssertionError("explicit builtin cannot probe Tavily")
+
+    with pytest.raises(SearchReadinessError, match="built-in web search"):
+        await establish_search_readiness_async(
+            model=object(),  # type: ignore[arg-type]
+            model_name="capability-test",
+            base_url=None,
+            tavily_api_key="configured-tavily-key",
+            capability_probe=lambda _: ready_capabilities(
+                builtin_web_search_invoked=False,
+                builtin_web_search_citation_count=0,
+            ),
+            tavily_probe=unexpected_tavily_probe,
+            requested_provider=SearchProvider.BUILTIN,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_ddgs_metasearch_readiness_is_probed_and_frozen() -> None:
     probe_proxies: list[str | None] = []
 
-    async def duckduckgo_probe(proxy: str | None) -> bool:
+    async def ddgs_metasearch_probe(proxy: str | None) -> bool:
         probe_proxies.append(proxy)
         return True
 
@@ -469,23 +600,25 @@ async def test_explicit_duckduckgo_readiness_is_probed_and_frozen() -> None:
             builtin_web_search_invoked=False,
             builtin_web_search_citation_count=0,
         ),
-        requested_provider=SearchProvider.DUCKDUCKGO,
-        duckduckgo_probe=duckduckgo_probe,
+        requested_provider=SearchProvider.DDGS_METASEARCH,
+        ddgs_metasearch_probe=ddgs_metasearch_probe,
         search_http_proxy="http://127.0.0.1:7890",
         now=lambda: datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
     )
 
-    assert readiness.selected_provider is SearchProvider.DUCKDUCKGO
-    assert readiness.duckduckgo_connected is True
+    assert readiness.selected_provider is SearchProvider.DDGS_METASEARCH
+    assert readiness.ddgs_metasearch_connected is True
     assert readiness.tavily_connected is False
     assert probe_proxies == ["http://127.0.0.1:7890"]
+    assert readiness.model_dump(mode="json")["selected_provider"] == ("ddgs_metasearch")
+    assert "duckduckgo" not in str(readiness.model_dump(mode="json")).lower()
 
 
-def test_duckduckgo_readiness_requires_a_successful_provider_probe() -> None:
-    with pytest.raises(ValidationError, match="DuckDuckGo"):
+def test_ddgs_metasearch_readiness_requires_a_successful_provider_probe() -> None:
+    with pytest.raises(ValidationError, match="DDGS metasearch"):
         SearchReadiness(
             status="ready",
-            selected_provider=SearchProvider.DUCKDUCKGO,
+            selected_provider=SearchProvider.DDGS_METASEARCH,
             probed_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
             model="capability-test",
             endpoint="https://model.example",
@@ -495,13 +628,32 @@ def test_duckduckgo_readiness_requires_a_successful_provider_probe() -> None:
         )
 
 
+def test_strict_ddgs_metasearch_selection_fails_when_connectivity_probe_fails() -> None:
+    with pytest.raises(SearchReadinessError, match="DDGS metasearch"):
+        establish_search_readiness(
+            model=object(),  # type: ignore[arg-type]
+            model_name="capability-test",
+            base_url="https://model.example/v1",
+            tavily_api_key=None,
+            capability_probe=lambda _: ready_capabilities(),
+            requested_provider=SearchProvider.DDGS_METASEARCH,
+            ddgs_metasearch_probe=lambda _: False,
+        )
+
+
 def test_failed_builtin_without_tavily_fails_readiness() -> None:
     capabilities = ready_capabilities(
         builtin_web_search_invoked=False,
         builtin_web_search_citation_count=0,
+        failures=(
+            {"capability": "builtin_web_search", "error_type": "APITimeoutError"},
+        ),
     )
 
-    with pytest.raises(SearchReadinessError, match="Tavily is not configured"):
+    with pytest.raises(
+        SearchReadinessError,
+        match=r"built-in web search was not invoked \(APITimeoutError\).*Tavily is not configured",
+    ):
         establish_search_readiness(
             model=object(),  # type: ignore[arg-type]
             model_name="capability-test",
@@ -516,9 +668,7 @@ def test_readiness_drops_malformed_endpoint_metadata_without_leaking() -> None:
     readiness = establish_search_readiness(
         model=object(),  # type: ignore[arg-type]
         model_name="capability-test",
-        base_url=(
-            "https://user:password@model.example:secret-port/v1?token=secret"
-        ),
+        base_url=("https://user:password@model.example:secret-port/v1?token=secret"),
         tavily_api_key=None,
         capability_probe=lambda _: ready_capabilities(),
         tavily_probe=lambda _: True,

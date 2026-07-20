@@ -88,9 +88,10 @@ def test_interrupt_pause_model_enforces_aggregate_identity_and_scope() -> None:
 
     unique_columns = _unique_column_sets(table)
     assert frozenset({"run_id", "pause_version"}) in unique_columns
-    assert frozenset(
-        {"run_id", "root_checkpoint_ns", "root_checkpoint_id"}
-    ) in unique_columns
+    assert (
+        frozenset({"run_id", "root_checkpoint_ns", "root_checkpoint_id"})
+        in unique_columns
+    )
     assert frozenset({"resume_run_id"}) in unique_columns
 
     run_scope = constraints["fk_interrupt_pauses_run_scope"]
@@ -140,7 +141,9 @@ def test_interrupt_pause_membership_is_unique_scope_safe_and_bidirectional() -> 
     constraints = {constraint.name: constraint for constraint in table.constraints}
 
     assert table.c.pause_id.nullable is False
-    assert frozenset({"pause_id", "official_interrupt_id"}) in _unique_column_sets(table)
+    assert frozenset({"pause_id", "official_interrupt_id"}) in _unique_column_sets(
+        table
+    )
 
     pause_scope = constraints["fk_interrupt_inbox_pause_scope"]
     assert isinstance(pause_scope, ForeignKeyConstraint)
@@ -176,12 +179,17 @@ def test_interrupt_pause_tables_compile_with_postgresql_constraints() -> None:
         CreateTable(InterruptProjection.__table__).compile(dialect=postgresql.dialect())
     )
 
-    assert "CONSTRAINT uq_interrupt_pauses_run_version UNIQUE (run_id, pause_version)" in pause_sql
+    assert (
+        "CONSTRAINT uq_interrupt_pauses_run_version UNIQUE (run_id, pause_version)"
+        in pause_sql
+    )
     assert (
         "CONSTRAINT uq_interrupt_pauses_root_checkpoint UNIQUE "
         "(run_id, root_checkpoint_ns, root_checkpoint_id)"
     ) in pause_sql
-    assert "CONSTRAINT uq_interrupt_pauses_resume_run UNIQUE (resume_run_id)" in pause_sql
+    assert (
+        "CONSTRAINT uq_interrupt_pauses_resume_run UNIQUE (resume_run_id)" in pause_sql
+    )
     assert "CONSTRAINT fk_interrupt_pauses_run_scope FOREIGN KEY" in pause_sql
     assert "CONSTRAINT fk_interrupt_pauses_resume_scope FOREIGN KEY" in pause_sql
     assert (
@@ -191,7 +199,9 @@ def test_interrupt_pause_tables_compile_with_postgresql_constraints() -> None:
     assert "CONSTRAINT fk_interrupt_inbox_pause_scope FOREIGN KEY" in projection_sql
 
 
-def test_interrupt_pause_revision_backfills_legacy_rows_and_preserves_compatibility() -> None:
+def test_interrupt_pause_revision_backfills_legacy_rows_and_preserves_compatibility() -> (
+    None
+):
     revision = _load_revision()
     assert revision.revision == "0007_interrupt_pauses"
     assert len(revision.revision) <= 32
@@ -210,9 +220,7 @@ def test_interrupt_pause_revision_backfills_legacy_rows_and_preserves_compatibil
     assert "Resolve or cancel the listed work before retrying" in upgrade_sql
     assert "revision 0007" in upgrade_sql
     assert "CREATE TABLE app.interrupt_pauses (" in upgrade_sql
-    assert (
-        "ALTER TABLE app.interrupt_inbox ADD COLUMN pause_id UUID;" in upgrade_sql
-    )
+    assert "ALTER TABLE app.interrupt_inbox ADD COLUMN pause_id UUID;" in upgrade_sql
     assert "INSERT INTO app.interrupt_pauses" in upgrade_sql
     assert "'{}'::jsonb AS root_checkpoint_map" in upgrade_sql
     assert "sha256(" in upgrade_sql
@@ -232,7 +240,10 @@ def test_interrupt_pause_revision_backfills_legacy_rows_and_preserves_compatibil
     ) in upgrade_sql
     assert "UPDATE app.interrupt_inbox AS inbox" in upgrade_sql
     assert "duplicate legacy interrupt membership was found" in upgrade_sql
-    assert "ALTER TABLE app.interrupt_inbox ALTER COLUMN pause_id SET NOT NULL" in upgrade_sql
+    assert (
+        "ALTER TABLE app.interrupt_inbox ALTER COLUMN pause_id SET NOT NULL"
+        in upgrade_sql
+    )
     assert (
         "ALTER TABLE app.interrupt_inbox ADD CONSTRAINT "
         "fk_interrupt_inbox_pause_scope FOREIGN KEY"

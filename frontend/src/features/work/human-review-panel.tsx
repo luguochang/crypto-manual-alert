@@ -25,10 +25,12 @@ import {
 
 import {
   interruptResponseSchema,
+  type AnalysisPendingInterrupt,
+  type ArtifactReviewPayload,
   type InterruptResponse,
-  type OfficialReviewPayload,
   type PendingInterrupt,
 } from "@/lib/schemas/product-api";
+import { stableFingerprint } from "@/lib/stable-fingerprint";
 
 export type ReviewAction = "approve" | "reject" | "edit";
 type ReviewMode = ReviewAction | null;
@@ -64,7 +66,7 @@ export type ReviewEditFormValues = {
 };
 
 type HumanReviewPanelProps = {
-  interrupt: PendingInterrupt;
+  interrupt: Pick<AnalysisPendingInterrupt, "payload" | "status">;
   expiresAt: string | null;
   disabled?: boolean;
   phase?: ReviewSubmissionPhase;
@@ -92,11 +94,16 @@ export function reviewItemIdentity(
   interrupt: Pick<PendingInterrupt, "payload">,
   position: { index: number; total: number },
 ): string {
-  const analysis = interrupt.payload.artifact.analysis;
+  const symbol = interrupt.payload.kind === "artifact_review"
+    ? interrupt.payload.artifact.analysis.instrument
+    : interrupt.payload.symbol;
+  const horizon = interrupt.payload.kind === "artifact_review"
+    ? interrupt.payload.artifact.analysis.horizon
+    : interrupt.payload.horizon;
   return [
     `审核项 ${position.index}/${position.total}`,
-    analysis.instrument,
-    analysis.horizon,
+    symbol,
+    horizon,
     `第 ${interrupt.payload.review_iteration} 轮`,
   ].join("，");
 }
@@ -203,7 +210,7 @@ export function resolveReviewDeadlineHint(
   const seconds = remainingSeconds % 60;
   return {
     countdown: hours > 0
-      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+      ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
       : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`,
     locallyElapsed: false,
   };
@@ -215,7 +222,7 @@ export function isServerExpiredReviewConflict(status: number, message: string) {
 
 export function buildEditResponse(
   values: ReviewEditFormValues,
-  payload: OfficialReviewPayload,
+  payload: ArtifactReviewPayload,
   comment: string,
 ): InterruptResponse {
   const rootCauseChain = values.rootCauseChain
@@ -248,7 +255,7 @@ export function buildEditResponse(
     why_not_opposite: analysis.why_not_opposite,
     invalidation: analysis.invalidation,
   };
-  if (JSON.stringify(response.edits) === JSON.stringify(original)) {
+  if (stableFingerprint(response.edits) === stableFingerprint(original)) {
     throw new Error("请至少修改一个审核字段后再提交。 ");
   }
   return response;
@@ -725,7 +732,7 @@ function ReviewSources({
   );
 }
 
-function ReviewStateBadge({
+export function ReviewStateBadge({
   state,
   deadline,
   announce,
@@ -775,7 +782,7 @@ function ReviewStateBadge({
   );
 }
 
-function ReviewStateNotice({ state, message }: { state: ReviewInteractionState; message: string | null }) {
+export function ReviewStateNotice({ state, message }: { state: ReviewInteractionState; message: string | null }) {
   if (state === "pending") return null;
   const copy: Record<Exclude<ReviewInteractionState, "pending">, string> = {
     responding: "决定已持久化，Product 服务正在恢复 Agent 执行并同步新的运行状态。",
@@ -790,7 +797,7 @@ function ReviewStateNotice({ state, message }: { state: ReviewInteractionState; 
   return <p className="hitl-state-notice" data-state={state} role={state === "conflict" || state === "network_error" ? "alert" : "status"}>{copy[state]}</p>;
 }
 
-function editValuesFromPayload(payload: OfficialReviewPayload): ReviewEditFormValues {
+function editValuesFromPayload(payload: ArtifactReviewPayload): ReviewEditFormValues {
   const analysis = payload.artifact.analysis;
   return {
     mainAction: analysis.main_action,
@@ -829,7 +836,7 @@ function normalizedComment(comment: string): string | null {
   return normalized || null;
 }
 
-function reviewActionLabel(action: InterruptResponse["action"]): string {
+export function reviewActionLabel(action: InterruptResponse["action"]): string {
   if (action === "approve") return "批准";
   if (action === "reject") return "拒绝";
   return "修改";
