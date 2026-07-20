@@ -2,7 +2,7 @@
 
 > authority_class: informative
 >
-> 审计时点：2026-07-20（Asia/Shanghai）；当前本地 HEAD/base 为 `e9def238edbf1e04ef809d75a1eb293a4a81e310`，远端 `origin/codex/v2-production-completion` 仍为 `2cf676ad48b0f49337c79573a233cd85c3d342c8`；当前结论基于本地 HEAD 之后的 dirty、未提交工作树
+> 当前交接校正：2026-07-20（Asia/Shanghai）；规范实现分支为 `codex/v2-production-completion`，稳定的完整代码 checkpoint 为 `6739f817c648c233944c86c99ae1d9cfa9fb0b37`。当前远程 HEAD 必须通过 `git fetch --all --prune`、`git switch codex/v2-production-completion`、`git pull --ff-only origin codex/v2-production-completion` 后现场确认。本文后续较早日期的段落保留当时的审计上下文，其中出现的“未提交”“旧 HEAD”或“未 push”只表示对应历史时点，不代表当前 Git 状态。
 >
 > 本文只记录当前工作树的实施状态和证据边界，不修改、替代或追认 `13-v2-final-rebuild-spec.md` 与 `14-v2-final-implementation-plan.md` 的 normative 要求。
 
