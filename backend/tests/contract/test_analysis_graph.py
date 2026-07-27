@@ -868,12 +868,26 @@ def test_research_query_has_a_bounded_source_budget() -> None:
 
     assert len(research.queries) == 1
     assert research.queries[0] == (
-        "Assess current BTC risk and opportunity.\n"
-        "Asset: BTC\n"
-        "Market: cryptocurrency\n"
-        "Analysis horizon: 4h"
+        "BTC cryptocurrency market analysis 4h\n"
+        "User question: Assess current BTC risk and opportunity."
     )
     assert "BTC-USDT-SWAP" not in research.queries[0]
+
+
+def test_research_query_leads_with_asset_context_for_generic_user_text() -> None:
+    runtime = valid_runtime()
+    research = runtime.research_collector
+    assert isinstance(research, FakeResearchCollector)
+    payload = valid_input()
+    request = payload["request"]
+    assert isinstance(request, dict)
+    request["query_text"] = "给出目前的操作"
+
+    graph.invoke(payload, context=runtime)
+
+    assert research.queries == [
+        "BTC cryptocurrency market analysis 4h\nUser question: 给出目前的操作"
+    ]
 
 
 def test_research_timeout_is_a_retryable_product_failure() -> None:

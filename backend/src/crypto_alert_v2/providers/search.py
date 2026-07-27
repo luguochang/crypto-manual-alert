@@ -9,11 +9,13 @@ import re
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
+import httpx
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
 from langchain_tavily import TavilySearch
+from langchain_tavily.tavily_search import TavilySearchAPIWrapper
 from pydantic import BaseModel, ConfigDict, HttpUrl, ValidationError
 
 from crypto_alert_v2.domain.models import ModelExecutionAudit, ResearchBundle
@@ -166,6 +168,58 @@ class SearchTool(Protocol):
     ) -> Any: ...
 
 
+class _ProxyTavilySearchAPIWrapper(TavilySearchAPIWrapper):
+    """Keep the official Tavily tool while routing its API calls explicitly."""
+
+    proxy: str
+
+    def raw_results(self, **kwargs: Any) -> dict[str, Any]:
+        params = {key: value for key, value in kwargs.items() if value is not None}
+        headers = {
+            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
+            "Content-Type": "application/json",
+            "X-Client-Source": "langchain-tavily",
+        }
+        base_url = self.api_base_url or "https://api.tavily.com"
+        with httpx.Client(proxy=self.proxy, timeout=None) as client:
+            response = client.post(
+                f"{base_url}/search",
+                json=params,
+                headers=headers,
+            )
+        if response.status_code != 200:
+            detail = response.json().get("detail", {})
+            error = detail.get("error") if isinstance(detail, dict) else "Unknown error"
+            raise ValueError(f"Error {response.status_code}: {error}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Tavily returned a non-object response")
+        return payload
+
+    async def raw_results_async(self, **kwargs: Any) -> dict[str, Any]:
+        params = {key: value for key, value in kwargs.items() if value is not None}
+        headers = {
+            "Authorization": f"Bearer {self.tavily_api_key.get_secret_value()}",
+            "Content-Type": "application/json",
+            "X-Client-Source": "langchain-tavily",
+        }
+        base_url = self.api_base_url or "https://api.tavily.com"
+        async with httpx.AsyncClient(proxy=self.proxy, timeout=None) as client:
+            response = await client.post(
+                f"{base_url}/search",
+                json=params,
+                headers=headers,
+            )
+        if response.status_code != 200:
+            detail = response.json().get("detail", {})
+            error = detail.get("error") if isinstance(detail, dict) else "Unknown error"
+            raise ValueError(f"Error {response.status_code}: {error}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Tavily returned a non-object response")
+        return payload
+
+
 class TavilySearchProvider:
     def __init__(
         self,
@@ -174,6 +228,8 @@ class TavilySearchProvider:
         tool: SearchTool | None = None,
         retry_policy: SearchRetryPolicy | None = None,
         evidence_validator: Callable[[list[WebEvidence]], None] | None = None,
+        proxy: str | None = None,
+        search_depth: Literal["basic", "advanced"] = "advanced",
     ) -> None:
         if tool is None:
             if not api_key:
@@ -183,16 +239,28 @@ class TavilySearchProvider:
                     retryable=False,
                     error_type="MissingConfiguration",
                 )
+            api_wrapper = (
+                _ProxyTavilySearchAPIWrapper(
+                    tavily_api_key=api_key,
+                    proxy=proxy,
+                )
+                if proxy
+                else None
+            )
             tool = TavilySearch(
                 tavily_api_key=api_key,
                 max_results=8,
                 topic="finance",
-                search_depth="advanced",
+                search_depth=search_depth,
                 include_raw_content=False,
                 handle_tool_error=False,
             )
+            if api_wrapper is not None:
+                object.__setattr__(tool, "api_wrapper", api_wrapper)
         self._tool = tool
-        self._retry_policy = retry_policy or SearchRetryPolicy()
+        self._retry_policy = retry_policy or SearchRetryPolicy(
+            first_attempt_budget_share=2 / 3
+        )
         self._evidence_validator = evidence_validator
 
     def search(

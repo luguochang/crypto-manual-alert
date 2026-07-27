@@ -1,16 +1,20 @@
 "use client";
 
-import { BriefcaseBusiness, History, Home, Inbox, Library, Radar, Settings } from "lucide-react";
+import { BarChart3, Brain, BriefcaseBusiness, Gauge, GitCompareArrows, History, Home, Inbox, Library, Radar, Settings } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const items = [
+  { label: "Usage", icon: Gauge, href: "/usage" },
   { label: "首页", icon: Home, href: "/home" },
   { label: "工作台", icon: BriefcaseBusiness, href: "/work" },
   { label: "运行记录", icon: History, href: "/runs" },
   { label: "审核收件箱", icon: Inbox, href: "/inbox" },
   { label: "报告资料库", icon: Library, href: "/library" },
   { label: "持续监控", icon: Radar, href: "/monitors" },
+  { label: "记忆管理", icon: Brain, href: "/memory" },
+  { label: "结果评估", icon: BarChart3, href: "/outcomes" },
+  { label: "受控改进", icon: GitCompareArrows, href: "/improvement" },
   { label: "通知设置", icon: Settings, href: "/settings" },
 ] as const;
 

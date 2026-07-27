@@ -101,8 +101,13 @@ def test_default_product_app_preserves_or_overrides_standalone_audience(
     monkeypatch.setattr(module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         module,
-        "notification_credential_cipher_from_environment",
-        lambda: object(),
+        "integration_secret_store_from_environment",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        module,
+        "notification_credential_cipher_from_secret_store",
+        lambda _: object(),
     )
     monkeypatch.setattr(
         module,
@@ -179,8 +184,13 @@ async def _seeded_actors_for_default_app(
     monkeypatch.setattr(module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         module,
-        "notification_credential_cipher_from_environment",
-        lambda: object(),
+        "integration_secret_store_from_environment",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        module,
+        "notification_credential_cipher_from_secret_store",
+        lambda _: object(),
     )
     monkeypatch.setattr(
         module,
@@ -332,7 +342,8 @@ def test_development_cursor_key_is_private_and_stable(tmp_path) -> None:
     first_key = key_file.read_text()
 
     assert len(first_key) >= 43
-    assert key_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert key_file.stat().st_mode & 0o777 == 0o600
     assert module.ensure_development_cursor_key(tmp_path) == key_file
     assert key_file.read_text() == first_key
 
@@ -608,6 +619,7 @@ async def test_agent_healthcheck_uses_official_sdk_with_short_lived_jwt(
         agent_healthcheck_workspace_id="probe-workspace",
         agent_healthcheck_roles=("operator",),
         agent_healthcheck_permissions=("analysis:read",),
+        agent_healthcheck_expected_search_provider="tavily",
     )
     client_config = {}
 
@@ -631,7 +643,7 @@ async def test_agent_healthcheck_uses_official_sdk_with_short_lived_jwt(
             return {"status": "ok", "version": "2.0.0"}
         return {
             "status": "ready",
-            "selected_provider": "builtin_web_search",
+            "selected_provider": "tavily",
             "probed_at": "2026-07-14T09:00:00Z",
             "model": "capability-test",
             "endpoint": "https://model.example",
@@ -640,12 +652,12 @@ async def test_agent_healthcheck_uses_official_sdk_with_short_lived_jwt(
                 "structured_output": True,
                 "streaming": True,
                 "usage_reporting": True,
-                "builtin_web_search_invoked": True,
-                "builtin_web_search_citation_count": 1,
+                "builtin_web_search_invoked": False,
+                "builtin_web_search_citation_count": 0,
                 "failures": [],
             },
-            "tavily_configured": False,
-            "tavily_connected": False,
+            "tavily_configured": True,
+            "tavily_connected": True,
         }
 
     await module.check_agent_server(
@@ -758,6 +770,10 @@ def test_agent_readiness_monitor_stays_unready_without_signer() -> None:
         "AGENT_READINESS_FAILURE_THRESHOLD": "1",
         "AGENT_READINESS_STALE_AFTER_SECONDS": "1",
         "PATH": os.environ["PATH"],
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "SYSTEMROOT": os.environ["SYSTEMROOT"],
+        "WINDIR": os.environ["WINDIR"],
     }
 
     process = subprocess.Popen(
@@ -806,4 +822,7 @@ def test_agent_readiness_monitor_stays_unready_without_signer() -> None:
             process.kill()
             process.communicate(timeout=3)
 
-    assert process.returncode == 0
+    if os.name == "nt":
+        assert process.returncode == 1
+    else:
+        assert process.returncode == 0

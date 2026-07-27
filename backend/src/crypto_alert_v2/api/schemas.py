@@ -16,11 +16,22 @@ from pydantic import (
 
 from crypto_alert_v2.api.request_identity import correlation_id_for_task
 from crypto_alert_v2.domain.models import (
+    Action,
     Artifact,
     EvidenceVerdict,
     MarketSnapshot,
     RiskVerdict,
     Symbol,
+)
+from crypto_alert_v2.domain.decision_request import (
+    DecisionComplexity,
+    DecisionEntryKind,
+    DecisionIntent,
+    DecisionRequest,
+    DecisionRoute,
+    LiveSideEffectPolicy,
+    PositionContext,
+    RiskContext,
 )
 from crypto_alert_v2.domain.deep_research import DeepResearchArtifact
 from crypto_alert_v2.graph.request import (
@@ -75,6 +86,47 @@ class DeepResearchSubmission(BaseModel):
     @classmethod
     def redact_sensitive_query(cls, value: str) -> str:
         return redact_text(value)
+
+
+class DecisionRequestSubmission(BaseModel):
+    """Untrusted request body; actor and workspace are injected by the server."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    entry_kind: DecisionEntryKind
+    session_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+    intent: DecisionIntent
+    intent_confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    complexity: DecisionComplexity
+    symbol: Symbol | None = None
+    horizon: StrictStr | None = Field(default=None, min_length=1, max_length=32)
+    query_text: StrictStr = Field(min_length=1, max_length=4000)
+    requested_action: Action | None = None
+    position: PositionContext | None = None
+    risk: RiskContext = Field(default_factory=RiskContext)
+    side_effects: LiveSideEffectPolicy = Field(default_factory=LiveSideEffectPolicy)
+    source_reference_id: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+    )
+
+    @field_validator("query_text")
+    @classmethod
+    def redact_sensitive_query(cls, value: str) -> str:
+        return redact_text(value)
+
+    def to_domain_request(
+        self,
+        *,
+        actor_id: str,
+        workspace_id: str,
+    ) -> DecisionRequest:
+        return DecisionRequest(
+            actor_id=actor_id,
+            workspace_id=workspace_id,
+            **self.model_dump(),
+        )
 
 
 class PriceMonitorCondition(BaseModel):
@@ -235,6 +287,61 @@ class MonitorTriggerListView(BaseModel):
     items: list[MonitorTriggerView]
 
 
+class UsageTotalsView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_admission: int = Field(ge=0)
+    trigger: int = Field(ge=0)
+    model_token: int = Field(ge=0)
+    search_request: int = Field(ge=0)
+    runtime_millisecond: int = Field(ge=0)
+    storage_byte: int = Field(ge=0)
+
+
+class UsageEntitlementView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_task_types: list[StrictStr]
+    active_monitor_limit: int = Field(ge=0)
+    min_interval_seconds: int = Field(ge=1)
+    max_concurrent_tasks: int = Field(ge=1)
+    max_retention_days: int = Field(ge=1)
+    limits: UsageTotalsView
+    valid_from: datetime
+    valid_until: datetime | None = None
+
+
+class UsageReconciliationSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    period_start: datetime | None = None
+    repair: bool = True
+
+
+class UsageReconciliationView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    period_start: datetime
+    status: Literal["reconciled", "discrepant"]
+    source_totals: UsageTotalsView
+    ledger_totals: UsageTotalsView
+    discrepancies: dict[str, dict[str, int]]
+    source_hash: StrictStr = Field(min_length=64, max_length=64)
+    ledger_hash: StrictStr = Field(min_length=64, max_length=64)
+    repair_applied: bool
+    created_at: datetime
+
+
+class UsageGovernanceView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    period_start: datetime
+    entitlement: UsageEntitlementView
+    totals: UsageTotalsView
+    latest_reconciliation: UsageReconciliationView | None = None
+
+
 DATA_LIFECYCLE_SCOPES = frozenset({"user_data"})
 DATA_LIFECYCLE_DELETE_CONFIRMATION = "DELETE MY DATA"
 
@@ -346,6 +453,38 @@ class DataDeletionSubmission(BaseModel):
     confirmation: Literal[DATA_LIFECYCLE_DELETE_CONFIRMATION]
 
 
+class DataDeletionReceiptView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    system: Literal[
+        "product_db",
+        "checkpoint",
+        "store",
+        "object_storage",
+        "search",
+        "langsmith",
+        "langfuse",
+        "logs",
+        "backups",
+    ]
+    phase: Literal["delete", "survivor_scan", "retention_queue"]
+    attempt: int = Field(ge=1)
+    outcome: Literal[
+        "succeeded",
+        "not_applicable",
+        "pending_external",
+        "pending_expiry",
+        "failed",
+    ]
+    affected_count: int = Field(ge=0)
+    survivor_count: int = Field(ge=0)
+    observed_at: datetime
+    reference: dict[str, Any] | None = None
+    evidence: dict[str, Any]
+    receipt_hash: StrictStr = Field(min_length=64, max_length=64)
+
+
 class DataDeletionView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -372,9 +511,132 @@ class DataDeletionView(BaseModel):
     legal_hold_reason: StrictStr | None = None
     system_status: dict[str, StrictStr]
     external_deletion_reference: dict[str, Any]
+    receipts: list[DataDeletionReceiptView] = Field(default_factory=list)
     last_error: StrictStr | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class MemoryCreateSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    scope: Literal["session", "workspace"]
+    session_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+    purpose: Literal[
+        "session_clarification",
+        "profile",
+        "strategy_config",
+        "process_lesson",
+        "event",
+        "badcase",
+    ]
+    key: StrictStr = Field(min_length=1, max_length=128)
+    content: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    expires_at: datetime | None = None
+    refreshed_at: datetime | None = None
+    source_artifact_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def require_scope_and_event_fields(self) -> "MemoryCreateSubmission":
+        if self.scope == "session" and not self.session_id:
+            raise ValueError("session memory requires session_id")
+        if self.scope == "workspace" and self.session_id is not None:
+            raise ValueError("workspace memory cannot have session_id")
+        if self.purpose == "event" and self.refreshed_at is None:
+            raise ValueError("event memory requires refreshed_at")
+        return self
+
+
+class MemoryUpdateSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    content: dict[str, Any] | None = None
+    enabled: bool | None = None
+    expires_at: datetime | None = None
+    refreshed_at: datetime | None = None
+
+
+class MemoryDeleteSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    confirmation: Literal["DELETE_MEMORY"]
+
+
+class MemoryView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    tenant_id: UUID
+    workspace_id: UUID
+    owner_user_id: UUID
+    session_id: StrictStr | None = None
+    scope: Literal["session", "workspace"]
+    purpose: Literal[
+        "session_clarification",
+        "profile",
+        "strategy_config",
+        "process_lesson",
+        "event",
+        "badcase",
+    ]
+    key: StrictStr
+    content: dict[str, Any]
+    enabled: bool
+    expires_at: datetime | None = None
+    refreshed_at: datetime | None = None
+    source_artifact_id: UUID | None = None
+    deleted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemoryListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[MemoryView]
+    limit: int = Field(ge=1, le=100)
+
+
+class MemoryDeleteView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: UUID
+    status: Literal["queued", "running", "succeeded", "failed"]
+    requested_at: datetime
+    completed_at: datetime | None = None
+
+
+class OutcomeView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    artifact_version_id: UUID
+    task_id: UUID
+    run_id: UUID
+    action: Action
+    baseline: Literal["decision", "hold", "no_trade"]
+    status: Literal["scheduled", "pending", "matured", "insufficient", "failed"]
+    predicted_probability: float | None = Field(default=None, ge=0, le=1)
+    realized_label: float | None = Field(default=None, ge=0, le=1)
+    horizon: StrictStr
+    source: Literal["exchange_native"]
+    maturation_at: datetime
+    observed_at: datetime | None = None
+    metrics: dict[str, Any] | None = None
+    source_hash: StrictStr | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class OutcomeListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[OutcomeView]
+    limit: int = Field(ge=1, le=100)
+    reportable: bool
+    sample_count: int = Field(ge=0)
+    window_start: datetime | None = None
 
 
 class ForkSubmission(BaseModel):
@@ -819,6 +1081,14 @@ class TaskView(BaseModel):
         return self
 
 
+class DecisionAdmissionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: DecisionRequest
+    route: DecisionRoute
+    task: TaskView | None = None
+
+
 class RunSummaryView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -882,6 +1152,239 @@ class FeedbackView(BaseModel):
     comment: StrictStr | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class PostmortemSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    category: Literal["operator_postmortem", "evaluation_badcase"] = (
+        "operator_postmortem"
+    )
+    title: StrictStr = Field(min_length=1, max_length=255)
+    summary: StrictStr = Field(min_length=1, max_length=4000)
+    root_cause: StrictStr | None = Field(default=None, max_length=4000)
+    expected_behavior: StrictStr | None = Field(default=None, max_length=4000)
+    actual_behavior: StrictStr | None = Field(default=None, max_length=4000)
+
+
+class FrozenReplayView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    postmortem_id: UUID
+    task_id: UUID
+    run_id: UUID
+    artifact_version_id: UUID | None = None
+    schema_version: Literal["frozen-replay-v1"]
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    allow_live_fetch: Literal[False]
+    allow_live_side_effects: Literal[False]
+    rule_metrics: dict[str, Any]
+    created_at: datetime
+
+
+class PostmortemView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    feedback_id: UUID | None = None
+    task_id: UUID
+    run_id: UUID
+    artifact_version_id: UUID | None = None
+    category: Literal[
+        "negative_feedback", "operator_postmortem", "evaluation_badcase"
+    ]
+    status: Literal["open", "frozen", "closed"]
+    title: StrictStr
+    summary: StrictStr
+    root_cause: StrictStr | None = None
+    expected_behavior: StrictStr | None = None
+    actual_behavior: StrictStr | None = None
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    frozen_replay: FrozenReplayView | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PostmortemListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[PostmortemView]
+    limit: int = Field(ge=1, le=100)
+
+
+class ImprovementDatasetSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: StrictStr = Field(min_length=1, max_length=255)
+    replay_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @field_validator("replay_ids")
+    @classmethod
+    def require_unique_replays(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("replay_ids must be unique")
+        return value
+
+
+class ImprovementDatasetView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    name: StrictStr
+    status: Literal["draft", "frozen"]
+    replay_count: int = Field(ge=1)
+    case_names: list[StrictStr] = Field(min_length=1)
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    frozen_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImprovementDatasetListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ImprovementDatasetView]
+    limit: int = Field(ge=1, le=100)
+
+
+class ImprovementCandidateSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: StrictStr = Field(min_length=1, max_length=255)
+    base_version: StrictStr = Field(min_length=1, max_length=255)
+    candidate_version: StrictStr = Field(min_length=1, max_length=255)
+    rollback_target_version: StrictStr = Field(min_length=1, max_length=255)
+    rationale: StrictStr = Field(min_length=1, max_length=4000)
+    diff: dict[str, Any]
+
+
+class ImprovementExperimentSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    dataset_id: UUID
+    prompt_version: StrictStr = Field(min_length=1, max_length=255)
+    git_revision: StrictStr = Field(min_length=1, max_length=255)
+
+
+class ImprovementExperimentView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    dataset_id: UUID
+    candidate_id: UUID
+    status: Literal["succeeded", "failed"]
+    prompt_version: StrictStr
+    git_revision: StrictStr
+    case_results: list[dict[str, Any]]
+    metrics: dict[str, Any]
+    gate_report: dict[str, Any]
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    completed_at: datetime
+    created_at: datetime
+
+
+class ImprovementReviewDecisionSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    action: Literal["approve", "reject"]
+    comment: StrictStr | None = Field(default=None, min_length=1, max_length=1000)
+
+
+class ImprovementReviewView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    candidate_id: UUID
+    status: Literal["pending", "approved", "rejected"]
+    official_assistant_id: StrictStr | None = None
+    official_thread_id: StrictStr | None = None
+    official_run_id: StrictStr | None = None
+    official_interrupt_id: StrictStr | None = None
+    interrupt_payload: dict[str, Any] | None = None
+    response: dict[str, Any] | None = None
+    decided_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImprovementShadowSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_runs: int = Field(default=1, ge=1, le=100)
+
+
+class ImprovementShadowView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    candidate_id: UUID
+    baseline_version: StrictStr
+    status: Literal["running", "passed", "failed"]
+    minimum_runs: int = Field(ge=1)
+    observed_runs: int = Field(ge=0)
+    comparison: dict[str, Any]
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    completed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImprovementReleaseSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    reason: StrictStr = Field(min_length=1, max_length=4000)
+
+
+class ImprovementReleaseEventView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    candidate_id: UUID
+    action: Literal["promoted", "rolled_back"]
+    from_version: StrictStr
+    to_version: StrictStr
+    rollback_target_version: StrictStr
+    reason: StrictStr
+    evidence: dict[str, Any]
+    source_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    created_at: datetime
+
+
+class ImprovementCandidateView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    name: StrictStr
+    base_version: StrictStr
+    candidate_version: StrictStr
+    rollback_target_version: StrictStr
+    rationale: StrictStr
+    diff: dict[str, Any]
+    version_hash: StrictStr = Field(pattern=r"^[a-f0-9]{64}$")
+    status: Literal[
+        "draft",
+        "evaluated",
+        "pending_review",
+        "approved",
+        "rejected",
+        "shadow",
+        "active",
+        "rolled_back",
+    ]
+    latest_experiment: ImprovementExperimentView | None = None
+    latest_review: ImprovementReviewView | None = None
+    latest_shadow: ImprovementShadowView | None = None
+    release_events: list[ImprovementReleaseEventView] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImprovementCandidateListView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ImprovementCandidateView]
+    limit: int = Field(ge=1, le=100)
 
 
 class RunDetailView(BaseModel):

@@ -56,6 +56,114 @@ export const deepResearchSubmissionSchema = z.strictObject({
   query_text: z.string().trim().min(1).max(4000),
 });
 
+export const decisionEntryKindSchema = z.enum([
+  "manual",
+  "scheduled",
+  "postmortem",
+  "eval",
+  "replay",
+  "system",
+]);
+
+export const decisionIntentSchema = z.enum([
+  "market_analysis",
+  "deep_research",
+  "monitor_review",
+  "postmortem",
+  "evaluation",
+  "replay",
+  "system_query",
+  "unknown",
+]);
+
+export const decisionComplexitySchema = z.enum([
+  "simple_fast",
+  "standard",
+  "deep_research",
+  "eval_replay",
+  "blocked_clarify",
+]);
+
+const decisionPositiveNumberSchema = z.union([
+  z.number().positive(),
+  z.string().trim().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/)
+    .transform(Number)
+    .pipe(z.number().positive()),
+]);
+
+export const positionContextSchema = z.strictObject({
+  side: z.enum(["flat", "long", "short"]),
+  entry_price: decisionPositiveNumberSchema.nullable().optional().default(null),
+  size: decisionPositiveNumberSchema.nullable().optional().default(null),
+  leverage: decisionPositiveNumberSchema.pipe(z.number().max(125)).nullable().optional().default(null),
+});
+
+export const riskContextSchema = z.strictObject({
+  mode: z.enum(["conservative", "balanced", "aggressive"]).default("balanced"),
+  max_loss_quote: decisionPositiveNumberSchema.nullable().optional().default(null),
+  max_position_notional: decisionPositiveNumberSchema.nullable().optional().default(null),
+});
+
+export const liveSideEffectPolicySchema = z.strictObject({
+  live_market_data: z.boolean().default(false),
+  live_web_research: z.boolean().default(false),
+  product_writes: z.boolean().default(false),
+  external_notifications: z.literal(false).default(false),
+  trade_execution: z.literal(false).default(false),
+});
+
+export const decisionRequestSubmissionSchema = z.strictObject({
+  entry_kind: decisionEntryKindSchema,
+  session_id: z.string().trim().min(1).max(255).nullable().optional().default(null),
+  intent: decisionIntentSchema,
+  intent_confidence: z.number().finite().min(0).max(1),
+  complexity: decisionComplexitySchema,
+  symbol: productSymbolSchema.nullable().optional().default(null),
+  horizon: z.string().trim().min(1).max(32).nullable().optional().default(null),
+  query_text: z.string().trim().min(1).max(4000),
+  requested_action: z.enum([
+    "open_long",
+    "open_short",
+    "hold_long",
+    "hold_short",
+    "close_long",
+    "close_short",
+    "flip_long_to_short",
+    "flip_short_to_long",
+    "trigger_long",
+    "trigger_short",
+    "no_trade",
+  ]).nullable().optional().default(null),
+  position: positionContextSchema.nullable().optional().default(null),
+  risk: riskContextSchema.default({
+    mode: "balanced",
+    max_loss_quote: null,
+    max_position_notional: null,
+  }),
+  side_effects: liveSideEffectPolicySchema.default({
+    live_market_data: false,
+    live_web_research: false,
+    product_writes: false,
+    external_notifications: false,
+    trade_execution: false,
+  }),
+  source_reference_id: z.string().trim().min(1).max(255).nullable().optional().default(null),
+});
+
+export const decisionRequestSchema = decisionRequestSubmissionSchema.extend({
+  schema_version: z.literal("1.0"),
+  actor_id: z.string().trim().min(1).max(255),
+  workspace_id: z.string().trim().min(1).max(255),
+});
+
+export const decisionRouteSchema = z.strictObject({
+  status: z.enum(["admitted", "blocked_clarify", "unsupported_mode"]),
+  complexity: decisionComplexitySchema,
+  task_type: taskTypeSchema.nullable().optional().default(null),
+  missing_slots: z.array(z.string().trim().min(1)).default([]),
+  reason: z.string().trim().min(1).max(255),
+});
+
 export const forkSubmissionSchema = z.strictObject({
   source_run_id: z.string().uuid(),
   checkpoint_id: z.string().trim().min(1).max(255).nullable().optional(),
@@ -460,6 +568,36 @@ export const dataExportBundleSchema = z.strictObject({
   bundle: z.record(z.string(), z.unknown()).nullable(),
 });
 
+export const dataDeletionReceiptSchema = z.strictObject({
+  id: z.string().uuid(),
+  system: z.enum([
+    "product_db",
+    "checkpoint",
+    "store",
+    "object_storage",
+    "search",
+    "langsmith",
+    "langfuse",
+    "logs",
+    "backups",
+  ]),
+  phase: z.enum(["delete", "survivor_scan", "retention_queue"]),
+  attempt: z.number().int().positive(),
+  outcome: z.enum([
+    "succeeded",
+    "not_applicable",
+    "pending_external",
+    "pending_expiry",
+    "failed",
+  ]),
+  affected_count: z.number().int().nonnegative(),
+  survivor_count: z.number().int().nonnegative(),
+  observed_at: absoluteTimestampSchema,
+  reference: z.record(z.string(), z.unknown()).nullable(),
+  evidence: z.record(z.string(), z.unknown()),
+  receipt_hash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
 export const dataDeletionSchema = z.strictObject({
   id: z.string().uuid(),
   tenant_id: z.string().uuid(),
@@ -484,6 +622,7 @@ export const dataDeletionSchema = z.strictObject({
   legal_hold_reason: z.string().trim().min(1).max(500).nullable(),
   system_status: z.record(z.string(), z.string().trim().min(1)),
   external_deletion_reference: z.record(z.string(), z.unknown()),
+  receipts: z.array(dataDeletionReceiptSchema).default([]),
   last_error: z.string().trim().min(1).max(500).nullable(),
   created_at: absoluteTimestampSchema,
   updated_at: absoluteTimestampSchema,
@@ -1484,7 +1623,258 @@ export const productTaskSchema = z
     }
   });
 
+export const decisionAdmissionSchema = z.strictObject({
+  request: decisionRequestSchema,
+  route: decisionRouteSchema,
+  task: productTaskSchema.nullable().default(null),
+});
+
+export const memoryPurposeSchema = z.enum([
+  "session_clarification",
+  "profile",
+  "strategy_config",
+  "process_lesson",
+  "event",
+  "badcase",
+]);
+
+export const memorySchema = z.strictObject({
+  id: z.string().uuid(),
+  tenant_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  owner_user_id: z.string().uuid(),
+  session_id: z.string().nullable().default(null),
+  scope: z.enum(["session", "workspace"]),
+  purpose: memoryPurposeSchema,
+  key: z.string().min(1),
+  content: z.record(z.string(), z.unknown()),
+  enabled: z.boolean(),
+  expires_at: timestampSchema.nullable().default(null),
+  refreshed_at: timestampSchema.nullable().default(null),
+  source_artifact_id: z.string().uuid().nullable().default(null),
+  deleted_at: timestampSchema.nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const memoryListSchema = z.strictObject({
+  items: z.array(memorySchema),
+  limit: z.number().int().min(1).max(100),
+});
+
+export const memoryUpdateSchema = z.strictObject({
+  content: z.record(z.string(), z.unknown()).optional(),
+  enabled: z.boolean().optional(),
+  expires_at: timestampSchema.nullable().optional(),
+  refreshed_at: timestampSchema.nullable().optional(),
+});
+
+export const memoryDeleteSchema = z.strictObject({
+  memory_id: z.string().uuid(),
+  status: z.enum(["queued", "running", "succeeded", "failed"]),
+  requested_at: timestampSchema,
+  completed_at: timestampSchema.nullable().default(null),
+});
+
+export const outcomeSchema = z.strictObject({
+  id: z.string().uuid(),
+  artifact_version_id: z.string().uuid(),
+  task_id: z.string().uuid(),
+  run_id: z.string().uuid(),
+  action: actionSchema,
+  baseline: z.enum(["decision", "hold", "no_trade"]),
+  status: z.enum(["scheduled", "pending", "matured", "insufficient", "failed"]),
+  predicted_probability: z.number().min(0).max(1).nullable().default(null),
+  realized_label: z.number().min(0).max(1).nullable().default(null),
+  horizon: z.string().min(1),
+  source: z.literal("exchange_native"),
+  maturation_at: timestampSchema,
+  observed_at: timestampSchema.nullable().default(null),
+  metrics: z.record(z.string(), z.unknown()).nullable().default(null),
+  source_hash: z.string().nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const outcomeListSchema = z.strictObject({
+  items: z.array(outcomeSchema),
+  limit: z.number().int().min(1).max(100),
+  reportable: z.boolean(),
+  sample_count: z.number().int().nonnegative(),
+  window_start: timestampSchema.nullable().default(null),
+});
+
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const improvementDatasetSchema = z.strictObject({
+  id: z.string().uuid(),
+  name: z.string().min(1),
+  status: z.enum(["draft", "frozen"]),
+  replay_count: z.number().int().min(1),
+  case_names: z.array(z.string().min(1)).min(1),
+  source_hash: hashSchema,
+  frozen_at: timestampSchema.nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const improvementDatasetListSchema = z.strictObject({
+  items: z.array(improvementDatasetSchema),
+  limit: z.number().int().min(1).max(100),
+});
+
+export const improvementExperimentSchema = z.strictObject({
+  id: z.string().uuid(),
+  dataset_id: z.string().uuid(),
+  candidate_id: z.string().uuid(),
+  status: z.enum(["succeeded", "failed"]),
+  prompt_version: z.string().min(1),
+  git_revision: z.string().min(1),
+  case_results: z.array(z.record(z.string(), z.unknown())),
+  metrics: z.record(z.string(), z.unknown()),
+  gate_report: z.record(z.string(), z.unknown()),
+  source_hash: hashSchema,
+  completed_at: timestampSchema,
+  created_at: timestampSchema,
+});
+
+export const improvementReviewSchema = z.strictObject({
+  id: z.string().uuid(),
+  candidate_id: z.string().uuid(),
+  status: z.enum(["pending", "approved", "rejected"]),
+  official_assistant_id: z.string().nullable().default(null),
+  official_thread_id: z.string().nullable().default(null),
+  official_run_id: z.string().nullable().default(null),
+  official_interrupt_id: z.string().nullable().default(null),
+  interrupt_payload: z.record(z.string(), z.unknown()).nullable().default(null),
+  response: z.record(z.string(), z.unknown()).nullable().default(null),
+  decided_at: timestampSchema.nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const improvementShadowSchema = z.strictObject({
+  id: z.string().uuid(),
+  candidate_id: z.string().uuid(),
+  baseline_version: z.string().min(1),
+  status: z.enum(["running", "passed", "failed"]),
+  minimum_runs: z.number().int().min(1),
+  observed_runs: z.number().int().nonnegative(),
+  comparison: z.record(z.string(), z.unknown()),
+  source_hash: hashSchema,
+  completed_at: timestampSchema.nullable().default(null),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const improvementReleaseEventSchema = z.strictObject({
+  id: z.string().uuid(),
+  candidate_id: z.string().uuid(),
+  action: z.enum(["promoted", "rolled_back"]),
+  from_version: z.string().min(1),
+  to_version: z.string().min(1),
+  rollback_target_version: z.string().min(1),
+  reason: z.string().min(1),
+  evidence: z.record(z.string(), z.unknown()),
+  source_hash: hashSchema,
+  created_at: timestampSchema,
+});
+
+export const improvementCandidateSchema = z.strictObject({
+  id: z.string().uuid(),
+  name: z.string().min(1),
+  base_version: z.string().min(1),
+  candidate_version: z.string().min(1),
+  rollback_target_version: z.string().min(1),
+  rationale: z.string().min(1),
+  diff: z.record(z.string(), z.unknown()),
+  version_hash: hashSchema,
+  status: z.enum([
+    "draft",
+    "evaluated",
+    "pending_review",
+    "approved",
+    "rejected",
+    "shadow",
+    "active",
+    "rolled_back",
+  ]),
+  latest_experiment: improvementExperimentSchema.nullable().default(null),
+  latest_review: improvementReviewSchema.nullable().default(null),
+  latest_shadow: improvementShadowSchema.nullable().default(null),
+  release_events: z.array(improvementReleaseEventSchema).default([]),
+  created_at: timestampSchema,
+  updated_at: timestampSchema,
+});
+
+export const improvementCandidateListSchema = z.strictObject({
+  items: z.array(improvementCandidateSchema),
+  limit: z.number().int().min(1).max(100),
+});
+
+export const usageTotalsSchema = z.strictObject({
+  agent_admission: z.number().int().nonnegative(),
+  trigger: z.number().int().nonnegative(),
+  model_token: z.number().int().nonnegative(),
+  search_request: z.number().int().nonnegative(),
+  runtime_millisecond: z.number().int().nonnegative(),
+  storage_byte: z.number().int().nonnegative(),
+});
+
+export const usageReconciliationSchema = z.strictObject({
+  id: z.string().uuid(),
+  period_start: timestampSchema,
+  status: z.enum(["reconciled", "discrepant"]),
+  source_totals: usageTotalsSchema,
+  ledger_totals: usageTotalsSchema,
+  discrepancies: z.record(
+    z.string(),
+    z.strictObject({
+      source: z.number().int(),
+      ledger: z.number().int(),
+      delta: z.number().int(),
+    }),
+  ),
+  source_hash: hashSchema,
+  ledger_hash: hashSchema,
+  repair_applied: z.boolean(),
+  created_at: timestampSchema,
+});
+
+export const usageGovernanceSchema = z.strictObject({
+  period_start: timestampSchema,
+  entitlement: z.strictObject({
+    allowed_task_types: z.array(z.string().min(1)),
+    active_monitor_limit: z.number().int().nonnegative(),
+    min_interval_seconds: z.number().int().positive(),
+    max_concurrent_tasks: z.number().int().positive(),
+    max_retention_days: z.number().int().positive(),
+    limits: usageTotalsSchema,
+    valid_from: timestampSchema,
+    valid_until: timestampSchema.nullable(),
+  }),
+  totals: usageTotalsSchema,
+  latest_reconciliation: usageReconciliationSchema.nullable(),
+});
+
 export type AnalysisSubmission = z.infer<typeof analysisSubmissionSchema>;
+export type Memory = z.infer<typeof memorySchema>;
+export type MemoryDelete = z.infer<typeof memoryDeleteSchema>;
+export type MemoryList = z.infer<typeof memoryListSchema>;
+export type MemoryUpdate = z.input<typeof memoryUpdateSchema>;
+export type Outcome = z.infer<typeof outcomeSchema>;
+export type OutcomeList = z.infer<typeof outcomeListSchema>;
+export type ImprovementCandidate = z.infer<typeof improvementCandidateSchema>;
+export type ImprovementCandidateList = z.infer<typeof improvementCandidateListSchema>;
+export type ImprovementDatasetList = z.infer<typeof improvementDatasetListSchema>;
+export type UsageGovernance = z.infer<typeof usageGovernanceSchema>;
+export type UsageReconciliation = z.infer<typeof usageReconciliationSchema>;
+export type UsageTotals = z.infer<typeof usageTotalsSchema>;
+export type DecisionAdmission = z.infer<typeof decisionAdmissionSchema>;
+export type DecisionEntryKind = z.infer<typeof decisionEntryKindSchema>;
+export type DecisionRequest = z.infer<typeof decisionRequestSchema>;
+export type DecisionRequestSubmission = z.input<typeof decisionRequestSubmissionSchema>;
+export type DecisionRoute = z.infer<typeof decisionRouteSchema>;
 export type DeepResearchSubmission = z.infer<typeof deepResearchSubmissionSchema>;
 export type DeepResearchArtifact = z.infer<typeof deepResearchArtifactSchema>;
 export type DeepResearchReport = z.infer<typeof deepResearchReportSchema>;

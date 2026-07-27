@@ -1,4 +1,17 @@
 from crypto_alert_v2.domain.evidence_policy import check_evidence_sufficiency
+from crypto_alert_v2.domain.decision_request import (
+    DecisionComplexity,
+    DecisionEntryKind,
+    DecisionIntent,
+    DecisionRequest,
+    DecisionRoute,
+    LiveSideEffectPolicy,
+    PositionContext,
+    PositionSide,
+    RiskContext,
+    RiskMode,
+    route_decision_request,
+)
 from crypto_alert_v2.domain.models import (
     ALL_ACTIONS,
     OPENING_ACTIONS,
@@ -18,6 +31,20 @@ from crypto_alert_v2.domain.models import (
     Symbol,
     Ticker,
 )
+from crypto_alert_v2.domain.memory import (
+    MemoryInjection,
+    MemoryRecord,
+    memory_expired,
+    safe_memory_injection,
+)
+from crypto_alert_v2.domain.outcome import (
+    OutcomeMetrics,
+    OutcomeObservation,
+    OutcomeWindow,
+    evaluate_outcome,
+    maturation_at,
+    quality_is_reportable,
+)
 from crypto_alert_v2.domain.risk_policy import apply_risk_policy
 
 __all__ = [
@@ -27,17 +54,38 @@ __all__ = [
     "Action",
     "Artifact",
     "Candle",
+    "DecisionComplexity",
+    "DecisionEntryKind",
+    "DecisionIntent",
+    "DecisionRequest",
+    "DecisionRoute",
     "EvidenceVerdict",
     "MarketAnalysis",
     "MarketSnapshot",
+    "MemoryInjection",
+    "MemoryRecord",
+    "LiveSideEffectPolicy",
     "OrderBook",
     "PriceLevel",
+    "PositionContext",
+    "PositionSide",
     "ResearchBundle",
     "ResearchFinding",
     "RiskBudget",
+    "RiskContext",
+    "RiskMode",
     "RiskVerdict",
     "Symbol",
     "Ticker",
+    "OutcomeMetrics",
+    "OutcomeObservation",
+    "OutcomeWindow",
     "apply_risk_policy",
     "check_evidence_sufficiency",
+    "evaluate_outcome",
+    "maturation_at",
+    "memory_expired",
+    "quality_is_reportable",
+    "route_decision_request",
+    "safe_memory_injection",
 ]

@@ -71,6 +71,25 @@ def test_release_gate_blocks_metric_regression_and_missing_version() -> None:
     )
 
 
+def test_release_gate_accepts_an_exact_product_frozen_dataset_case_set() -> None:
+    result = _passing_result()
+    product_cases = tuple(case.case_name for case in result.case_results[:2])
+    product_result = replace(result, case_results=result.case_results[:2])
+
+    approved = evaluate_release_gate(
+        product_result,
+        expected_case_names=product_cases,
+    )
+    rejected = evaluate_release_gate(
+        product_result,
+        expected_case_names=(*product_cases, "missing-frozen-case"),
+    )
+
+    assert approved.approved is True
+    assert rejected.approved is False
+    assert "missing_cases:missing-frozen-case" in rejected.reasons
+
+
 def test_real_platform_credentials_are_a_separate_hard_gate_not_a_skip() -> None:
     gate = assess_real_platform_credentials(
         langsmith_api_key=None,

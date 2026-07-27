@@ -186,6 +186,10 @@ Research subgraph 默认 `checkpointer=None` 继承父图，实现 per-invocatio
    - 使用官方 typed events、message chunks、state updates、task/subgraph stream 和 stream writer；业务 custom event 必须 typed/versioned。
    - raw chunk 只用于调试，不能成为浏览器产品协议。
 2. **Agent Server**
+   - ADR 0011 选择的 Aegra 是 Apache-2.0 社区开源 Agent Protocol Server，不是
+     LangChain 官方商业 Agent Server。本文“官方”约束在该部署下指官方 LangGraph、
+     checkpointer、Protocol/SDK/React API 边界；不得把 Aegra 描述为 LangChain 官方
+     产品，也不得在业务代码中补写 Aegra 尚缺的通用 Runtime 能力。
    - Command 通过 `POST /threads/{thread_id}/commands`。
    - Event 通过 `POST /threads/{thread_id}/stream/events` 或同协议 WebSocket。
    - `since` sequence replay、ordering 和 deduplication 由官方 SDK/Transport 管理。

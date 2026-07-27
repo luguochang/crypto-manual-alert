@@ -207,6 +207,18 @@ def test_search_timeout_cannot_consume_the_entire_budget_before_a_retry() -> Non
     assert clock.now == pytest.approx(30)
 
 
+def test_tavily_advanced_search_can_use_two_thirds_of_first_usable_budget() -> None:
+    policy = SearchRetryPolicy(first_attempt_budget_share=2 / 3)
+
+    assert policy._attempt_timeout_seconds(30, 1) == pytest.approx(18)
+
+
+@pytest.mark.parametrize("share", [0, -0.01, 1.01])
+def test_search_retry_rejects_invalid_first_attempt_budget_share(share: float) -> None:
+    with pytest.raises(ValueError, match="first-attempt budget share"):
+        SearchRetryPolicy(first_attempt_budget_share=share)
+
+
 def test_search_retry_owner_honors_retry_after_inside_the_same_budget() -> None:
     clock = FakeClock()
     attempts = 0

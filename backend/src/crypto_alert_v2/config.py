@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     agent_healthcheck_workspace_id: str = ""
     agent_healthcheck_roles: tuple[str, ...] = ()
     agent_healthcheck_permissions: tuple[str, ...] = ()
+    agent_healthcheck_expected_search_provider: Literal[
+        "builtin_web_search",
+        "tavily",
+        "ddgs_metasearch",
+    ] | None = None
 
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr | None = None

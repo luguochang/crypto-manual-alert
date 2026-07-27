@@ -302,6 +302,25 @@ class InspectingRunner:
         return None
 
 
+class DelayedInterruptProjectionRunner(InspectingRunner):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        super().__init__(session_factory)
+        self.interrupt_failures_remaining = 1
+
+    async def get_interrupts(
+        self,
+        handle: RemoteRunHandle,
+    ) -> RemoteInterruptSet:
+        if self.interrupt_failures_remaining > 0:
+            self.interrupt_failures_remaining -= 1
+            self.events.append("get_interrupts")
+            raise RuntimeError("interrupt checkpoint is not visible yet")
+        return await super().get_interrupts(handle)
+
+
 class LeaseExpiringRunner(InspectingRunner):
     def __init__(
         self,
@@ -3099,6 +3118,56 @@ async def test_interrupted_remote_projects_waiting_human_without_join(
     assert projection.checkpoint_id == "checkpoint-official-run"
     assert projection.payload["kind"] == "artifact_review"
     assert projection.expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_interrupt_projection_retries_after_running_attempts_consumed_budget(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    service, queued = await queue_task(session_factory)
+    clock = MutableClock()
+    runner = DelayedInterruptProjectionRunner(session_factory)
+    runner.remote_status = "running"
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="worker-delayed-interrupt",
+        clock=clock,
+        max_attempts=3,
+        max_run_seconds=60,
+        reconciliation_interval_seconds=2,
+    )
+
+    assert await dispatcher.dispatch_once() is True
+    for _ in range(3):
+        clock.now += timedelta(seconds=3)
+        assert await dispatcher.dispatch_once() is True
+
+    runner.remote_status = "interrupted"
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        command = await session.scalar(
+            select(TaskCommand).where(TaskCommand.task_id == task_id)
+        )
+    assert command is not None
+    assert command.attempt > 3
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "running"
+
+    clock.now += timedelta(seconds=3)
+    assert await dispatcher.dispatch_once() is True
+    view = await service.get_task(actor(), str(task_id))
+    assert view is not None
+    assert view["status"] == "waiting_human"
+    assert runner.events.count("get_interrupts") == 2
 
 
 @pytest.mark.asyncio

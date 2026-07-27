@@ -55,20 +55,77 @@ if [[ ! "$postgres_image" =~ ^postgres:16-alpine@sha256:[0-9a-f]{64}$ ]]; then
   fail "BACKUP_REHEARSAL_POSTGRES_IMAGE must be the pinned PostgreSQL 16 Alpine digest"
 fi
 readonly postgres_image
+source_container="${BACKUP_REHEARSAL_SOURCE_CONTAINER:-}"
+source_client_mode="host-postgresql-client"
+if [[ -n "$source_container" ]]; then
+  [[ "$source_container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+    || fail "BACKUP_REHEARSAL_SOURCE_CONTAINER is invalid"
+  source_client_mode="owned-source-container-client"
+fi
+readonly source_container source_client_mode
 
 for command_name in \
-  awk chmod cmp date dirname docker mktemp mv pg_dump pg_restore psql \
-  python3 rm seq shasum sleep sort wc; do
+  awk chmod cmp date dirname docker mktemp mv rm seq sleep sort wc; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     fail "required command is unavailable: $command_name"
   fi
 done
+python_command="${BACKUP_REHEARSAL_PYTHON:-}"
+if [[ -n "$python_command" ]]; then
+  command -v "$python_command" >/dev/null 2>&1 \
+    || fail "BACKUP_REHEARSAL_PYTHON is unavailable"
+  "$python_command" -c 'pass' >/dev/null 2>&1 \
+    || fail "BACKUP_REHEARSAL_PYTHON is not executable"
+else
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'pass' >/dev/null 2>&1; then
+      python_command="$candidate"
+      break
+    fi
+  done
+  [[ -n "$python_command" ]] \
+    || fail "required Python interpreter is unavailable"
+fi
+readonly python_command
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_command="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_command="shasum"
+else
+  fail "required SHA-256 command is unavailable: sha256sum or shasum"
+fi
+readonly sha256_command
+if [[ -z "$source_container" ]]; then
+  for command_name in pg_dump pg_restore psql; do
+    command -v "$command_name" >/dev/null 2>&1 \
+      || fail "required command is unavailable: $command_name"
+  done
+else
+  source_running="$(
+    docker inspect --format '{{.State.Running}}' "$source_container" 2>/dev/null || true
+  )"
+  [[ "$source_running" == "true" ]] \
+    || fail "BACKUP_REHEARSAL_SOURCE_CONTAINER is not running"
+fi
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    command -v cygpath >/dev/null 2>&1 \
+      || fail "required command is unavailable: cygpath"
+    ;;
+esac
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-alert-v2-backup-rehearsal.XXXXXX")"
 readonly source_environment_file="$work_dir/source-connection.sh"
+source_environment_file_for_python="$source_environment_file"
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    source_environment_file_for_python="$(cygpath -w "$source_environment_file")"
+    ;;
+esac
 if ! SOURCE_DATABASE_URL="$source_conninfo" \
-  SOURCE_ENVIRONMENT_FILE="$source_environment_file" \
-  python3 - <<'PY'
+  SOURCE_ENVIRONMENT_FILE="$source_environment_file_for_python" \
+  "$python_command" - <<'PY'
 from os import getenv
 from pathlib import Path
 import shlex
@@ -154,9 +211,17 @@ ORDER BY namespace.nspname, relation.relname;
 "
 
 source_psql() {
-  PGAPPNAME="crypto-alert-v2-backup-rehearsal" \
-    PGCONNECT_TIMEOUT="5" \
-    psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$@"
+  if [[ -n "$source_container" ]]; then
+    docker exec --interactive \
+      --env PGAPPNAME=crypto-alert-v2-backup-rehearsal \
+      "$source_container" \
+      psql --username "$PGUSER" --dbname "$PGDATABASE" \
+        --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$@"
+  else
+    PGAPPNAME="crypto-alert-v2-backup-rehearsal" \
+      PGCONNECT_TIMEOUT="5" \
+      psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$@"
+  fi
 }
 
 collect_source_inventory() {
@@ -201,22 +266,40 @@ collect_restored_inventory() {
 
 collect_source_inventory "$source_before_file"
 
-if ! PGAPPNAME="crypto-alert-v2-backup-rehearsal" \
-  PGCONNECT_TIMEOUT="5" \
-  pg_dump \
-    --format=custom \
-    --compress=6 \
-    --lock-wait-timeout=5s \
-    --no-owner \
-    --no-privileges \
-    --file="$dump_file" \
-    2>"$source_error_file"; then
-  fail "source pg_dump failed; details suppressed"
+if [[ -n "$source_container" ]]; then
+  if ! docker exec "$source_container" \
+    pg_dump --username "$PGUSER" --dbname "$PGDATABASE" \
+      --format=custom \
+      --compress=6 \
+      --lock-wait-timeout=5s \
+      --no-owner \
+      --no-privileges \
+      >"$dump_file" 2>"$source_error_file"; then
+    fail "source pg_dump failed; details suppressed"
+  fi
+else
+  if ! PGAPPNAME="crypto-alert-v2-backup-rehearsal" \
+    PGCONNECT_TIMEOUT="5" \
+    pg_dump \
+      --format=custom \
+      --compress=6 \
+      --lock-wait-timeout=5s \
+      --no-owner \
+      --no-privileges \
+      --file="$dump_file" \
+      2>"$source_error_file"; then
+    fail "source pg_dump failed; details suppressed"
+  fi
 fi
 if [[ ! -s "$dump_file" ]]; then
   fail "pg_dump produced an empty archive"
 fi
-if ! pg_restore --list "$dump_file" >/dev/null 2>&1; then
+if [[ -n "$source_container" ]]; then
+  if ! docker exec --interactive "$source_container" pg_restore --list \
+    <"$dump_file" >/dev/null 2>&1; then
+    fail "pg_dump archive cannot be listed by pg_restore"
+  fi
+elif ! pg_restore --list "$dump_file" >/dev/null 2>&1; then
   fail "pg_dump archive cannot be listed by pg_restore"
 fi
 
@@ -294,13 +377,18 @@ fi
 table_count="$(wc -l <"$restored_file" | awk '{print $1}')"
 row_count="$(awk -F '\t' '{total += $3} END {printf "%.0f", total}' "$restored_file")"
 archive_bytes="$(wc -c <"$dump_file" | awk '{print $1}')"
-archive_sha256="$(shasum -a 256 "$dump_file" | awk '{print $1}')"
+if [[ "$sha256_command" == "sha256sum" ]]; then
+  archive_sha256="$(sha256sum "$dump_file" | awk '{print $1}')"
+else
+  archive_sha256="$(shasum -a 256 "$dump_file" | awk '{print $1}')"
+fi
 completed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 report="$(printf '%s' \
   "{\"schema_version\":\"2026-07-17.product-backup-restore-rehearsal.v1\"," \
   "\"status\":\"passed\"," \
   "\"proof_level\":\"local-backup-restore-rehearsal\"," \
+  "\"source_client_mode\":\"$source_client_mode\"," \
   "\"completed_at\":\"$completed_at\"," \
   "\"postgres_image\":\"$postgres_image\"," \
   "\"archive_sha256\":\"$archive_sha256\"," \

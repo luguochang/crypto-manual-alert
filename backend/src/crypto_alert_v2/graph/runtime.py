@@ -182,6 +182,11 @@ def _assemble_runtime(
         provider=selected_provider,
         tavily_api_key=tavily_api_key,
         search_http_proxy=settings.search_http_proxy,
+        tavily_fallback_ready=bool(
+            selected_provider is SearchProvider.BUILTIN
+            and search_readiness is not None
+            and search_readiness.tavily_connected
+        ),
     )
     if selected_provider is SearchProvider.BUILTIN:
         deep_research_search = BuiltinWebSearchProvider(model)
@@ -201,12 +206,17 @@ def _assemble_runtime(
             ),
         )
     else:
-        deep_research_search = TavilySearchProvider(api_key=tavily_api_key)
+        deep_research_search = TavilySearchProvider(
+            api_key=tavily_api_key,
+            proxy=settings.search_http_proxy,
+        )
         market_fallback_collector = WebSearchMarketCollector(
             model,
             search=TavilySearchProvider(
                 api_key=tavily_api_key,
                 evidence_validator=require_usd_price_evidence,
+                proxy=settings.search_http_proxy,
+                search_depth="basic",
             ),
         )
     analysis_agent: AnalysisAgent = create_market_analysis_agent(

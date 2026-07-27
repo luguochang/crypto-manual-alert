@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 from json import loads as load_json
@@ -24,6 +25,7 @@ V2_SERVICES = {
     "langgraph-redis",
     "migrate",
     "internal-jwt-keys",
+    "integration-secret-files",
     "development-bootstrap",
     "langgraph-api",
     "langgraph-api-readiness",
@@ -33,7 +35,9 @@ V2_SERVICES = {
 BACKEND_IMAGE_SERVICES = {
     "migrate",
     "internal-jwt-keys",
+    "integration-secret-files",
     "development-bootstrap",
+    "langgraph-api",
     "langgraph-api-readiness",
     "command-worker",
 }
@@ -55,6 +59,41 @@ NESTED_DEPLOYMENT_SECRET_PATHS = (
 )
 
 
+def _bash_executable() -> str:
+    if os.name == "nt":
+        candidates = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "usr"
+            / "bin"
+            / "bash.exe",
+        )
+        match = next((candidate for candidate in candidates if candidate.is_file()), None)
+        assert match is not None, "Git Bash is required for deployment script tests"
+        return str(match)
+    match = shutil.which("bash")
+    assert match is not None, "bash is required for deployment script tests"
+    return match
+
+
+def _bash_path(path: Path) -> str:
+    absolute = path.resolve()
+    if os.name != "nt":
+        return str(absolute)
+    rendered = absolute.as_posix()
+    return f"/{rendered[0].lower()}{rendered[2:]}"
+
+
+def _bash_stub_path(bin_dir: Path) -> str:
+    if os.name == "nt":
+        return f"{_bash_path(bin_dir)}:/usr/bin:/bin"
+    return f"{bin_dir}:{os.environ['PATH']}"
+
+
 def _load_compose() -> dict:
     return yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 
@@ -74,17 +113,13 @@ def _dependency_names(dependencies: list[str]) -> set[str]:
     }
 
 
-def _load_official_dockerfile() -> str:
-    from langgraph_cli import config as langgraph_config
-
-    config_path = ROOT / "backend" / "langgraph.json"
-    config = langgraph_config.validate_config_file(config_path)
-    dockerfile, _ = langgraph_config.config_to_docker(
-        config_path,
-        config,
-        api_version="0.11.0",
-    )
-    return dockerfile
+def _compose_command() -> list[str]:
+    docker = shutil.which("docker")
+    if os.name == "nt" and docker:
+        standalone = Path(docker).with_name("docker-compose.exe")
+        if standalone.is_file():
+            return [str(standalone)]
+    return ["docker", "compose"]
 
 
 def _render_scrubbed_compose(extra_env: dict[str, str]) -> dict:
@@ -93,8 +128,7 @@ def _render_scrubbed_compose(extra_env: dict[str, str]) -> dict:
         service.pop("env_file", None)
     result = subprocess.run(
         [
-            "docker",
-            "compose",
+            *_compose_command(),
             "--project-name",
             COMPOSE_PROJECT,
             "--project-directory",
@@ -108,9 +142,8 @@ def _render_scrubbed_compose(extra_env: dict[str, str]) -> dict:
         cwd=ROOT,
         env={
             "COMPOSE_DISABLE_ENV_FILE": "1",
-            "HOME": os.environ["HOME"],
+            "HOME": os.environ.get("HOME", str(Path.home())),
             "PATH": os.environ["PATH"],
-            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
             "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
             "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS": "{}",
             "INTERNAL_JWT_PUBLIC_KEYS": "{}",
@@ -135,12 +168,12 @@ def _run_stop_script(tmp_path: Path, *arguments: str) -> subprocess.CompletedPro
     )
     docker.chmod(0o755)
     return subprocess.run(
-        ["bash", str(STOP_SCRIPT), *arguments],
+        [_bash_executable(), _bash_path(STOP_SCRIPT), *arguments],
         cwd=ROOT,
         env=os.environ
         | {
-            "PATH": f"{bin_dir}:{os.environ['PATH']}",
-            "DOCKER_CAPTURE": str(capture),
+            "PATH": _bash_stub_path(bin_dir),
+            "DOCKER_CAPTURE": _bash_path(capture),
         },
         capture_output=True,
         text=True,
@@ -159,13 +192,6 @@ def _run_start_script(
         "printf 'docker' >>\"$DOCKER_CAPTURE\"\n"
         "printf '\\t%s' \"$@\" >>\"$DOCKER_CAPTURE\"\n"
         "printf '\\n' >>\"$DOCKER_CAPTURE\"\n"
-        "if [[ \"${1:-}\" == image && \"${2:-}\" == inspect && "
-        "\"${3:-}\" != --format ]]; then exit 1; fi\n"
-        "if [[ \"${1:-}\" == image && \"${2:-}\" == inspect && "
-        "\"${3:-}\" == --format ]]; then\n"
-        "  printf '%s\\n' layer-one layer-two\n"
-        "  if [[ \"${5:-}\" != *@sha256:* ]]; then printf '%s\\n' agent-layer; fi\n"
-        "fi\n"
         "if [[ \"${FAIL_COMPOSE_UP:-0}\" == 1 ]]; then\n"
         "  for argument in \"$@\"; do\n"
         "    if [[ \"$argument\" == up ]]; then exit 42; fi\n"
@@ -174,28 +200,15 @@ def _run_start_script(
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    uv = bin_dir / "uv"
-    uv.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf 'uv' >>\"$UV_CAPTURE\"\n"
-        "printf '\\t%s' \"$@\" >>\"$UV_CAPTURE\"\n"
-        "printf '\\n' >>\"$UV_CAPTURE\"\n"
-        "printf '%s\\n' \"$COMPOSE_PROJECT_NAME\" >\"$PROJECT_CAPTURE\"\n",
-        encoding="utf-8",
-    )
-    uv.chmod(0o755)
     return subprocess.run(
-        ["bash", str(START_SCRIPT)],
+        [_bash_executable(), _bash_path(START_SCRIPT)],
         cwd=ROOT,
         env=os.environ
         | {
-            "PATH": f"{bin_dir}:{os.environ['PATH']}",
-            "DOCKER_CAPTURE": str(tmp_path / "docker-arguments"),
-            "UV_CAPTURE": str(tmp_path / "uv-arguments"),
-            "PROJECT_CAPTURE": str(tmp_path / "compose-project"),
+            "PATH": _bash_stub_path(bin_dir),
+            "DOCKER_CAPTURE": _bash_path(tmp_path / "docker-arguments"),
             "COMPOSE_PROJECT_NAME": "foreign-project",
             "FAIL_COMPOSE_UP": "1" if fail_compose_up else "0",
-            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
             "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
         },
         capture_output=True,
@@ -214,9 +227,13 @@ def test_backend_dockerfile_installs_only_the_locked_production_project():
     assert "PYTHON_BASE_IMAGE" not in dockerfile
     assert "WORKDIR /app/backend" in dockerfile
     assert "COPY backend/pyproject.toml backend/uv.lock ./" in dockerfile
-    assert "uv sync --frozen --no-dev --no-install-project" in dockerfile
+    assert "uv sync --frozen --no-dev --extra aegra --no-install-project" in dockerfile
     assert "COPY backend ./" in dockerfile
-    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "uv sync --frozen --no-dev --extra aegra" in dockerfile
+    assert "ARG PIP_VERSION=26.1.2" in dockerfile
+    assert "ARG LIBLZMA_VERSION=5.8.1-1+deb13u1" in dockerfile
+    assert '"pip==${PIP_VERSION}"' in dockerfile
+    assert '"liblzma5=${LIBLZMA_VERSION}"' in dockerfile
     assert dockerfile.index("COPY backend/pyproject.toml backend/uv.lock ./") < (
         dockerfile.index("COPY backend ./")
     )
@@ -226,17 +243,22 @@ def test_backend_dockerfile_installs_only_the_locked_production_project():
     assert "uvicorn" not in dockerfile
 
 
-def test_production_dependency_closure_excludes_cli_api_and_inmem_runtime():
+def test_production_dependency_closure_selects_aegra_and_excludes_dev_runtime():
     pyproject = tomllib.loads(
         (ROOT / "backend" / "pyproject.toml").read_text(encoding="utf-8")
     )
     production_names = _dependency_names(pyproject["project"]["dependencies"])
+    aegra_names = _dependency_names(pyproject["project"]["optional-dependencies"]["aegra"])
     dev_dependencies = pyproject["dependency-groups"]["dev"]
 
     assert "langgraph-cli" not in production_names
     assert "langgraph-api" not in production_names
+    assert aegra_names == {"aegra-api", "aegra-cli"}
     assert "langgraph-cli[inmem]==0.4.31" in dev_dependencies
     assert "langgraph-api==0.11.1" in dev_dependencies
+    assert pyproject["tool"]["uv"]["conflicts"] == [
+        [{"extra": "aegra"}, {"group": "dev"}]
+    ]
 
     exported = subprocess.run(
         [
@@ -246,6 +268,8 @@ def test_production_dependency_closure_excludes_cli_api_and_inmem_runtime():
             "backend",
             "--frozen",
             "--no-dev",
+            "--extra",
+            "aegra",
             "--no-emit-project",
         ],
         cwd=ROOT,
@@ -253,6 +277,8 @@ def test_production_dependency_closure_excludes_cli_api_and_inmem_runtime():
         text=True,
         check=True,
     ).stdout.lower()
+    assert "aegra-api==0.9.24" in exported
+    assert "aegra-cli==0.9.24" in exported
     assert "langgraph-cli==" not in exported
     assert "langgraph-api==" not in exported
     assert "langgraph-runtime-inmem==" not in exported
@@ -262,10 +288,12 @@ def test_frontend_dockerfile_builds_locked_next_runtime_without_public_upstreams
     dockerfile = (ROOT / "Dockerfile.frontend").read_text(encoding="utf-8")
 
     assert (
-        "FROM node:22-alpine@sha256:"
-        "16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2"
+        "FROM public.ecr.aws/docker/library/node:22@sha256:"
+        "175215a1f306ed5df592434b99cc2019f70624373fe49cb659240a618a846aed"
     ) in dockerfile
-    assert dockerfile.count("FROM node:22-alpine@sha256:") == 3
+    assert dockerfile.count(
+        "FROM public.ecr.aws/docker/library/node:22@sha256:"
+    ) == 3
     assert "NODE_BASE_IMAGE" not in dockerfile
     assert "COPY frontend/package.json frontend/package-lock.json ./" in dockerfile
     assert "RUN npm ci" in dockerfile
@@ -273,6 +301,7 @@ def test_frontend_dockerfile_builds_locked_next_runtime_without_public_upstreams
     assert "ENV NODE_ENV=production" in dockerfile
     assert "NEXT_TELEMETRY_DISABLED=1" in dockerfile
     assert "COPY --from=builder /app/frontend/.next ./.next" in dockerfile
+    assert "COPY --from=builder /app/frontend/public ./public" in dockerfile
     assert "EXPOSE 3001" in dockerfile
     assert (
         'CMD ["npm", "exec", "next", "--", "start", "--hostname", '
@@ -281,15 +310,13 @@ def test_frontend_dockerfile_builds_locked_next_runtime_without_public_upstreams
     assert "NEXT_PUBLIC_" not in dockerfile
 
 
-def test_compose_declares_the_official_durable_v2_topology():
+def test_compose_declares_the_aegra_durable_v2_topology():
     compose = _load_compose()
     services = compose["services"]
 
     assert compose["name"] == COMPOSE_PROJECT
     assert set(services) == V2_SERVICES
-    assert services["langgraph-api"]["image"] == (
-        "${LANGGRAPH_API_LOCAL_IMAGE:-crypto-manual-alert-v2-langgraph-api:local}"
-    )
+    assert services["langgraph-api"]["image"] == "crypto-manual-alert-v2-backend:local"
     assert {
         "postgres",
         "agent-server",
@@ -350,11 +377,37 @@ def test_compose_owns_secure_durable_runtime_fields():
     api = services["langgraph-api"]
 
     assert api["ports"] == ["127.0.0.1:${AGENT_SERVER_PORT:-8123}:8000"]
-    assert api["environment"]["POSTGRES_URI"] == (
-        "${COMPOSE_AGENT_POSTGRES_URI:-postgres://langgraph:langgraph_local@"
+    assert api["environment"]["DATABASE_URL"] == (
+        "${COMPOSE_AGENT_DATABASE_URL:-postgresql://langgraph:langgraph_local@"
         "agent-postgres:5432/langgraph?sslmode=disable}"
     )
-    assert api["environment"]["REDIS_URI"] == "redis://langgraph-redis:6379"
+    assert api["environment"]["REDIS_BROKER_ENABLED"] == "true"
+    assert api["environment"]["REDIS_URL"] == "redis://langgraph-redis:6379/0"
+    assert api["environment"]["WORKER_COUNT"] == "${AEGRA_WORKER_COUNT:-1}"
+    assert api["environment"]["N_JOBS_PER_WORKER"] == "${AEGRA_JOBS_PER_WORKER:-2}"
+    assert api["environment"]["LEASE_DURATION_SECONDS"] == (
+        "${AEGRA_LEASE_DURATION_SECONDS:-30}"
+    )
+    assert api["environment"]["HEARTBEAT_INTERVAL_SECONDS"] == (
+        "${AEGRA_HEARTBEAT_INTERVAL_SECONDS:-10}"
+    )
+    assert api["environment"]["REAPER_INTERVAL_SECONDS"] == (
+        "${AEGRA_REAPER_INTERVAL_SECONDS:-15}"
+    )
+    assert api["environment"]["STUCK_PENDING_THRESHOLD_SECONDS"] == (
+        "${AEGRA_STUCK_PENDING_THRESHOLD_SECONDS:-120}"
+    )
+    assert api["environment"]["AEGRA_CONFIG"] == "${AEGRA_CONFIG_BASENAME:-aegra.json}"
+    assert api["command"] == [
+        "aegra",
+        "serve",
+        "--config",
+        "${AEGRA_CONFIG_BASENAME:-aegra.json}",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+    ]
     assert api["pull_policy"] == "never"
     assert "@sha256:" in services["langgraph-redis"]["image"]
     assert "redis-cli ping" in " ".join(
@@ -378,7 +431,6 @@ def test_compose_owns_secure_durable_runtime_fields():
         env=os.environ
         | {
             "COMPOSE_DISABLE_ENV_FILE": "1",
-            "LANGGRAPH_CLOUD_LICENSE_KEY": "test-license-placeholder",
             "NOTIFICATION_CREDENTIAL_KEY": "test-notification-placeholder",
         },
         capture_output=True,
@@ -388,37 +440,24 @@ def test_compose_owns_secure_durable_runtime_fields():
     assert result.returncode == 0, result.stderr
 
 
-def test_official_agent_build_consumes_uv_lock_and_pinned_base_digest():
-    config = load_json((ROOT / "backend" / "langgraph.json").read_text())
-    assert config["source"] == {"kind": "uv", "root": "."}
-    assert "dependencies" not in config
-
-    dockerfile = _load_official_dockerfile()
-    assert dockerfile.startswith("FROM langchain/langgraph-api:0.11.0-py3.12")
-    assert "# -- Installing dependencies from uv.lock --" in dockerfile
-    assert "ADD pyproject.toml /tmp/uv_export/project/pyproject.toml" in dockerfile
-    assert "ADD uv.lock /tmp/uv_export/project/uv.lock" in dockerfile
-    assert "uv export --package crypto-manual-alert-v2 --frozen" in dockerfile
-    assert "ENV UV_NO_DEFAULT_GROUPS=1" in dockerfile
-    assert dockerfile.index("ENV UV_NO_DEFAULT_GROUPS=1") < dockerfile.index(
-        "RUN uv export --package crypto-manual-alert-v2 --frozen"
-    )
-    for excluded in (
-        "ADD .env ",
-        "ADD .coverage ",
-        "ADD .langgraph_api ",
-        "ADD .pytest_cache ",
-        "ADD tests ",
-    ):
-        assert excluded not in dockerfile
-
-    image_lock = (ROOT / "deploy" / "agent-server-image.lock").read_text(
-        encoding="utf-8"
-    ).strip()
-    assert image_lock == (
-        "langchain/langgraph-api@sha256:"
-        "e8be3c8fc3f30407c355def446bfee019a86b180dbbd8985d109d21ac3673bba"
-    )
+def test_aegra_runtime_uses_the_locked_extra_and_canonical_config():
+    config = load_json((ROOT / "backend" / "aegra.json").read_text())
+    langgraph = load_json((ROOT / "backend" / "langgraph.json").read_text())
+    assert config == {
+        "graphs": {
+            **langgraph["graphs"],
+            "candidate_review": (
+                "./src/crypto_alert_v2/evaluation/review_graph.py:graph_factory"
+            ),
+        },
+        "auth": langgraph["auth"],
+        "http": langgraph["http"],
+    }
+    assert "env" not in config
+    assert not (ROOT / "deploy" / "agent-server-image.lock").exists()
+    lock = (ROOT / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "aegra-api"' in lock
+    assert 'name = "aegra-cli"' in lock
 
 
 def test_compose_builds_pinned_helpers_from_repo_root():
@@ -451,32 +490,29 @@ def test_compose_builds_pinned_helpers_from_repo_root():
         assert services[service_name]["pull_policy"] == "never"
 
 
-def test_start_script_builds_locked_official_agent_and_scoped_stack(
+def test_start_script_builds_locked_aegra_image_and_scoped_stack(
     tmp_path: Path,
 ):
     script = START_SCRIPT.read_text(encoding="utf-8")
 
     assert "set -euo pipefail" in script
-    assert "uv run --frozen langgraph build" in script
     assert (
-        'LANGGRAPH_CONFIG_FILE="${LANGGRAPH_CONFIG_FILE:-$BACKEND_DIR/langgraph.json}"'
+        'AEGRA_CONFIG_FILE="${AEGRA_CONFIG_FILE:-${LANGGRAPH_CONFIG_FILE:-$BACKEND_DIR/aegra.json}}"'
         in script
     )
-    assert '--config "$LANGGRAPH_CONFIG_FILE"' in script
-    assert '"$BACKEND_DIR/langgraph.multi-interrupt.json"' in script
-    assert '--api-version "0.11.0"' in script
-    assert '--tag "$AGENT_LOCAL_IMAGE"' in script
-    assert "--no-pull" in script
+    assert 'AEGRA_CONFIG_BASENAME="$(basename "$AEGRA_CONFIG_FILE")"' in script
+    assert '"$BACKEND_DIR/aegra.task8-qa.json"' in script
     assert "--wait" in script
     assert '--wait-timeout "$START_WAIT_TIMEOUT_SECONDS"' in script
     assert "START_WAIT_TIMEOUT_SECONDS=180" in script
     assert "--allow-multi-interrupt-fixture" in script
-    assert '"$AGENT_IMAGE_VERIFIER" "$AGENT_BASE_IMAGE" "$AGENT_LOCAL_IMAGE"' in script
+    assert '"$AGENT_IMAGE_VERIFIER" "$AGENT_LOCAL_IMAGE"' in script
     assert "cleanup_failed_start" in script
     assert '"$STOP_SCRIPT" || true' in script
-    assert 'docker pull "$AGENT_BASE_IMAGE"' in script
-    assert 'docker tag "$AGENT_BASE_IMAGE" "$AGENT_BASE_TAG"' in script
     for forbidden in (
+        "LANGGRAPH_CLOUD_LICENSE_KEY",
+        "agent-server-image.lock",
+        "langgraph build",
         "langgraph dev",
         "langgraph up",
         "8011",
@@ -488,7 +524,7 @@ def test_start_script_builds_locked_official_agent_and_scoped_stack(
         assert forbidden not in script
 
     syntax = subprocess.run(
-        ["bash", "-n", str(START_SCRIPT)],
+        [_bash_executable(), "-n", _bash_path(START_SCRIPT)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -498,10 +534,6 @@ def test_start_script_builds_locked_official_agent_and_scoped_stack(
 
     result = _run_start_script(tmp_path)
     assert result.returncode == 0, result.stderr
-    digest = (
-        "langchain/langgraph-api@sha256:"
-        "e8be3c8fc3f30407c355def446bfee019a86b180dbbd8985d109d21ac3673bba"
-    )
     docker_calls = [
         line.split("\t")
         for line in (tmp_path / "docker-arguments")
@@ -509,68 +541,44 @@ def test_start_script_builds_locked_official_agent_and_scoped_stack(
         .splitlines()
         if line.startswith("docker\t")
     ]
-    assert docker_calls[:4] == [
-        ["docker", "image", "inspect", digest],
-        ["docker", "pull", digest],
-        ["docker", "tag", digest, "langchain/langgraph-api:0.11.0-py3.12"],
-        [
-            "docker",
-            "compose",
-            "--project-name",
-            COMPOSE_PROJECT,
-            "--project-directory",
-            str(ROOT),
-            "--file",
-            str(ROOT / "docker-compose.yml"),
-            "build",
-            "migrate",
-            "frontend",
-        ],
-    ]
-    assert docker_calls[4][0:4] == ["docker", "image", "inspect", "--format"]
-    assert docker_calls[4][-1] == digest
-    assert docker_calls[5][0:4] == ["docker", "image", "inspect", "--format"]
-    assert docker_calls[5][-1] == "crypto-manual-alert-v2-langgraph-api:local"
-    assert docker_calls[6][0:3] == ["docker", "run", "--rm"]
-    assert docker_calls[6][-3] == "crypto-manual-alert-v2-langgraph-api:local"
-    assert docker_calls[6][-2] == "-c"
-    assert docker_calls[7] == [
-            "docker",
-            "compose",
-            "--project-name",
-            COMPOSE_PROJECT,
-            "--project-directory",
-            str(ROOT),
-            "--file",
-            str(ROOT / "docker-compose.yml"),
-            "up",
-            "--detach",
-            "--wait",
-            "--wait-timeout",
-            "180",
-            "--remove-orphans",
-    ]
-    uv_calls = [
-        line.split("\t")
-        for line in (tmp_path / "uv-arguments").read_text(encoding="utf-8").splitlines()
-    ]
-    assert uv_calls == [[
-        "uv",
-        "run",
-        "--frozen",
-        "langgraph",
+    assert docker_calls[0] == [
+        "docker",
+        "compose",
+        "--project-name",
+        COMPOSE_PROJECT,
+        "--project-directory",
+        _bash_path(ROOT),
+        "--file",
+        _bash_path(ROOT / "docker-compose.yml"),
         "build",
-        "--config",
-        str(ROOT / "backend" / "langgraph.json"),
-        "--api-version",
-        "0.11.0",
-        "--tag",
-        "crypto-manual-alert-v2-langgraph-api:local",
-        "--no-pull",
-    ]]
-    assert (tmp_path / "compose-project").read_text(encoding="utf-8").strip() == (
-        COMPOSE_PROJECT
-    )
+        "migrate",
+        "frontend",
+    ]
+    assert docker_calls[1] == [
+        "docker",
+        "image",
+        "inspect",
+        "crypto-manual-alert-v2-backend:local",
+    ]
+    assert docker_calls[2][0:3] == ["docker", "run", "--rm"]
+    assert "crypto-manual-alert-v2-backend:local" in docker_calls[2]
+    assert docker_calls[2][-2] == "-c"
+    assert docker_calls[3] == [
+        "docker",
+        "compose",
+        "--project-name",
+        COMPOSE_PROJECT,
+        "--project-directory",
+        _bash_path(ROOT),
+        "--file",
+        _bash_path(ROOT / "docker-compose.yml"),
+        "up",
+        "--detach",
+        "--wait",
+        "--wait-timeout",
+        "180",
+        "--remove-orphans",
+    ]
 
 
 def test_start_script_cleans_up_the_scoped_project_after_wait_failure(tmp_path: Path):
@@ -590,33 +598,40 @@ def test_start_script_cleans_up_the_scoped_project_after_wait_failure(tmp_path: 
         "--project-name",
         COMPOSE_PROJECT,
         "--project-directory",
-        str(ROOT),
+        _bash_path(ROOT),
         "--file",
-        str(ROOT / "docker-compose.yml"),
+        _bash_path(ROOT / "docker-compose.yml"),
         "down",
         "--remove-orphans",
     ]
 
 
-def test_agent_image_verifier_binds_layers_mappings_and_dependencies():
+def test_agent_image_verifier_binds_aegra_config_and_dependencies():
     script = VERIFY_AGENT_IMAGE_SCRIPT.read_text(encoding="utf-8")
 
     assert "set -euo pipefail" in script
-    assert ".RootFS.Layers" in script
-    assert '"${agent_layers[$index]}" != "${base_layers[$index]}"' in script
+    assert 'docker image inspect "$agent_image"' in script
     assert "--network none" in script
     assert "--read-only" in script
-    assert '"LANGGRAPH_AUTH"' in script
-    assert '"LANGGRAPH_HTTP"' in script
-    assert '"LANGSERVE_GRAPHS"' in script
+    assert '"aegra-api": "0.9.24"' in script
+    assert '"aegra-cli": "0.9.24"' in script
+    assert '"langgraph": "1.2.9"' in script
+    assert '"langgraph-sdk": "0.4.2"' in script
+    assert 'root = Path("/app/backend")' in script
+    assert 'else "aegra.json"' in script
     assert "TASK8_ALLOW_MULTI_INTERRUPT_FIXTURE" in script
     assert "--allow-multi-interrupt-fixture" in script
-    assert '"langgraph-api": "0.11.0"' in script
     assert '"crypto-manual-alert-v2": "2.0.0"' in script
-    assert '("langgraph-cli", "langgraph-runtime-inmem", "pytest")' in script
+    for distribution in (
+        '"langgraph-api"',
+        '"langgraph-cli"',
+        '"langgraph-runtime-inmem"',
+        '"pytest"',
+    ):
+        assert distribution in script
 
     syntax = subprocess.run(
-        ["bash", "-n", str(VERIFY_AGENT_IMAGE_SCRIPT)],
+        [_bash_executable(), "-n", _bash_path(VERIFY_AGENT_IMAGE_SCRIPT)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -645,9 +660,9 @@ def test_stop_script_scopes_cleanup_and_preserves_volumes_by_default(tmp_path: P
         "--project-name",
         COMPOSE_PROJECT,
         "--project-directory",
-        str(ROOT),
+        _bash_path(ROOT),
         "--file",
-        str(ROOT / "docker-compose.yml"),
+        _bash_path(ROOT / "docker-compose.yml"),
         "down",
         "--remove-orphans",
     ]
@@ -700,7 +715,7 @@ def test_compose_commands_use_product_helpers_and_no_custom_runtime():
         "--worker-id",
         "compose-worker",
     ]
-    assert "command" not in services["langgraph-api"]
+    assert services["langgraph-api"]["command"][:2] == ["aegra", "serve"]
 
     compose_source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     for forbidden in ("langgraph dev", "agent-server:", "8011", "8123:8123"):
@@ -733,12 +748,16 @@ def test_all_container_upstreams_use_the_official_api_service():
     )
 
 
-def test_official_api_gets_product_state_auth_and_production_settings():
+def test_aegra_api_gets_product_state_auth_and_production_settings():
     services = _load_compose()["services"]
     api = services["langgraph-api"]
     environment = api["environment"]
 
     assert environment["APP_ENVIRONMENT"] == "production"
+    assert environment["ENV_MODE"] == "PRODUCTION"
+    assert environment["RUN_MIGRATIONS_ON_STARTUP"] == "true"
+    assert environment["REDIS_BROKER_ENABLED"] == "true"
+    assert "LANGGRAPH_CLOUD_LICENSE_KEY" not in environment
     assert environment["PRODUCT_DATABASE_URL"] == (
         "${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:"
         "crypto_alert_local@product-postgres:5432/crypto_alert_v2}"
@@ -750,9 +769,10 @@ def test_official_api_gets_product_state_auth_and_production_settings():
         "/run/internal-jwt-public/public.pem"
     )
     assert environment["INTERNAL_JWT_PUBLIC_KEYS"] == "${INTERNAL_JWT_PUBLIC_KEYS:-{}}"
-    assert environment["NOTIFICATION_CREDENTIAL_DECRYPT_KEYS"] == (
-        "${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}"
-    )
+    assert environment["INTEGRATION_SECRET_STORE"] == "file"
+    assert environment["INTEGRATION_SECRET_FILE_DIR"] == "/run/integration-secrets"
+    assert "NOTIFICATION_CREDENTIAL_KEY" not in environment
+    assert "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS" not in environment
     assert environment["PRODUCT_INBOX_CURSOR_KEY_FILE"] == (
         "/run/product-inbox-cursor-key/key"
     )
@@ -772,19 +792,24 @@ def test_official_api_gets_product_state_auth_and_production_settings():
             "target": "/run/product-inbox-cursor-key",
             "read_only": True,
         },
+        "/run/integration-secrets": {
+            "type": "volume",
+            "source": "integration-secret-files",
+            "target": "/run/integration-secrets",
+            "read_only": True,
+        },
     }
 
 
 def test_compose_passes_key_rotation_state_to_product_api_and_worker():
     services = _load_compose()["services"]
 
-    # The official langgraph-api hosts the custom Product API HTTP app.
+    # Aegra hosts the custom Product API HTTP app through the config boundary.
     assert "product-api" not in services
     expected = {
         "INTERNAL_JWT_PUBLIC_KEYS": "${INTERNAL_JWT_PUBLIC_KEYS:-{}}",
-        "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS": (
-            "${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}"
-        ),
+        "INTEGRATION_SECRET_STORE": "file",
+        "INTEGRATION_SECRET_FILE_DIR": "/run/integration-secrets",
     }
     for service_name in ("langgraph-api", "command-worker"):
         environment = services[service_name]["environment"]
@@ -804,7 +829,7 @@ def test_compose_accepts_complete_percent_encoded_database_uris():
     services = _render_scrubbed_compose(
         {
             "COMPOSE_PRODUCT_DATABASE_URL": product_uri,
-            "COMPOSE_AGENT_POSTGRES_URI": agent_uri,
+            "COMPOSE_AGENT_DATABASE_URL": agent_uri,
         }
     )["services"]
 
@@ -817,7 +842,7 @@ def test_compose_accepts_complete_percent_encoded_database_uris():
         assert services[service_name]["environment"]["PRODUCT_DATABASE_URL"] == (
             product_uri
         )
-    assert services["langgraph-api"]["environment"]["POSTGRES_URI"] == agent_uri
+    assert services["langgraph-api"]["environment"]["DATABASE_URL"] == agent_uri
 
 
 def test_authenticated_readiness_targets_official_api_and_gates_worker():
@@ -827,7 +852,8 @@ def test_authenticated_readiness_targets_official_api_and_gates_worker():
 
     assert readiness["restart"] == "unless-stopped"
     assert readiness_environment["AGENT_SERVER_URL"] == "http://langgraph-api:8000"
-    assert readiness_environment["SEARCH_PROVIDER"] == (
+    assert readiness_environment["SEARCH_PROVIDER"] == "builtin_web_search"
+    assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
         "${SEARCH_PROVIDER:-builtin_web_search}"
     )
     assert readiness_environment["AGENT_READINESS_HOST"] == "0.0.0.0"
@@ -854,6 +880,9 @@ def test_authenticated_readiness_targets_official_api_and_gates_worker():
         "AGENT_HEALTHCHECK_WORKSPACE_ID": "probe-workspace",
         "AGENT_HEALTHCHECK_ROLES": '["operator"]',
         "AGENT_HEALTHCHECK_PERMISSIONS": '["analysis:read"]',
+        "AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER": (
+            "${SEARCH_PROVIDER:-builtin_web_search}"
+        ),
     }
     for service_name, service in services.items():
         if service_name != "langgraph-api-readiness":
@@ -873,6 +902,7 @@ def test_compose_dependencies_gate_both_databases_auth_and_readiness_in_order():
             "langgraph-redis": "service_healthy",
             "migrate": "service_completed_successfully",
             "internal-jwt-keys": "service_completed_successfully",
+            "integration-secret-files": "service_completed_successfully",
             "development-bootstrap": "service_completed_successfully",
         },
         "langgraph-api-readiness": {
@@ -882,6 +912,7 @@ def test_compose_dependencies_gate_both_databases_auth_and_readiness_in_order():
         "command-worker": {
             "migrate": "service_completed_successfully",
             "internal-jwt-keys": "service_completed_successfully",
+            "integration-secret-files": "service_completed_successfully",
             "development-bootstrap": "service_completed_successfully",
             "langgraph-api-readiness": "service_healthy",
         },
@@ -917,6 +948,7 @@ def test_compose_secret_consumers_and_jwt_mounts_follow_least_privilege():
         "langgraph-api": {
             "/run/internal-jwt-public": "internal-jwt-public",
             "/run/product-inbox-cursor-key": "product-inbox-cursor-key",
+            "/run/integration-secrets": "integration-secret-files",
         },
         "langgraph-api-readiness": {
             "/run/internal-jwt-private": "internal-jwt-private"
@@ -924,6 +956,7 @@ def test_compose_secret_consumers_and_jwt_mounts_follow_least_privilege():
         "command-worker": {
             "/run/internal-jwt-private": "internal-jwt-private",
             "/run/internal-jwt-public": "internal-jwt-public",
+            "/run/integration-secrets": "integration-secret-files",
         },
         "frontend": {"/run/internal-jwt-private": "internal-jwt-private"},
     }
@@ -992,13 +1025,15 @@ def test_compose_separates_bootstrap_from_production_services():
     for service_name in V2_SERVICES - {
         "langgraph-api",
         "langgraph-api-readiness",
+        "command-worker",
     }:
         environment = services[service_name].get("environment", {})
         assert "MARKET_DATA_HTTP_PROXY" not in environment
         assert "SEARCH_PROVIDER" not in environment
         assert "SEARCH_HTTP_PROXY" not in environment
     readiness_environment = services["langgraph-api-readiness"]["environment"]
-    assert readiness_environment["SEARCH_PROVIDER"] == (
+    assert readiness_environment["SEARCH_PROVIDER"] == "builtin_web_search"
+    assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
         "${SEARCH_PROVIDER:-builtin_web_search}"
     )
     assert "MARKET_DATA_HTTP_PROXY" not in readiness_environment
@@ -1013,11 +1048,15 @@ def test_backend_environment_example_documents_v2_provider_egress_safely():
         "MARKET_DATA_HTTP_PROXY=",
         "SEARCH_HTTP_PROXY=",
         "OPENAI_API_KEY=",
+        "AEGRA_CONFIG=aegra.json",
+        "REDIS_BROKER_ENABLED=true",
+        "WORKER_COUNT=1",
         "DEVELOPMENT_BOOTSTRAP_IDENTITY_ISSUER=crypto-alert-v2-local-proof",
         "DEVELOPMENT_BOOTSTRAP_CONTEXT_ID=99999999-9999-4999-8999-999999999999",
     ):
         assert assignment in example
     assert "sk-" not in example
+    assert "LANGGRAPH_CLOUD_LICENSE_KEY" not in example
 
 
 def test_container_build_context_and_compose_avoid_secret_or_host_mounts():
@@ -1096,7 +1135,9 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
         encoding="utf-8"
     )
 
-    assert 'testDir: "./tests/e2e-v2"' in config
+    assert 'testDir: "./tests"' in config
+    assert '"**/e2e/hosted-production.spec.ts"' in config
+    assert '"**/e2e/hosted-security.spec.ts"' in config
     required_specs = {
         "durable-cancel-flow.spec.ts",
         "hitl-review-flow.spec.ts",
@@ -1113,7 +1154,11 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
     assert "PLAYWRIGHT_EXTERNAL_SERVER=1" in real_inbox_gate
     assert "real-inbox-flow.spec.ts" in real_inbox_gate
     assert "forbidOnly: true" in config
-    assert 'trace: evidenceDirectory ? "on" : "retain-on-failure"' in config
+    assert 'mode: "on"' in config
+    assert "screenshots: false" in config
+    assert "snapshots: true" in config
+    assert "sources: true" in config
+    assert ': "retain-on-failure"' in config
     assert 'screenshot: "only-on-failure"' in config
     assert 'video: "retain-on-failure"' in config
     assert "forbiddenBrowserRequests" in official_flow

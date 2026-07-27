@@ -7,6 +7,7 @@ import {
   type TestInfo,
 } from "@playwright/test";
 import axe from "axe-core";
+import { readFile, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 
@@ -43,7 +44,9 @@ const expectedViewports: Record<string, { width: number; height: number }> = {
   "fixture-desktop": { width: 1440, height: 1000 },
   "fixture-pixel-7": { width: 412, height: 915 },
 };
-const realDeepResearchAdmissionTimeoutMs = 300_000;
+const realDeepResearchAdmissionTimeoutMs = 480_000;
+// Bound transient BFF retries across the supervisor's 180-second recovery window.
+const expectedRestartTransportErrorLimit = 80;
 
 const editedSummary =
   "截至本次人工复核，BTC 的宏观流动性、监管进展与现货/衍生品市场结构信号仍需联合解读；结论仅保留可由下列真实来源验证的部分。";
@@ -58,12 +61,13 @@ const realEnvironmentReady =
   process.env.V2_E2E_PROFILE === "real-deep-research" &&
   process.env.REAL_PRODUCT_E2E === "1" &&
   process.env.REAL_DEEP_RESEARCH_E2E === "1" &&
+  process.env.REAL_DEEP_RESEARCH_AEGRA_RESTART === "1" &&
   evidenceDirectory.length > 0 &&
   path.isAbsolute(evidenceDirectory);
 
 test.skip(
   !realEnvironmentReady,
-  "requires V2_E2E_PROFILE=real-deep-research, REAL_PRODUCT_E2E=1, REAL_DEEP_RESEARCH_E2E=1, and an absolute PLAYWRIGHT_EVIDENCE_DIR",
+  "requires the real Deep Research profile, Product execution, Aegra restart injection, and an absolute evidence directory",
 );
 
 test("runs real Deep Research admission, recovery, edit, second review, and approval", async ({
@@ -259,6 +263,56 @@ test("runs real Deep Research admission, recovery, edit, second review, and appr
     testInfo,
     "review-round-1",
     firstReview,
+  );
+
+  const firstReviewRuntime = requireRuntimeIdentity(firstReview);
+  const firstReviewProductRunId = requireProductRunIdentity(firstReview);
+  const restartErrorWindow = beginErrorWindow(observer);
+  await requestAegraRestart(firstReview, testInfo);
+  const postRestartProjectionStart = observer.productProjections.length;
+  const reviewUrl = page.url();
+  await page.reload();
+  await expect(page).toHaveURL(reviewUrl);
+  const restartedFirstReview = await waitForTaskOutcome(
+    page,
+    observer,
+    taskId,
+    (task) => reviewIteration(task) === 1,
+    60_000,
+    postRestartProjectionStart,
+  );
+  await requireExpectedStatus(
+    page,
+    observer,
+    restartedFirstReview,
+    "waiting_human",
+    "first-review-after-aegra-restart",
+    testInfo,
+  );
+  expect(requireRuntimeIdentity(restartedFirstReview)).toEqual(firstReviewRuntime);
+  expect(requireProductRunIdentity(restartedFirstReview)).toBe(
+    firstReviewProductRunId,
+  );
+  expect(restartedFirstReview.pending_interrupts).toEqual(
+    firstReview.pending_interrupts,
+  );
+  expect(
+    researchSourceSignature(
+      assertReviewProjection(restartedFirstReview, taskId, 1),
+    ),
+  ).toBe(sourceSignature);
+  await closeExpectedAegraRestartWindow(
+    observer,
+    restartErrorWindow,
+    restartedFirstReview,
+    testInfo,
+  );
+  await captureCheckpoint(
+    page,
+    observer,
+    testInfo,
+    "review-round-1-after-aegra-restart",
+    restartedFirstReview,
   );
 
   await page.getByRole("button", { name: "修改后重审", exact: true }).click();
@@ -461,6 +515,13 @@ interface FlowObserver {
   productProjections: ProductProjectionObservation[];
 }
 
+interface ErrorWindow {
+  consoleErrors: number;
+  pageErrors: number;
+  serverErrors: number;
+  productResponseErrors: number;
+}
+
 function assertExecutionEnvironment(page: Page, testInfo: TestInfo) {
   expect(process.env.V2_E2E_PROFILE).toBe("real-deep-research");
   expect(process.env.REAL_PRODUCT_E2E).toBe("1");
@@ -520,6 +581,82 @@ function installFlowObserver(page: Page): FlowObserver {
   });
 
   return observer;
+}
+
+function beginErrorWindow(observer: FlowObserver): ErrorWindow {
+  return {
+    consoleErrors: observer.consoleErrors.length,
+    pageErrors: observer.pageErrors.length,
+    serverErrors: observer.serverErrors.length,
+    productResponseErrors: observer.productResponseErrors.length,
+  };
+}
+
+async function closeExpectedAegraRestartWindow(
+  observer: FlowObserver,
+  start: ErrorWindow,
+  task: ProductTask,
+  testInfo: TestInfo,
+) {
+  const runtime = requireRuntimeIdentity(task);
+  const end = beginErrorWindow(observer);
+  const errors = {
+    consoleErrors: observer.consoleErrors.slice(
+      start.consoleErrors,
+      end.consoleErrors,
+    ),
+    pageErrors: observer.pageErrors.slice(start.pageErrors, end.pageErrors),
+    serverErrors: observer.serverErrors.slice(
+      start.serverErrors,
+      end.serverErrors,
+    ),
+    productResponseErrors: observer.productResponseErrors.slice(
+      start.productResponseErrors,
+      end.productResponseErrors,
+    ),
+  };
+  const allowedConsoleErrors = new Set([
+    "Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING",
+    "Failed to load resource: the server responded with a status of 502 (Bad Gateway)",
+  ]);
+  const allowedServerErrors = new Set([
+    `502 GET /api/product/api/v2/tasks/${task.task_id.toLowerCase()}`,
+    `502 POST /api/agent/threads/${runtime.thread_id.toLowerCase()}/history`,
+    `502 POST /api/agent/threads/${runtime.thread_id.toLowerCase()}/stream/events`,
+  ]);
+
+  await testInfo.attach("aegra-restart-browser-outage-window", {
+    body: Buffer.from(JSON.stringify(errors, null, 2)),
+    contentType: "application/json",
+  });
+  expect(errors.consoleErrors.length).toBeLessThanOrEqual(
+    expectedRestartTransportErrorLimit,
+  );
+  expect(errors.consoleErrors.every((error) => allowedConsoleErrors.has(error))).toBe(
+    true,
+  );
+  expect(errors.pageErrors).toEqual([]);
+  expect(errors.serverErrors.length).toBeLessThanOrEqual(
+    expectedRestartTransportErrorLimit,
+  );
+  expect(errors.serverErrors.every((error) => allowedServerErrors.has(error))).toBe(
+    true,
+  );
+  expect(errors.productResponseErrors).toEqual([]);
+
+  observer.consoleErrors.splice(
+    start.consoleErrors,
+    end.consoleErrors - start.consoleErrors,
+  );
+  observer.pageErrors.splice(start.pageErrors, end.pageErrors - start.pageErrors);
+  observer.serverErrors.splice(
+    start.serverErrors,
+    end.serverErrors - start.serverErrors,
+  );
+  observer.productResponseErrors.splice(
+    start.productResponseErrors,
+    end.productResponseErrors - start.productResponseErrors,
+  );
 }
 
 function observedRequest(request: PlaywrightRequest): ObservedRequest {
@@ -672,6 +809,73 @@ function isPendingExecution(task: ProductTask) {
 
 function isReloadablePreApprovalState(task: ProductTask) {
   return isPendingExecution(task) || reviewIteration(task) === 1;
+}
+
+async function requestAegraRestart(task: ProductTask, testInfo: TestInfo) {
+  const runtime = requireRuntimeIdentity(task);
+  const productRunId = requireProductRunIdentity(task);
+  const pause = task.pending_interrupts;
+  if (pause === null || reviewIteration(task) !== 1) {
+    throw new Error("Aegra restart requires the first durable review pause");
+  }
+  const request = {
+    schema_version: "1.0",
+    project: testInfo.project.name,
+    requested_at: new Date().toISOString(),
+    task_id: task.task_id,
+    product_run_id: productRunId,
+    assistant_id: runtime.assistant_id,
+    thread_id: runtime.thread_id,
+    run_id: runtime.run_id,
+    pause_id: pause.pause_id,
+    pause_version: pause.pause_version,
+    interrupt_ids: pause.members.map((member) => member.interrupt_id),
+    review_iteration: 1,
+  };
+  const requestPath = path.join(
+    evidenceDirectory,
+    `aegra-restart-request-${testInfo.project.name}.json`,
+  );
+  const completionPath = path.join(
+    evidenceDirectory,
+    `aegra-restart-complete-${testInfo.project.name}.json`,
+  );
+  await writeFile(requestPath, `${JSON.stringify(request, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
+
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    try {
+      const receipt = JSON.parse(await readFile(completionPath, "utf8"));
+      expect(receipt.schema_version).toBe("1.0");
+      expect(receipt.project).toBe(testInfo.project.name);
+      expect(receipt.request).toEqual(request);
+      expect(receipt.generation_before?.pid).not.toBe(
+        receipt.generation_after?.pid,
+      );
+      expect(receipt.target_unavailable_observed).toBe(true);
+      expect(receipt.target_recovered_observed).toBe(true);
+      await testInfo.attach("aegra-restart-receipt", {
+        body: Buffer.from(JSON.stringify(receipt, null, 2)),
+        contentType: "application/json",
+      });
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      ) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `timed out waiting for Aegra restart receipt for ${testInfo.project.name}`,
+  );
 }
 
 function recoveryCheckpointLabel(

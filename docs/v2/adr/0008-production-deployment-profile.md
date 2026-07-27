@@ -2,9 +2,13 @@
 
 > authority_class: proposed_gate
 >
-> 状态：Proposed，生产证据门禁和完整 Task 0 复审通过后才能 Accepted
+> 状态：Superseded by ADR 0011（2026-07-21）
 >
 > 日期：2026-07-12
+
+> 本文保留为 hosted 商业部署评估历史。用户已明确拒绝商业授权，当前生产候选改为
+> [ADR 0011](./0011-aegra-self-hosted-agent-server.md) 的 Aegra 自托管开源 Profile；
+> 本文的生产证据项目仍作为部署审计输入，但不再要求购买 LangSmith Deployment。
 
 ## 推荐目标
 

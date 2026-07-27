@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
-import os
 from pathlib import Path
 import re
-import tempfile
 from typing import Any, Callable, Protocol, Sequence
 from uuid import uuid4
+
+from crypto_alert_v2.atomic_io import atomic_write_text
 
 import httpx
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -122,28 +122,13 @@ class FailureInjectionController:
         payload = (
             json.dumps(snapshot.model_dump(mode="json"), sort_keys=True, indent=2)
             + "\n"
-        ).encode("utf-8")
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=self._path.parent,
-            prefix=f".{self._path.name}.",
-            suffix=".tmp",
         )
-        temporary = Path(temporary_name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self._path)
-            directory_descriptor = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
+        atomic_write_text(
+            self._path,
+            payload,
+            mode=0o600,
+            sync_directory=True,
+        )
 
 
 def failure_injection_from_settings(settings: Any) -> FailureInjectionController | None:

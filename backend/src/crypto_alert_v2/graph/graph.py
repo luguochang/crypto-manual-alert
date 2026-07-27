@@ -91,7 +91,9 @@ def _root_observability_config(config: RunnableConfig) -> RunnableConfig:
     factory = create_observability_config_factory(
         runtime_config_from_settings(settings, release=__version__)
     )
-    return factory(config)
+    # Aegra persists request metadata such as run_id into LangGraph checkpoints.
+    # Observability normalization is an egress boundary and must not rewrite it.
+    return factory(dict(config))
 
 
 def validate_request(
@@ -523,10 +525,8 @@ def research_events(
     request = AnalysisRequest.model_validate(state["request"])
     asset = request.symbol.partition("-")[0]
     query = (
-        f"{request.query_text.strip()}\n"
-        f"Asset: {asset}\n"
-        f"Market: cryptocurrency\n"
-        f"Analysis horizon: {request.horizon}"
+        f"{asset} cryptocurrency market analysis {request.horizon}\n"
+        f"User question: {request.query_text.strip()}"
     )
     try:
         result = _runtime(runtime).research_collector.collect(query, config=config)

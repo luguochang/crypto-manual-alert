@@ -50,6 +50,47 @@ RemoteRunStatus = Literal[
 INITIAL_RESUMABLE_EVENT_ID = "0"
 
 
+def _portable_run_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = dict(values)
+    lineage = metadata.pop("lineage", None)
+    if lineage is not None and not isinstance(lineage, Mapping):
+        raise TypeError("Run lineage metadata must be an object")
+    if isinstance(lineage, Mapping):
+        for key, value in lineage.items():
+            if not isinstance(key, str) or not isinstance(
+                value, (str, int, float, bool)
+            ):
+                raise TypeError("Run lineage metadata must contain primitive values")
+            metadata[f"lineage_{key}"] = value
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, (str, int, float, bool))
+        for key, value in metadata.items()
+    ):
+        raise TypeError("Run metadata must contain primitive values")
+    return metadata
+
+
+def _run_lineage_context(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist Product idempotency/lineage in the official Run context field."""
+    return {
+        "crypto_alert_lineage": _portable_run_metadata(values),
+    }
+
+
+def _run_identity_values(run: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = run.get("metadata")
+    if isinstance(metadata, Mapping):
+        return metadata
+    context = run.get("context")
+    if isinstance(context, Mapping):
+        lineage = context.get("crypto_alert_lineage")
+        if isinstance(lineage, Mapping):
+            return lineage
+        return context
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteRunState:
     status: RemoteRunStatus
@@ -291,11 +332,12 @@ class AgentServerRunner:
                 "review_policy": review_policy,
             },
             "durability": durability,
-            "stream_mode": ["updates", "custom"],
+            "stream_mode": ["values", "updates", "custom"],
             "stream_resumable": True,
             "if_not_exists": "reject",
             "multitask_strategy": "reject",
-            "metadata": run_metadata,
+            "metadata": _portable_run_metadata(run_metadata),
+            "context": _run_lineage_context(run_metadata),
             "headers": transport_headers(
                 request_id=run_request_id,
                 authorization=authorization,
@@ -416,7 +458,7 @@ class AgentServerRunner:
                     "refusing a duplicate create"
                 )
 
-            await self._validate_fork_checkpoint(
+            validated_checkpoint = await self._validate_fork_checkpoint(
                 handle=replace(handle, authorization=authorization),
                 checkpoint_id=checkpoint_id,
             )
@@ -448,11 +490,17 @@ class AgentServerRunner:
             }
             options: dict[str, Any] = {
                 "input": None,
-                "checkpoint_id": checkpoint_id,
+                "checkpoint": {
+                    "thread_id": validated_checkpoint.thread_id,
+                    "checkpoint_ns": validated_checkpoint.checkpoint_ns,
+                    "checkpoint_id": validated_checkpoint.checkpoint_id,
+                    "checkpoint_map": validated_checkpoint.checkpoint_map,
+                },
                 "durability": "sync",
-                "stream_mode": ["updates", "custom"],
+                "stream_mode": ["values", "updates", "custom"],
                 "stream_resumable": True,
-                "metadata": metadata,
+                "metadata": _portable_run_metadata(metadata),
+                "context": _run_lineage_context(metadata),
             }
             created_run: dict[str, str] = {}
 
@@ -513,7 +561,7 @@ class AgentServerRunner:
         *,
         handle: RemoteRunHandle,
         checkpoint_id: str,
-    ) -> None:
+    ) -> RemoteCheckpoint:
         state = await self._client.threads.get_state(
             handle.thread_id,
             checkpoint_id=checkpoint_id,
@@ -521,18 +569,20 @@ class AgentServerRunner:
         )
         if not isinstance(state, dict):
             raise RuntimeError("Agent Server returned an invalid fork checkpoint")
-        checkpoint = state.get("checkpoint")
-        if not isinstance(checkpoint, dict):
+        checkpoint_payload = state.get("checkpoint")
+        if not isinstance(checkpoint_payload, dict):
             raise RuntimeError("Agent Server fork checkpoint is missing")
+        checkpoint = _parse_remote_checkpoint(checkpoint_payload)
         if (
-            _checkpoint_value(checkpoint, "thread_id") != handle.thread_id
-            or _checkpoint_value(checkpoint, "checkpoint_id") != checkpoint_id
+            checkpoint.thread_id != handle.thread_id
+            or checkpoint.checkpoint_id != checkpoint_id
         ):
             raise RuntimeError("Agent Server returned a different fork checkpoint")
         if _state_checkpoint_run_id(state) != handle.run_id:
             raise RuntimeError(
                 "Fork checkpoint does not belong to the selected source Run"
             )
+        return checkpoint
 
     async def find(
         self,
@@ -579,7 +629,7 @@ class AgentServerRunner:
                 **options,
             )
             for existing in existing_runs:
-                existing_metadata = existing.get("metadata") or {}
+                existing_metadata = _run_identity_values(existing)
                 if (
                     existing_metadata.get("tenant_id") == actor.tenant_id
                     and existing_metadata.get("workspace_id") == actor.workspace_id
@@ -756,10 +806,11 @@ class AgentServerRunner:
         options: dict[str, Any] = {
             "command": {"resume": resume_mapping},
             "durability": "sync",
-            "stream_mode": ["updates", "custom"],
+            "stream_mode": ["values", "updates", "custom"],
             "stream_resumable": True,
             "multitask_strategy": "reject",
-            "metadata": metadata,
+            "metadata": _portable_run_metadata(metadata),
+            "context": _run_lineage_context(metadata),
         }
         created_run: dict[str, str] = {}
 

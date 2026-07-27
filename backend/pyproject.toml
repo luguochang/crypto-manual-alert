@@ -28,6 +28,12 @@ dependencies = [
     "deepagents==0.6.12",
 ]
 
+[project.optional-dependencies]
+aegra = [
+    "aegra-api==0.9.24",
+    "aegra-cli==0.9.24",
+]
+
 [project.scripts]
 crypto-alert-provision = "crypto_alert_v2.commands.provision:main"
 
@@ -55,3 +61,9 @@ asyncio_mode = "auto"
 
 [tool.uv]
 default-groups = ["dev"]
+conflicts = [
+    [
+        { extra = "aegra" },
+        { group = "dev" },
+    ],
+]

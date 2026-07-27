@@ -7,7 +7,7 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto_alert_v2.api.schemas import (
@@ -21,6 +21,7 @@ from crypto_alert_v2.persistence.base import Base
 from crypto_alert_v2.persistence.models import (
     DATA_LIFECYCLE_SCOPE,
     DataDeletionJob,
+    DataDeletionReceipt,
     DataExportJob,
     DataLifecyclePolicy,
 )
@@ -83,7 +84,12 @@ _SAFE_EXPORT_FIELDS = frozenset(
     }
 )
 _LIFECYCLE_TABLES = frozenset(
-    {"data_lifecycle_policies", "data_export_jobs", "data_deletion_jobs"}
+    {
+        "data_lifecycle_policies",
+        "data_export_jobs",
+        "data_deletion_jobs",
+        "data_deletion_receipts",
+    }
 )
 
 
@@ -197,7 +203,9 @@ def _export_view(job: DataExportJob) -> dict[str, Any]:
     }
 
 
-def _deletion_view(job: DataDeletionJob) -> dict[str, Any]:
+def _deletion_view(
+    job: DataDeletionJob, receipts: list[DataDeletionReceipt] | None = None
+) -> dict[str, Any]:
     return {
         "id": job.id,
         "tenant_id": job.tenant_id,
@@ -215,6 +223,22 @@ def _deletion_view(job: DataDeletionJob) -> dict[str, Any]:
         "legal_hold_reason": job.legal_hold_reason,
         "system_status": dict(job.system_status),
         "external_deletion_reference": dict(job.external_deletion_reference),
+        "receipts": [
+            {
+                "id": receipt.id,
+                "system": receipt.system,
+                "phase": receipt.phase,
+                "attempt": receipt.attempt,
+                "outcome": receipt.outcome,
+                "affected_count": receipt.affected_count,
+                "survivor_count": receipt.survivor_count,
+                "observed_at": receipt.observed_at,
+                "reference": receipt.reference,
+                "evidence": dict(receipt.evidence),
+                "receipt_hash": receipt.receipt_hash,
+            }
+            for receipt in receipts or []
+        ],
         "last_error": job.last_error,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
@@ -471,7 +495,20 @@ class LifecycleService:
                     _scope_filter(DataDeletionJob, resolved),
                 )
             )
-            return _deletion_view(job) if job is not None else None
+            if job is None:
+                return None
+            receipts = list(
+                await session.scalars(
+                    select(DataDeletionReceipt)
+                    .where(DataDeletionReceipt.deletion_job_id == job.id)
+                    .order_by(
+                        DataDeletionReceipt.system,
+                        DataDeletionReceipt.phase,
+                        DataDeletionReceipt.attempt,
+                    )
+                )
+            )
+            return _deletion_view(job, receipts)
 
     async def build_export_payload(
         self, session: AsyncSession, job: DataExportJob
@@ -567,7 +604,7 @@ async def delete_actor_product_rows(
     tenant_id: UUID,
     workspace_id: UUID,
     owner_user_id: UUID,
-) -> None:
+) -> int:
     """Delete actor-owned Product rows in metadata dependency order.
 
     Lifecycle jobs remain as the audit record.  Tenant, workspace, user and
@@ -575,6 +612,7 @@ async def delete_actor_product_rows(
     removed by the user-data scope.
     """
 
+    deleted_count = 0
     for table in reversed(Base.metadata.sorted_tables):
         if table.name in _LIFECYCLE_TABLES:
             continue
@@ -583,13 +621,47 @@ async def delete_actor_product_rows(
             actor_column = table.c.get("actor_user_id")
         if actor_column is None or "tenant_id" not in table.c or "workspace_id" not in table.c:
             continue
-        await session.execute(
+        result = await session.execute(
             delete(table).where(
                 table.c.tenant_id == tenant_id,
                 table.c.workspace_id == workspace_id,
                 actor_column == owner_user_id,
             )
         )
+        if result.rowcount is not None and result.rowcount > 0:
+            deleted_count += result.rowcount
+    return deleted_count
+
+
+async def count_actor_product_rows(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    workspace_id: UUID,
+    owner_user_id: UUID,
+) -> int:
+    """Count remaining actor-owned Product rows outside lifecycle audit tables."""
+
+    survivor_count = 0
+    for table in Base.metadata.sorted_tables:
+        if table.name in _LIFECYCLE_TABLES:
+            continue
+        actor_column = table.c.get("owner_user_id")
+        if actor_column is None:
+            actor_column = table.c.get("actor_user_id")
+        if actor_column is None or "tenant_id" not in table.c or "workspace_id" not in table.c:
+            continue
+        count = await session.scalar(
+            select(func.count())
+            .select_from(table)
+            .where(
+                table.c.tenant_id == tenant_id,
+                table.c.workspace_id == workspace_id,
+                actor_column == owner_user_id,
+            )
+        )
+        survivor_count += int(count or 0)
+    return survivor_count
 
 
 __all__ = [
@@ -598,6 +670,7 @@ __all__ = [
     "LifecycleError",
     "LifecycleService",
     "compute_manifest_hash",
+    "count_actor_product_rows",
     "delete_actor_product_rows",
     "validate_manifest_hash",
 ]

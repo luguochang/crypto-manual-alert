@@ -33,6 +33,30 @@ def test_graph_factory_is_the_only_production_export() -> None:
     assert isinstance(graph_package.graph, ModuleType)
 
 
+def test_graph_factory_does_not_redact_agent_server_checkpoint_run_identity() -> None:
+    from crypto_alert_v2.graph import graph_factory
+
+    official_run_id = "59e38eff-f471-4129-8079-920d2ebebf9b"
+    request_config = {
+        "metadata": {
+            "correlation_id": "factory-protocol-identity-contract",
+            "run_id": official_run_id,
+        },
+        "tags": ["factory-protocol-identity"],
+    }
+
+    configured = graph_factory(request_config)
+
+    assert request_config["metadata"]["run_id"] == official_run_id
+    assert request_config["metadata"]["correlation_id"] == (
+        "factory-protocol-identity-contract"
+    )
+    assert request_config["tags"] == ["factory-protocol-identity"]
+    assert configured.config is not None
+    assert configured.config.get("metadata") in (None, {})
+    assert configured.config.get("tags") in (None, [])
+
+
 def test_graph_runtime_context_schema_filters_framework_private_keys() -> None:
     from crypto_alert_v2.graph import create_graph
     from crypto_alert_v2.graph.runtime import AnalysisRuntime

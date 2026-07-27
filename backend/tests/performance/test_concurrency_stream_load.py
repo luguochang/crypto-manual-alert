@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -19,7 +20,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
     response_status = 200
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path != "/app/api/v2/health":
+        if self.path != "/api/product/api/v2/health":
             self.send_error(404)
             return
         payload = json.dumps({"status": "ok", "version": "2.0.0"}).encode()
@@ -95,7 +96,8 @@ def test_local_load_probe_records_bounded_real_loopback_measurements(
     assert report["load"]["latency_ms"]["p95"] > 0
     assert report["slo_claims"] == []
     assert "market_analysis_p95" in report["does_not_prove"]
-    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
 def test_local_load_probe_fails_on_non_healthy_responses(tmp_path: Path) -> None:

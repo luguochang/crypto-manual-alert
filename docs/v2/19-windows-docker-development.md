@@ -39,7 +39,7 @@ Docker Compose 中的服务包括：
     command-worker
     frontend
 
-这不是只启动一个前端页面。第一次构建会编译官方 LangGraph Agent Server 镜像，内存和磁盘占用都会明显高于普通 Next.js 项目。
+这不是只启动一个前端页面。第一次构建会安装锁定的 Aegra、LangGraph 和 backend 依赖并构建 Agent Server 镜像，内存和磁盘占用都会明显高于普通 Next.js 项目。
 
 ### 1.1 当前唯一交接主线
 
@@ -161,23 +161,24 @@ backend/.env.example 只放空值和示例值。真实密钥应使用环境变�
 | SEARCH_PROVIDER | builtin_web_search、tavily 或明确的本地 fallback | 可以提交选择，不提交密钥 |
 | TAVILY_API_KEY | SEARCH_PROVIDER=tavily 时使用 | 否 |
 | PRODUCT_DATABASE_URL | Product PostgreSQL 连接 | 否，生产使用 secret |
-| AGENT_SERVER_URL | 官方 Agent Server 地址 | 可以提交本地默认地址 |
-| LANGGRAPH_CLOUD_LICENSE_KEY | Docker durable Agent Server 授权 | 否 |
-| LANGSMITH_API_KEY | LangGraph/LangSmith 平台授权或观测凭据 | 否 |
+| AGENT_SERVER_URL | Aegra Agent Protocol Server 地址 | 可以提交本地默认地址 |
+| LANGSMITH_API_KEY | 可选 LangSmith 观测凭据，不是 Aegra 授权 | 否 |
 | NOTIFICATION_CREDENTIAL_KEY | Product 通知凭据加密主密钥 | 否 |
 | LANGFUSE_SECRET_KEY | Langfuse 服务端观测凭据 | 否 |
 
-### 4.3 LangGraph 授权不要混淆
+### 4.3 Aegra 与外部服务密钥不要混淆
 
 以下密钥不是一回事：
 
     OPENAI_API_KEY              模型服务密钥
     TAVILY_API_KEY              Web Search 服务密钥
-    LANGSMITH_API_KEY           LangSmith/LangGraph 平台密钥
-    LANGGRAPH_CLOUD_LICENSE_KEY LangGraph Agent Server durable 部署授权
+    LANGSMITH_API_KEY           可选 LangSmith 观测密钥
     NOTIFICATION_CREDENTIAL_KEY Product 通知凭据加密密钥
 
-OpenAI-compatible 密钥不能替代 LangSmith 或 LangGraph 授权。没有 LANGGRAPH_CLOUD_LICENSE_KEY，也没有具有对应部署能力的 LANGSMITH_API_KEY 时，tools/v2/start_integration_stack.sh 会拒绝启动 durable Docker Agent Server，这是有意的生产门禁，不要通过删除检查来“修复”。
+Aegra `0.9.24` 是 Apache-2.0 自托管 Agent Protocol Server，不需要
+`LANGGRAPH_CLOUD_LICENSE_KEY` 或 LangSmith 部署授权。`LANGSMITH_API_KEY` 只在启用
+LangSmith 观测时需要，不能替代模型或 Tavily 密钥。模型/Search readiness、通知加密和
+外部观测仍分别 fail closed；不要用无关密钥绕过对应门禁。
 
 ### 4.3.1 密钥迁移清单（只迁移值，不提交值）
 
@@ -190,8 +191,7 @@ OpenAI-compatible 密钥不能替代 LangSmith 或 LangGraph 授权。没有 LAN
 | `MODEL_NAME` | 模型名称，例如 `gpt-5.5` | `backend/.env` | 是配置，不是密钥 |
 | `SEARCH_PROVIDER` | `builtin_web_search`、`tavily` 或本地 fallback | `backend/.env` | 是配置，不是密钥 |
 | `TAVILY_API_KEY` | Tavily 搜索服务凭据，仅 `SEARCH_PROVIDER=tavily` 时需要 | `backend/.env` 或 Windows Secret Manager | 是 |
-| `LANGGRAPH_CLOUD_LICENSE_KEY` | Docker durable Agent Server 授权 | WSL 当前 shell、Docker secret 或 CI secret | 是，按授权环境注入 |
-| `LANGSMITH_API_KEY` | LangSmith/LangGraph 观测或平台访问凭据 | `backend/.env`、Docker secret 或 CI secret | 是，启用对应能力时需要 |
+| `LANGSMITH_API_KEY` | 可选 LangSmith 观测访问凭据 | `backend/.env`、Docker secret 或 CI secret | 只在启用 LangSmith 时需要 |
 | `LANGSMITH_TRACING` | 是否发送 LangSmith trace | `backend/.env` | 是配置，不是密钥 |
 | `LANGSMITH_PROJECT` | LangSmith 项目名 | `backend/.env` | 是配置，不是密钥 |
 | `LANGFUSE_ENABLED` | 是否启用 Langfuse | `backend/.env` | 是配置，不是密钥 |
@@ -212,7 +212,7 @@ OpenAI-compatible 密钥不能替代 LangSmith 或 LangGraph 授权。没有 LAN
 1. 从旧电脑、密码管理器或对应服务控制台取得新环境所需的值；不要从 Git 历史恢复密钥。
 2. 复制 `backend/.env.example` 为 `backend/.env`，只在本机填入需要的变量。
 3. `SEARCH_PROVIDER=tavily` 时填入 `TAVILY_API_KEY`；使用官方模型 Web Search 时不要无条件填写 Tavily。
-4. 启动 durable Compose 前，在当前 WSL shell 或 Docker Secret 中注入 `LANGGRAPH_CLOUD_LICENSE_KEY`、`LANGSMITH_API_KEY` 和 `NOTIFICATION_CREDENTIAL_KEY` 等 Compose 插值变量。
+4. 启动 durable Compose 前，在当前 WSL shell 或 Docker Secret 中注入模型/Search 所需凭据和 `NOTIFICATION_CREDENTIAL_KEY`；只有启用 LangSmith 时才注入 `LANGSMITH_API_KEY`。
 5. 启用 LangSmith/Langfuse 前同时设置对应的开关、地址和凭据，并先用脱敏 trace 验证关联 ID。
 6. 启动后执行 readiness、Product API、Worker 和最小分析流程检查；不要只根据容器启动成功判断迁移完成。
 7. 使用 `git status --ignored` 和 `git check-ignore -v backend/.env` 确认本地 env 被忽略，确认后再提交代码。
@@ -259,11 +259,10 @@ Compose 的 `internal-jwt-keys` 服务会在 Docker volume 中生成并保存：
 
 ## 5. 启动完整 Docker 栈
 
-### 5.1 在 WSL 中准备 shell 密钥
+### 5.1 在 WSL 中准备运行时密钥
 
-启动脚本需要在当前 shell 中看到 LangGraph/LangSmith 授权。推荐通过 Windows secret manager 或临时 shell 环境变量注入；不要把真实值提交到仓库：
+启动脚本不需要商业 Agent Server 授权。通知加密密钥和启用的模型/Search 凭据推荐通过 Windows secret manager、Docker secret 或临时 shell 环境变量注入；不要把真实值提交到仓库：
 
-    export LANGGRAPH_CLOUD_LICENSE_KEY='<从 LangGraph/LangSmith 平台获取的本地开发授权>'
     export NOTIFICATION_CREDENTIAL_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
     export NOTIFICATION_CREDENTIAL_KEY_VERSION="local-$(date +%Y%m%d)"
 
@@ -283,10 +282,10 @@ NOTIFICATION_CREDENTIAL_KEY 丢失后，旧数据库中的加密通知凭据不�
 
 脚本会执行：
 
-1. 检查锁定的官方 LangGraph Agent Server base image。
-2. 构建 Product migration 和前端镜像。
-3. 使用官方 langgraph build 构建 Agent image。
-4. 校验构建镜像确实从锁定的官方 base image 派生。
+1. 检查锁定的 Aegra/LangGraph/SDK 依赖闭包。
+2. 构建 Product migration、Aegra backend 和前端镜像。
+3. 校验生产镜像只含 `aegra` extra，不含商业 `langgraph-api`、in-memory runtime、pytest、测试目录或 `.env`。
+4. 校验生产 `aegra.json` 只注册唯一 canonical Graph、Auth 和 Product custom app。
 5. 启动 PostgreSQL、Redis、Agent Server、readiness、Worker 和 frontend。
 6. 等待 Compose healthcheck 通过。
 
@@ -354,9 +353,11 @@ Compose 会在启动依赖链中执行：
 
 Docker Desktop 没有启用 WSL integration，或当前 Ubuntu 不是 Docker Desktop 已选中的发行版。执行 wsl -l -v 确认发行版版本为 2。
 
-### A LangGraph Cloud license key ... is required
+### 仍提示 LangGraph Cloud license
 
-这是 durable Agent Server 门禁。需要把授权注入当前 WSL shell，或者使用仅用于局部代码调试的 langgraph dev。OpenAI/Tavily key 不能解决这个错误。
+当前 Compose 已选择 Aegra，不应再请求商业 license。先确认分支包含 ADR 0011、
+`backend/aegra.json`，并确认 backend 镜像命令为 `aegra serve`。如果错误来自旧容器或
+旧镜像，停止对应 Compose 项目后重新构建；不要添加商业 key 作为修复。
 
 ### NOTIFICATION_CREDENTIAL_KEY is required
 
@@ -407,11 +408,11 @@ Playwright 运行在 WSL 中，浏览器可以由 Playwright 管理：
 
 ## 10. 当前交付状态
 
-截至当前 V2 工作树，已经有真实 Product API、PostgreSQL 持久化、官方 LangGraph Agent Server 接入、Worker、HITL、Runs/Library/Monitor/Notification/Data Lifecycle 等多个切片；本次备份提交后仍要保留以下事实：
+截至当前 V2 工作树，已经有真实 Product API、PostgreSQL 持久化、Aegra Agent Protocol Server、官方 LangGraph/SDK、Worker、HITL、Runs/Library/Monitor/Notification/Data Lifecycle 等多个切片；仍要保留以下事实：
 
 - V2: PARTIAL
 - Production Ready: NO
-- 真实 hosted Agent Server restart/replay/fork 证明未完成。
+- 本地 Aegra Redis worker kill/reaper recovery 和 Protocol `since` replay 已证明；真实 hosted/多实例 HA、滚动升级、长期 replay、完整 fork/cancel/retry 矩阵仍未完成。
 - LangSmith/Langfuse 外部 trace 交付证明未完成。
 - 正式通知 provider receipt、Email/Web Push、PITR/DR、HTTPS/OIDC 多用户矩阵和正式 SLO 未完成。
 - Memory/Outcome、完整 entitlement/usage、SBOM 签名和发布证明仍有缺口。

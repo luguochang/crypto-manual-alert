@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from typing import Any, Mapping, Sequence
@@ -111,6 +111,14 @@ def _require_reviewer(value: Any, role: str) -> str:
     return value.strip()
 
 
+def _normalize_evidence_path(value: Any, role: str) -> str:
+    text = _require_reviewer(value, role).replace("\\", "/")
+    path = PurePosixPath(text)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"ordered review chain {role} path escapes the repository")
+    return path.as_posix()
+
+
 def validate_review_chain(
     review_chain: Sequence[Mapping[str, Any]] | Any,
     *,
@@ -123,6 +131,11 @@ def validate_review_chain(
     if not isinstance(review_chain, list) or len(review_chain) != len(REVIEW_ROLES):
         raise ValueError("ordered review chain must contain all three required reviews")
     expected_sha = _require_candidate_sha(candidate_sha) if candidate_sha else None
+    expected_evidence_path = (
+        _normalize_evidence_path(evidence_path, "evidence")
+        if evidence_path is not None
+        else None
+    )
     normalized: list[dict[str, Any]] = []
     previous_time: datetime | None = None
     reviewers: set[str] = set()
@@ -184,16 +197,20 @@ def validate_review_chain(
             raise ValueError(
                 f"ordered review chain review {expected_role} targets another evidence note"
             )
-        review_evidence_path = _require_reviewer(
+        review_evidence_path = _normalize_evidence_path(
             review.get("evidence_path"), f"{expected_role} evidence"
         )
-        if evidence_path is not None and review_evidence_path != evidence_path:
+        if (
+            expected_evidence_path is not None
+            and review_evidence_path != expected_evidence_path
+        ):
             raise ValueError(
                 f"ordered review chain review {expected_role} has another evidence path"
             )
         _require_reviewer(review.get("scope"), f"{expected_role} review scope")
         _require_reviewer(review.get("command"), f"{expected_role} review command")
         review["evidence_sha256"] = normalized_evidence_sha
+        review["evidence_path"] = review_evidence_path
         normalized.append(review)
     return normalized
 

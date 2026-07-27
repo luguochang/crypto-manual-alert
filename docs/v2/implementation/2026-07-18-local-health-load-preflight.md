@@ -24,7 +24,7 @@ Status: local Product health probe complete; ADR 0006 SLO remains open
 ## Fresh Evidence
 
 A fresh Product HTTP process served the real FastAPI route
-`/app/api/v2/health` on loopback. The probe then executed:
+`/api/product/api/v2/health` on loopback. The probe then executed:
 
 ```text
 requests=200

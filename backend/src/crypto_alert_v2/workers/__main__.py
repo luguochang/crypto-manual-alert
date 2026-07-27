@@ -16,7 +16,15 @@ from crypto_alert_v2.auth.worker_authorization import (
 )
 from crypto_alert_v2.config import get_settings
 from crypto_alert_v2.notifications.credentials import (
-    notification_credential_cipher_from_environment,
+    notification_credential_cipher_from_secret_store,
+)
+from crypto_alert_v2.integrations.secret_store import (
+    integration_secret_store_from_environment,
+)
+from crypto_alert_v2.lifecycle.adapters import (
+    AegraCheckpointAdapter,
+    AegraStoreAdapter,
+    NotConfiguredLifecycleAdapter,
 )
 from crypto_alert_v2.monitors.agent_server_cron import AgentServerCronAdapter
 from crypto_alert_v2.notifications.resolver import DatabaseNotificationAdapterResolver
@@ -32,6 +40,7 @@ from crypto_alert_v2.observability.tenant_policy import resolve_tenant_policy
 from crypto_alert_v2.observability.verification import create_official_verifier
 from crypto_alert_v2.projections.reconciler import ProductProjectionReconciler
 from crypto_alert_v2.projections.domain_events import DomainEventProjectionWorker
+from crypto_alert_v2.providers.okx import OkxProvider
 from crypto_alert_v2.testing.failure_injection import (
     failure_injection_from_settings,
     install_database_failure_injection,
@@ -39,6 +48,10 @@ from crypto_alert_v2.testing.failure_injection import (
 from crypto_alert_v2.workers.notification import OutboxWorker
 from crypto_alert_v2.workers.lifecycle import LifecycleWorker
 from crypto_alert_v2.workers.monitor import MonitorCronWorker
+from crypto_alert_v2.workers.memory_outcome import (
+    MemoryDeletionWorker,
+    OutcomeMaturationWorker,
+)
 from crypto_alert_v2.workers.observability import (
     ObservabilityVerificationWorker,
     SqlAlchemyObservabilityVerificationStore,
@@ -79,8 +92,14 @@ async def _run_default(
     http_client = httpx.AsyncClient(timeout=8.0)
     langsmith_client = None
     langfuse_client = None
+    market_provider = None
     try:
-        credential_cipher = notification_credential_cipher_from_environment()
+        secret_store = integration_secret_store_from_environment(
+            app_environment=settings.app_environment
+        )
+        credential_cipher = notification_credential_cipher_from_secret_store(
+            secret_store
+        )
         if (
             settings.app_environment in {"staging", "production"}
             and credential_cipher is None
@@ -171,9 +190,52 @@ async def _run_default(
             retry_seconds=settings.observability_verification_retry_seconds,
             max_attempts=settings.observability_verification_max_attempts,
         )
+        lifecycle_adapters = [
+            AegraCheckpointAdapter(
+                client=agent_client,
+                authorization_provider=authorization_provider,
+            ),
+            AegraStoreAdapter(
+                client=agent_client,
+                authorization_provider=authorization_provider,
+            ),
+            NotConfiguredLifecycleAdapter(
+                "object_storage",
+                reason="no object storage backend is configured",
+            ),
+            NotConfiguredLifecycleAdapter(
+                "search",
+                reason="no Product-owned search index is configured",
+            ),
+        ]
+        if not observability_runtime.langsmith_enabled:
+            lifecycle_adapters.append(
+                NotConfiguredLifecycleAdapter(
+                    "langsmith",
+                    reason="LangSmith delivery is disabled for this deployment",
+                )
+            )
+        if not observability_runtime.langfuse_enabled:
+            lifecycle_adapters.append(
+                NotConfiguredLifecycleAdapter(
+                    "langfuse",
+                    reason="Langfuse delivery is disabled for this deployment",
+                )
+            )
         lifecycle_worker = LifecycleWorker(
             session_factory=session_factory,
             worker_id=f"{worker_id}:lifecycle",
+            deletion_adapters=lifecycle_adapters,
+        )
+        memory_deletion_worker = MemoryDeletionWorker(
+            session_factory=session_factory,
+            worker_id=f"{worker_id}:memory-deletion",
+        )
+        market_provider = OkxProvider(proxy=settings.market_data_http_proxy)
+        outcome_worker = OutcomeMaturationWorker(
+            session_factory=session_factory,
+            provider=market_provider,
+            worker_id=f"{worker_id}:outcome-maturation",
         )
         runtime_options = {
             "poll_interval": poll_interval,
@@ -203,6 +265,8 @@ async def _run_default(
                 "monitor_crons": monitor_cron_worker,
                 "observability": observability_worker,
                 "lifecycle": lifecycle_worker,
+                "memory_deletions": memory_deletion_worker,
+                "outcomes": outcome_worker,
             },
             **runtime_options,
         )
@@ -218,6 +282,8 @@ async def _run_default(
             await asyncio.to_thread(langsmith_client.close, timeout=2.0)
         if langfuse_client is not None:
             await asyncio.to_thread(langfuse_client.shutdown)
+        if market_provider is not None:
+            await asyncio.to_thread(market_provider.close)
         await http_client.aclose()
         await engine.dispose()
 

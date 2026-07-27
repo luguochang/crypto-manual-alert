@@ -19,11 +19,19 @@ from sqlalchemy.orm import aliased
 from crypto_alert_v2.api.request_identity import correlation_id_for_task
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    DecisionRequestSubmission,
     DataDeletionSubmission,
     DataLifecyclePolicyUpdate,
     DataExportSubmission,
     DeepResearchSubmission,
     FeedbackSubmission,
+    ImprovementCandidateSubmission,
+    ImprovementDatasetSubmission,
+    ImprovementExperimentSubmission,
+    ImprovementReviewDecisionSubmission,
+    ImprovementReleaseSubmission,
+    ImprovementShadowSubmission,
+    PostmortemSubmission,
     ForkSubmission,
     InboxQueryStatus,
     InboxReviewSubmission,
@@ -32,11 +40,41 @@ from crypto_alert_v2.api.schemas import (
     MonitorCreateSubmission,
     MonitorMutationSubmission,
     MonitorStatusFilter,
+    MemoryCreateSubmission,
+    MemoryDeleteSubmission,
+    MemoryUpdateSubmission,
     NotificationResendSubmission,
     NotificationSettingsUpdate,
 )
 from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.domain.decision_request import (
+    DecisionRequest,
+    route_decision_request,
+)
 from crypto_alert_v2.domain.models import SUPPORTED_SYMBOLS
+from crypto_alert_v2.domain.memory import MemoryRecord
+from crypto_alert_v2.domain.outcome import quality_is_reportable
+from crypto_alert_v2.evaluation.frozen_replay import (
+    FrozenReplayPacket,
+    freeze_replay_packet,
+    rule_judge,
+)
+from crypto_alert_v2.evaluation.governance import (
+    CandidateStatus,
+    RuleCandidate,
+    run_frozen_rule_experiment,
+    transition_candidate,
+)
+from crypto_alert_v2.evaluation.release_gate import evaluate_release_gate
+from crypto_alert_v2.evaluation.review_runtime import (
+    CandidateReviewReceipt,
+    CandidateReviewRuntime,
+)
+from crypto_alert_v2.api.agent_server import (
+    RemoteCheckpoint,
+    RemoteInterrupt,
+    RemoteRunHandle,
+)
 from crypto_alert_v2.graph.request import (
     ReviewResponse,
     parse_review_interrupt_payload,
@@ -53,6 +91,14 @@ from crypto_alert_v2.persistence.models import (
     ArtifactVersion,
     Decision,
     Feedback,
+    FrozenReplayRecord,
+    ImprovementCandidate,
+    ImprovementDataset,
+    ImprovementDatasetMember,
+    ImprovementExperiment,
+    ImprovementReview,
+    ImprovementReleaseEvent,
+    ImprovementShadowRun,
     InterruptPause,
     InterruptProjection,
     MarketSnapshot as PersistedMarketSnapshot,
@@ -74,6 +120,11 @@ from crypto_alert_v2.persistence.models import (
     WatchlistItem,
     Workspace,
     WorkspaceEntitlement,
+    UsageReconciliation,
+    MemoryEntry,
+    MemoryDeletionJob,
+    OutcomeObservation,
+    PostmortemCase,
 )
 from crypto_alert_v2.notifications.credentials import NotificationCredentialCipher
 from crypto_alert_v2.notifications.outbox import request_manual_resend
@@ -89,6 +140,12 @@ from crypto_alert_v2.persistence.monitor_repository import (
     MonitorIdempotencyConflict,
     MonitorRepository,
     MonitorVersionConflict,
+)
+from crypto_alert_v2.persistence.usage_governance import (
+    UsageGovernanceRepository,
+    entitlement_limits,
+    reconciliation_view,
+    usage_period_start,
 )
 from crypto_alert_v2.projections.task import project_task_run_sources
 
@@ -146,6 +203,10 @@ class MonitorConflictError(RuntimeError):
 
 
 class MonitorEntitlementError(RuntimeError):
+    pass
+
+
+class CandidateReviewUnavailableError(RuntimeError):
     pass
 
 
@@ -483,6 +544,258 @@ def _feedback_view(feedback: Feedback | None) -> dict[str, Any] | None:
         "comment": feedback.comment,
         "created_at": feedback.created_at,
         "updated_at": feedback.updated_at,
+    }
+
+
+def _frozen_replay_view(record: FrozenReplayRecord | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    packet = record.packet
+    return {
+        "id": record.id,
+        "postmortem_id": record.postmortem_id,
+        "task_id": record.task_id,
+        "run_id": record.run_id,
+        "artifact_version_id": record.artifact_version_id,
+        "schema_version": record.schema_version,
+        "source_hash": record.source_hash,
+        "allow_live_fetch": packet.get("allow_live_fetch", False),
+        "allow_live_side_effects": packet.get("allow_live_side_effects", False),
+        "rule_metrics": record.rule_metrics,
+        "created_at": record.created_at,
+    }
+
+
+def _postmortem_view(
+    case: PostmortemCase,
+    replay: FrozenReplayRecord | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": case.id,
+        "feedback_id": case.feedback_id,
+        "task_id": case.task_id,
+        "run_id": case.run_id,
+        "artifact_version_id": case.artifact_version_id,
+        "category": case.category,
+        "status": case.status,
+        "title": case.title,
+        "summary": case.summary,
+        "root_cause": case.root_cause,
+        "expected_behavior": case.expected_behavior,
+        "actual_behavior": case.actual_behavior,
+        "source_hash": case.source_hash,
+        "frozen_replay": _frozen_replay_view(replay),
+        "created_at": case.created_at,
+        "updated_at": case.updated_at,
+    }
+
+
+def _improvement_dataset_view(
+    dataset: ImprovementDataset,
+    members: Sequence[ImprovementDatasetMember],
+) -> dict[str, Any]:
+    return {
+        "id": dataset.id,
+        "name": dataset.name,
+        "status": dataset.status,
+        "replay_count": len(members),
+        "case_names": [member.case_name for member in members],
+        "source_hash": dataset.source_hash,
+        "frozen_at": dataset.frozen_at,
+        "created_at": dataset.created_at,
+        "updated_at": dataset.updated_at,
+    }
+
+
+def _improvement_experiment_view(
+    experiment: ImprovementExperiment,
+) -> dict[str, Any]:
+    return {
+        "id": experiment.id,
+        "dataset_id": experiment.dataset_id,
+        "candidate_id": experiment.candidate_id,
+        "status": experiment.status,
+        "prompt_version": experiment.prompt_version,
+        "git_revision": experiment.git_revision,
+        "case_results": experiment.case_results,
+        "metrics": experiment.metrics,
+        "gate_report": experiment.gate_report,
+        "source_hash": experiment.source_hash,
+        "completed_at": experiment.completed_at,
+        "created_at": experiment.created_at,
+    }
+
+
+def _improvement_candidate_view(
+    candidate: ImprovementCandidate,
+    experiment: ImprovementExperiment | None = None,
+    review: ImprovementReview | None = None,
+    shadow: ImprovementShadowRun | None = None,
+    release_events: Sequence[ImprovementReleaseEvent] = (),
+) -> dict[str, Any]:
+    return {
+        "id": candidate.id,
+        "name": candidate.name,
+        "base_version": candidate.base_version,
+        "candidate_version": candidate.candidate_version,
+        "rollback_target_version": candidate.rollback_target_version,
+        "rationale": candidate.rationale,
+        "diff": candidate.diff,
+        "version_hash": candidate.version_hash,
+        "status": candidate.status,
+        "latest_experiment": (
+            _improvement_experiment_view(experiment)
+            if experiment is not None
+            else None
+        ),
+        "latest_review": (
+            _improvement_review_view(review) if review is not None else None
+        ),
+        "latest_shadow": (
+            _improvement_shadow_view(shadow) if shadow is not None else None
+        ),
+        "release_events": [
+            _improvement_release_event_view(event) for event in release_events
+        ],
+        "created_at": candidate.created_at,
+        "updated_at": candidate.updated_at,
+    }
+
+
+def _improvement_review_view(review: ImprovementReview) -> dict[str, Any]:
+    return {
+        "id": review.id,
+        "candidate_id": review.candidate_id,
+        "status": review.status,
+        "official_assistant_id": review.official_assistant_id,
+        "official_thread_id": review.official_thread_id,
+        "official_run_id": review.official_run_id,
+        "official_interrupt_id": review.official_interrupt_id,
+        "interrupt_payload": review.interrupt_payload,
+        "response": review.response,
+        "decided_at": review.decided_at,
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
+    }
+
+
+def _improvement_shadow_view(shadow: ImprovementShadowRun) -> dict[str, Any]:
+    return {
+        "id": shadow.id,
+        "candidate_id": shadow.candidate_id,
+        "baseline_version": shadow.baseline_version,
+        "status": shadow.status,
+        "minimum_runs": shadow.minimum_runs,
+        "observed_runs": shadow.observed_runs,
+        "comparison": shadow.comparison,
+        "source_hash": shadow.source_hash,
+        "completed_at": shadow.completed_at,
+        "created_at": shadow.created_at,
+        "updated_at": shadow.updated_at,
+    }
+
+
+def _improvement_release_event_view(
+    event: ImprovementReleaseEvent,
+) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "candidate_id": event.candidate_id,
+        "action": event.action,
+        "from_version": event.from_version,
+        "to_version": event.to_version,
+        "rollback_target_version": event.rollback_target_version,
+        "reason": event.reason,
+        "evidence": event.evidence,
+        "source_hash": event.source_hash,
+        "created_at": event.created_at,
+    }
+
+
+def _candidate_review_receipt(review: ImprovementReview) -> CandidateReviewReceipt:
+    checkpoint = review.checkpoint
+    if (
+        review.official_assistant_id is None
+        or review.official_thread_id is None
+        or review.official_run_id is None
+        or review.official_interrupt_id is None
+        or review.interrupt_payload is None
+        or not isinstance(checkpoint, dict)
+    ):
+        raise CandidateReviewUnavailableError(
+            "Candidate review has no complete official interrupt receipt."
+        )
+    remote_checkpoint = RemoteCheckpoint(
+        thread_id=str(checkpoint["thread_id"]),
+        checkpoint_ns=str(checkpoint["checkpoint_ns"]),
+        checkpoint_id=str(checkpoint["checkpoint_id"]),
+        checkpoint_map={
+            str(key): str(value)
+            for key, value in dict(checkpoint.get("checkpoint_map", {})).items()
+        },
+    )
+    return CandidateReviewReceipt(
+        handle=RemoteRunHandle(
+            assistant_id=review.official_assistant_id,
+            thread_id=review.official_thread_id,
+            run_id=review.official_run_id,
+        ),
+        interrupt=RemoteInterrupt(
+            interrupt_id=review.official_interrupt_id,
+            namespace=remote_checkpoint.checkpoint_ns,
+            checkpoint_id=remote_checkpoint.checkpoint_id,
+            value=review.interrupt_payload,
+        ),
+        checkpoint=remote_checkpoint,
+    )
+
+
+def _memory_view(memory: MemoryEntry) -> dict[str, Any]:
+    return {
+        "id": memory.id,
+        "tenant_id": memory.tenant_id,
+        "workspace_id": memory.workspace_id,
+        "owner_user_id": memory.owner_user_id,
+        "session_id": memory.session_id,
+        "scope": memory.scope,
+        "purpose": memory.purpose,
+        "key": memory.memory_key,
+        "content": memory.content,
+        "enabled": memory.enabled,
+        "expires_at": memory.expires_at,
+        "refreshed_at": memory.refreshed_at,
+        "source_artifact_id": memory.source_artifact_id,
+        "deleted_at": memory.deleted_at,
+        "created_at": memory.created_at,
+        "updated_at": memory.updated_at,
+    }
+
+
+def _outcome_view(outcome: OutcomeObservation) -> dict[str, Any]:
+    return {
+        "id": outcome.id,
+        "artifact_version_id": outcome.artifact_version_id,
+        "task_id": outcome.task_id,
+        "run_id": outcome.run_id,
+        "action": outcome.action,
+        "baseline": outcome.baseline,
+        "status": outcome.status,
+        "predicted_probability": (
+            float(outcome.predicted_probability)
+            if outcome.predicted_probability is not None
+            else None
+        ),
+        "realized_label": (
+            float(outcome.realized_label) if outcome.realized_label is not None else None
+        ),
+        "horizon": outcome.horizon,
+        "source": outcome.source,
+        "maturation_at": outcome.maturation_at,
+        "observed_at": outcome.observed_at,
+        "metrics": outcome.metrics,
+        "source_hash": outcome.source_hash,
+        "created_at": outcome.created_at,
+        "updated_at": outcome.updated_at,
     }
 
 
@@ -1122,6 +1435,7 @@ class ProductAnalysisService:
         session_factory: Callable[[], AsyncSession],
         inbox_cursor_key: bytes | None = None,
         notification_credential_cipher: NotificationCredentialCipher | None = None,
+        candidate_review_runtime: CandidateReviewRuntime | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -1135,6 +1449,7 @@ class ProductAnalysisService:
             b"crypto-alert-v2:product-inbox-cursor:key\0" + key_material
         ).digest()
         self._notification_credential_cipher = notification_credential_cipher
+        self._candidate_review_runtime = candidate_review_runtime
         self._lifecycle = LifecycleService(
             session_factory=session_factory,
             clock=self._clock,
@@ -1149,6 +1464,69 @@ class ProductAnalysisService:
     async def check_database(self) -> None:
         async with self._session_factory() as session:
             await session.execute(select(1))
+
+    async def get_usage_governance(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = self._now()
+        period = usage_period_start(period_start or now)
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            repository = UsageGovernanceRepository(session, resolved)
+            entitlement = await repository.require_entitlement(now=now)
+            totals = {unit: 0 for unit in entitlement_limits(entitlement)}
+            totals.update(await repository.current_totals(period_start=period))
+            latest = await session.scalar(
+                select(UsageReconciliation)
+                .where(
+                    UsageReconciliation.tenant_id == resolved.tenant_id,
+                    UsageReconciliation.workspace_id == resolved.workspace_id,
+                    UsageReconciliation.period_start == period,
+                )
+                .order_by(
+                    UsageReconciliation.created_at.desc(),
+                    UsageReconciliation.id.desc(),
+                )
+                .limit(1)
+            )
+            return {
+                "period_start": period,
+                "entitlement": {
+                    "allowed_task_types": entitlement.allowed_task_types,
+                    "active_monitor_limit": entitlement.active_monitor_limit,
+                    "min_interval_seconds": entitlement.min_interval_seconds,
+                    "max_concurrent_tasks": entitlement.max_concurrent_tasks,
+                    "max_retention_days": entitlement.max_retention_days,
+                    "limits": entitlement_limits(entitlement),
+                    "valid_from": entitlement.valid_from,
+                    "valid_until": entitlement.valid_until,
+                },
+                "totals": totals,
+                "latest_reconciliation": (
+                    reconciliation_view(latest) if latest is not None else None
+                ),
+            }
+
+    async def reconcile_usage(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+        repair: bool = True,
+    ) -> dict[str, Any]:
+        now = self._now()
+        period = usage_period_start(period_start or now)
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            receipt = await UsageGovernanceRepository(
+                session, resolved
+            ).reconcile(period_start=period, repair=repair, now=now)
+            return reconciliation_view(receipt)
 
     async def bootstrap_actor(self, actor: ActorContext) -> None:
         await self.provision_actor(
@@ -1444,6 +1822,37 @@ class ProductAnalysisService:
             task_type="market_analysis",
             thread_title=f"{submission.symbol} {submission.horizon} analysis",
         )
+
+    async def create_decision_request(
+        self,
+        actor: ActorContext,
+        submission: DecisionRequestSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        request = submission.to_domain_request(
+            actor_id=actor.user_id,
+            workspace_id=actor.workspace_id,
+        )
+        route = route_decision_request(request)
+        task = None
+        if route.status == "admitted" and route.task_type is not None:
+            assert request.symbol is not None
+            assert request.horizon is not None
+            task = await self._create_product_task(
+                actor,
+                request,
+                idempotency_key,
+                task_type=route.task_type,
+                thread_title=(
+                    f"{request.symbol} {request.horizon} "
+                    f"{route.task_type.replace('_', ' ')}"
+                ),
+            )
+        return {
+            "request": request,
+            "route": route,
+            "task": task,
+        }
 
     async def create_deep_research(
         self,
@@ -1750,7 +2159,7 @@ class ProductAnalysisService:
     async def _create_product_task(
         self,
         actor: ActorContext,
-        submission: AnalysisSubmission | DeepResearchSubmission,
+        submission: AnalysisSubmission | DeepResearchSubmission | DecisionRequest,
         idempotency_key: str,
         *,
         task_type: str,
@@ -1769,6 +2178,14 @@ class ProductAnalysisService:
                     _require_same_payload(existing, payload_hash)
                     return await _task_view(session, resolved, existing)
 
+                task_id = uuid4()
+                await UsageGovernanceRepository(session, resolved).admit_agent(
+                    task_type=task_type,
+                    resource_type="task",
+                    resource_id=str(task_id),
+                    idempotency_key=f"agent-admission:{task_id}",
+                    now=self._now(),
+                )
                 thread = Thread(
                     id=uuid4(),
                     tenant_id=resolved.tenant_id,
@@ -1780,7 +2197,7 @@ class ProductAnalysisService:
                 session.add(thread)
                 await session.flush()
                 task = Task(
-                    id=uuid4(),
+                    id=task_id,
                     tenant_id=resolved.tenant_id,
                     workspace_id=resolved.workspace_id,
                     owner_user_id=resolved.user_id,
@@ -3138,7 +3555,1210 @@ class ProductAnalysisService:
             )
             session.add(feedback)
             await session.flush()
+            if feedback.rating == "negative":
+                source_payload = {
+                    "feedback_id": str(feedback.id),
+                    "run_id": str(run.id),
+                    "task_id": str(run.task_id),
+                    "artifact_version_id": (
+                        str(artifact_version_id)
+                        if artifact_version_id is not None
+                        else None
+                    ),
+                    "rating": feedback.rating,
+                    "comment": feedback.comment,
+                }
+                session.add(
+                    PostmortemCase(
+                        id=uuid4(),
+                        tenant_id=resolved.tenant_id,
+                        workspace_id=resolved.workspace_id,
+                        owner_user_id=resolved.user_id,
+                        feedback_id=feedback.id,
+                        task_id=run.task_id,
+                        run_id=run.id,
+                        artifact_version_id=artifact_version_id,
+                        category="negative_feedback",
+                        status="open",
+                        title="Negative feedback badcase",
+                        summary=feedback.comment or (
+                            "The operator marked this persisted run as needing improvement."
+                        ),
+                        root_cause=None,
+                        expected_behavior=None,
+                        actual_behavior=None,
+                        source_hash=_payload_hash(source_payload),
+                        idempotency_key=f"postmortem:feedback:{feedback.id}",
+                    )
+                )
+                await session.flush()
             return _feedback_view(feedback) or {}
+
+    async def create_postmortem(
+        self,
+        actor: ActorContext,
+        run_id: str,
+        submission: PostmortemSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        run_uuid = _optional_uuid(run_id)
+        if run_uuid is None:
+            return None
+        operation_key = (
+            f"postmortem:{run_uuid}:{sha256(idempotency_key.encode()).hexdigest()}"
+        )
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            run = await session.scalar(
+                select(Run).where(
+                    Run.id == run_uuid,
+                    Run.tenant_id == resolved.tenant_id,
+                    Run.workspace_id == resolved.workspace_id,
+                    Run.owner_user_id == resolved.user_id,
+                )
+            )
+            if run is None:
+                return None
+            artifact_version_id = await session.scalar(
+                select(ArtifactVersion.id)
+                .where(
+                    ArtifactVersion.tenant_id == resolved.tenant_id,
+                    ArtifactVersion.workspace_id == resolved.workspace_id,
+                    ArtifactVersion.owner_user_id == resolved.user_id,
+                    ArtifactVersion.task_id == run.task_id,
+                    ArtifactVersion.run_id == run.id,
+                )
+                .order_by(ArtifactVersion.version_number.desc())
+                .limit(1)
+            )
+            source_payload = {
+                "run_id": str(run.id),
+                "task_id": str(run.task_id),
+                "artifact_version_id": (
+                    str(artifact_version_id)
+                    if artifact_version_id is not None
+                    else None
+                ),
+                **submission.model_dump(mode="json"),
+            }
+            source_hash = _payload_hash(source_payload)
+            existing = await session.scalar(
+                select(PostmortemCase).where(
+                    PostmortemCase.tenant_id == resolved.tenant_id,
+                    PostmortemCase.workspace_id == resolved.workspace_id,
+                    PostmortemCase.owner_user_id == resolved.user_id,
+                    PostmortemCase.idempotency_key == operation_key,
+                )
+            )
+            if existing is not None:
+                if existing.source_hash != source_hash:
+                    raise IdempotencyConflictError(
+                        "Postmortem idempotency key conflicts with its payload."
+                    )
+                replay = await session.scalar(
+                    select(FrozenReplayRecord).where(
+                        FrozenReplayRecord.postmortem_id == existing.id
+                    )
+                )
+                return _postmortem_view(existing, replay)
+            case = PostmortemCase(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                feedback_id=None,
+                task_id=run.task_id,
+                run_id=run.id,
+                artifact_version_id=artifact_version_id,
+                category=submission.category,
+                status="open",
+                title=submission.title,
+                summary=submission.summary,
+                root_cause=submission.root_cause,
+                expected_behavior=submission.expected_behavior,
+                actual_behavior=submission.actual_behavior,
+                source_hash=source_hash,
+                idempotency_key=operation_key,
+            )
+            session.add(case)
+            await session.flush()
+            return _postmortem_view(case)
+
+    async def list_postmortems(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            rows = (
+                await session.execute(
+                    select(PostmortemCase, FrozenReplayRecord)
+                    .outerjoin(
+                        FrozenReplayRecord,
+                        FrozenReplayRecord.postmortem_id == PostmortemCase.id,
+                    )
+                    .where(
+                        PostmortemCase.tenant_id == resolved.tenant_id,
+                        PostmortemCase.workspace_id == resolved.workspace_id,
+                        PostmortemCase.owner_user_id == resolved.user_id,
+                    )
+                    .order_by(PostmortemCase.created_at.desc(), PostmortemCase.id.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return {
+                "items": [_postmortem_view(case, replay) for case, replay in rows],
+                "limit": limit,
+            }
+
+    async def freeze_postmortem(
+        self,
+        actor: ActorContext,
+        postmortem_id: str,
+    ) -> dict[str, Any] | None:
+        case_uuid = _optional_uuid(postmortem_id)
+        if case_uuid is None:
+            return None
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            case = await session.scalar(
+                select(PostmortemCase)
+                .where(
+                    PostmortemCase.id == case_uuid,
+                    PostmortemCase.tenant_id == resolved.tenant_id,
+                    PostmortemCase.workspace_id == resolved.workspace_id,
+                    PostmortemCase.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if case is None:
+                return None
+            existing = await session.scalar(
+                select(FrozenReplayRecord).where(
+                    FrozenReplayRecord.postmortem_id == case.id
+                )
+            )
+            if existing is not None:
+                return _postmortem_view(case, existing)
+
+            task = await session.scalar(select(Task).where(Task.id == case.task_id))
+            run = await session.scalar(select(Run).where(Run.id == case.run_id))
+            if task is None or run is None:
+                raise RuntimeError("Postmortem source Task or Run is unavailable")
+            artifact_version = (
+                await session.scalar(
+                    select(ArtifactVersion).where(
+                        ArtifactVersion.id == case.artifact_version_id
+                    )
+                )
+                if case.artifact_version_id is not None
+                else None
+            )
+            market = await session.scalar(
+                select(PersistedMarketSnapshot)
+                .where(PersistedMarketSnapshot.run_id == run.id)
+                .order_by(PersistedMarketSnapshot.fetched_at.desc())
+                .limit(1)
+            )
+            evidence_rows = list(
+                (
+                    await session.scalars(
+                        select(PersistedWebEvidence)
+                        .where(PersistedWebEvidence.run_id == run.id)
+                        .order_by(PersistedWebEvidence.created_at, PersistedWebEvidence.id)
+                    )
+                ).all()
+            )
+            decision = await session.scalar(
+                select(Decision).where(Decision.run_id == run.id)
+            )
+            packet = freeze_replay_packet(
+                request=task.request_payload,
+                versions={
+                    "task_type": task.task_type,
+                    "run_attempt": run.attempt,
+                    "artifact_schema_version": (
+                        artifact_version.schema_version
+                        if artifact_version is not None
+                        else None
+                    ),
+                    "artifact_version_number": (
+                        artifact_version.version_number
+                        if artifact_version is not None
+                        else None
+                    ),
+                },
+                market=(market.snapshot if market is not None else {}),
+                evidence=tuple(
+                    {
+                        **row.payload,
+                        "source_url": row.source_url,
+                        "title": row.title,
+                        "fetched_at": row.fetched_at.isoformat(),
+                        "published_at": (
+                            row.published_at.isoformat()
+                            if row.published_at is not None
+                            else None
+                        ),
+                    }
+                    for row in evidence_rows
+                ),
+                gates={
+                    "evidence": (
+                        decision.evidence_verdict if decision is not None else {}
+                    ),
+                    "risk": decision.risk_verdict if decision is not None else {},
+                },
+                observed_output={
+                    "terminal_status": run.status,
+                    "main_action": (
+                        decision.decision.get("main_action")
+                        if decision is not None
+                        else _run_main_action(run)
+                    ),
+                    "artifact": (
+                        artifact_version.content if artifact_version is not None else None
+                    ),
+                    "failure_code": run.failure_code,
+                },
+            )
+            metrics = rule_judge(packet)
+            record = FrozenReplayRecord(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                postmortem_id=case.id,
+                task_id=case.task_id,
+                run_id=case.run_id,
+                artifact_version_id=case.artifact_version_id,
+                schema_version=packet.schema_version,
+                packet=packet.model_dump(mode="json"),
+                source_hash=packet.source_hash,
+                rule_metrics=metrics.model_dump(mode="json"),
+            )
+            session.add(record)
+            case.status = "frozen"
+            await session.flush()
+            await session.refresh(case)
+            await session.refresh(record)
+            return _postmortem_view(case, record)
+
+    async def create_improvement_dataset(
+        self,
+        actor: ActorContext,
+        submission: ImprovementDatasetSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            replay_rows = list(
+                (
+                    await session.scalars(
+                        select(FrozenReplayRecord)
+                        .where(
+                            FrozenReplayRecord.id.in_(submission.replay_ids),
+                            FrozenReplayRecord.tenant_id == resolved.tenant_id,
+                            FrozenReplayRecord.workspace_id == resolved.workspace_id,
+                            FrozenReplayRecord.owner_user_id == resolved.user_id,
+                        )
+                        .order_by(FrozenReplayRecord.created_at, FrozenReplayRecord.id)
+                    )
+                ).all()
+            )
+            if len(replay_rows) != len(submission.replay_ids):
+                return None
+            source_payload = {
+                "name": submission.name,
+                "replays": [
+                    {"id": str(row.id), "source_hash": row.source_hash}
+                    for row in replay_rows
+                ],
+            }
+            source_hash = _payload_hash(source_payload)
+            operation_key = (
+                f"dataset:{sha256(idempotency_key.encode()).hexdigest()}"
+            )
+            existing = await session.scalar(
+                select(ImprovementDataset).where(
+                    ImprovementDataset.tenant_id == resolved.tenant_id,
+                    ImprovementDataset.workspace_id == resolved.workspace_id,
+                    ImprovementDataset.owner_user_id == resolved.user_id,
+                    ImprovementDataset.idempotency_key == operation_key,
+                )
+            )
+            if existing is not None:
+                if existing.source_hash != source_hash:
+                    raise IdempotencyConflictError(
+                        "Improvement Dataset idempotency key conflicts with its payload."
+                    )
+                members = list(
+                    (
+                        await session.scalars(
+                            select(ImprovementDatasetMember)
+                            .where(ImprovementDatasetMember.dataset_id == existing.id)
+                            .order_by(ImprovementDatasetMember.ordinal)
+                        )
+                    ).all()
+                )
+                return _improvement_dataset_view(existing, members)
+            dataset = ImprovementDataset(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                name=submission.name,
+                status="frozen",
+                source_hash=source_hash,
+                idempotency_key=operation_key,
+                frozen_at=self._now(),
+            )
+            session.add(dataset)
+            await session.flush()
+            members: list[ImprovementDatasetMember] = []
+            for ordinal, row in enumerate(replay_rows, start=1):
+                member = ImprovementDatasetMember(
+                    id=uuid4(),
+                    tenant_id=resolved.tenant_id,
+                    workspace_id=resolved.workspace_id,
+                    owner_user_id=resolved.user_id,
+                    dataset_id=dataset.id,
+                    replay_id=row.id,
+                    case_name=f"frozen-{ordinal:03d}",
+                    ordinal=ordinal,
+                    source_hash=row.source_hash,
+                )
+                members.append(member)
+                session.add(member)
+            await session.flush()
+            await session.refresh(dataset)
+            for member in members:
+                await session.refresh(member)
+            return _improvement_dataset_view(dataset, members)
+
+    async def list_improvement_datasets(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            datasets = list(
+                (
+                    await session.scalars(
+                        select(ImprovementDataset)
+                        .where(
+                            ImprovementDataset.tenant_id == resolved.tenant_id,
+                            ImprovementDataset.workspace_id == resolved.workspace_id,
+                            ImprovementDataset.owner_user_id == resolved.user_id,
+                        )
+                        .order_by(
+                            ImprovementDataset.created_at.desc(),
+                            ImprovementDataset.id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
+            items: list[dict[str, Any]] = []
+            for dataset in datasets:
+                members = list(
+                    (
+                        await session.scalars(
+                            select(ImprovementDatasetMember)
+                            .where(ImprovementDatasetMember.dataset_id == dataset.id)
+                            .order_by(ImprovementDatasetMember.ordinal)
+                        )
+                    ).all()
+                )
+                items.append(_improvement_dataset_view(dataset, members))
+            return {"items": items, "limit": limit}
+
+    async def create_improvement_candidate(
+        self,
+        actor: ActorContext,
+        submission: ImprovementCandidateSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        candidate = RuleCandidate.create(
+            name=submission.name,
+            base_version=submission.base_version,
+            candidate_version=submission.candidate_version,
+            rollback_target_version=submission.rollback_target_version,
+            rationale=submission.rationale,
+            diff=submission.diff,
+        )
+        operation_key = f"candidate:{sha256(idempotency_key.encode()).hexdigest()}"
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            existing = await session.scalar(
+                select(ImprovementCandidate).where(
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                    ImprovementCandidate.idempotency_key == operation_key,
+                )
+            )
+            if existing is not None:
+                if existing.version_hash != candidate.version_hash:
+                    raise IdempotencyConflictError(
+                        "Improvement Candidate idempotency key conflicts with its payload."
+                    )
+                return _improvement_candidate_view(existing)
+            record = ImprovementCandidate(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                name=candidate.name,
+                base_version=candidate.base_version,
+                candidate_version=candidate.candidate_version,
+                rollback_target_version=candidate.rollback_target_version,
+                rationale=candidate.rationale,
+                diff=dict(candidate.diff),
+                version_hash=candidate.version_hash,
+                status=CandidateStatus.DRAFT.value,
+                idempotency_key=operation_key,
+            )
+            session.add(record)
+            await session.flush()
+            await session.refresh(record)
+            return _improvement_candidate_view(record)
+
+    async def list_improvement_candidates(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            candidates = list(
+                (
+                    await session.scalars(
+                        select(ImprovementCandidate)
+                        .where(
+                            ImprovementCandidate.tenant_id == resolved.tenant_id,
+                            ImprovementCandidate.workspace_id == resolved.workspace_id,
+                            ImprovementCandidate.owner_user_id == resolved.user_id,
+                        )
+                        .order_by(
+                            ImprovementCandidate.created_at.desc(),
+                            ImprovementCandidate.id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
+            items: list[dict[str, Any]] = []
+            for candidate in candidates:
+                latest = await session.scalar(
+                    select(ImprovementExperiment)
+                    .where(ImprovementExperiment.candidate_id == candidate.id)
+                    .order_by(
+                        ImprovementExperiment.created_at.desc(),
+                        ImprovementExperiment.id.desc(),
+                    )
+                    .limit(1)
+                )
+                review = await session.scalar(
+                    select(ImprovementReview).where(
+                        ImprovementReview.candidate_id == candidate.id
+                    )
+                )
+                shadow = await session.scalar(
+                    select(ImprovementShadowRun)
+                    .where(ImprovementShadowRun.candidate_id == candidate.id)
+                    .order_by(ImprovementShadowRun.created_at.desc())
+                    .limit(1)
+                )
+                release_events = list(
+                    (
+                        await session.scalars(
+                            select(ImprovementReleaseEvent)
+                            .where(ImprovementReleaseEvent.candidate_id == candidate.id)
+                            .order_by(ImprovementReleaseEvent.created_at)
+                        )
+                    ).all()
+                )
+                items.append(
+                    _improvement_candidate_view(
+                        candidate,
+                        latest,
+                        review,
+                        shadow,
+                        release_events,
+                    )
+                )
+            return {"items": items, "limit": limit}
+
+    async def run_improvement_experiment(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementExperimentSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        operation_key = f"experiment:{sha256(idempotency_key.encode()).hexdigest()}"
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            candidate = await session.scalar(
+                select(ImprovementCandidate)
+                .where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            dataset = await session.scalar(
+                select(ImprovementDataset).where(
+                    ImprovementDataset.id == submission.dataset_id,
+                    ImprovementDataset.tenant_id == resolved.tenant_id,
+                    ImprovementDataset.workspace_id == resolved.workspace_id,
+                    ImprovementDataset.owner_user_id == resolved.user_id,
+                    ImprovementDataset.status == "frozen",
+                )
+            )
+            if candidate is None or dataset is None:
+                return None
+            existing = await session.scalar(
+                select(ImprovementExperiment).where(
+                    ImprovementExperiment.tenant_id == resolved.tenant_id,
+                    ImprovementExperiment.workspace_id == resolved.workspace_id,
+                    ImprovementExperiment.owner_user_id == resolved.user_id,
+                    ImprovementExperiment.idempotency_key == operation_key,
+                )
+            )
+            if existing is not None:
+                return _improvement_candidate_view(candidate, existing)
+            members = list(
+                (
+                    await session.scalars(
+                        select(ImprovementDatasetMember)
+                        .where(
+                            ImprovementDatasetMember.dataset_id == dataset.id,
+                            ImprovementDatasetMember.tenant_id == resolved.tenant_id,
+                            ImprovementDatasetMember.workspace_id == resolved.workspace_id,
+                            ImprovementDatasetMember.owner_user_id == resolved.user_id,
+                        )
+                        .order_by(ImprovementDatasetMember.ordinal)
+                    )
+                ).all()
+            )
+            replay_rows = list(
+                (
+                    await session.scalars(
+                        select(FrozenReplayRecord).where(
+                            FrozenReplayRecord.id.in_(
+                                [member.replay_id for member in members]
+                            ),
+                            FrozenReplayRecord.tenant_id == resolved.tenant_id,
+                            FrozenReplayRecord.workspace_id == resolved.workspace_id,
+                            FrozenReplayRecord.owner_user_id == resolved.user_id,
+                        )
+                    )
+                ).all()
+            )
+            replay_by_id = {row.id: row for row in replay_rows}
+            if len(replay_by_id) != len(members):
+                raise RuntimeError("Improvement Dataset contains unavailable replays")
+            frozen_cases = tuple(
+                (
+                    member.case_name,
+                    FrozenReplayPacket.model_validate(replay_by_id[member.replay_id].packet),
+                )
+                for member in members
+            )
+            candidate_domain = RuleCandidate.create(
+                name=candidate.name,
+                base_version=candidate.base_version,
+                candidate_version=candidate.candidate_version,
+                rollback_target_version=candidate.rollback_target_version,
+                rationale=candidate.rationale,
+                diff=candidate.diff,
+            )
+            result = run_frozen_rule_experiment(
+                frozen_cases,
+                candidate=candidate_domain,
+                prompt_version=submission.prompt_version,
+                git_revision=submission.git_revision,
+            )
+            minimum_scores = candidate.diff.get("minimum_scores", {})
+            thresholds = {
+                metric: float(minimum_scores.get(metric, 1.0))
+                for metric in ("structure", "evidence", "risk", "product_output")
+            }
+            gate = evaluate_release_gate(
+                result,
+                thresholds=thresholds,
+                expected_case_names=[member.case_name for member in members],
+            )
+            case_results = [
+                {"case_name": item.case_name, "scores": item.scores}
+                for item in result.case_results
+            ]
+            gate_report = {
+                "approved": gate.approved,
+                "reasons": list(gate.reasons),
+                "metrics": gate.metrics,
+                "thresholds": gate.thresholds,
+                "prompt_version": gate.prompt_version,
+                "git_revision": gate.git_revision,
+            }
+            source_hash = _payload_hash(
+                {
+                    "candidate": candidate.version_hash,
+                    "dataset": dataset.source_hash,
+                    "prompt_version": submission.prompt_version,
+                    "git_revision": submission.git_revision,
+                    "gate": gate_report,
+                }
+            )
+            experiment = ImprovementExperiment(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                dataset_id=dataset.id,
+                candidate_id=candidate.id,
+                status="succeeded" if gate.approved else "failed",
+                prompt_version=submission.prompt_version,
+                git_revision=submission.git_revision,
+                case_results=case_results,
+                metrics=result.metrics,
+                gate_report=gate_report,
+                source_hash=source_hash,
+                idempotency_key=operation_key,
+                completed_at=self._now(),
+            )
+            session.add(experiment)
+            if candidate.status == CandidateStatus.DRAFT.value:
+                candidate.status = transition_candidate(
+                    CandidateStatus.DRAFT, CandidateStatus.EVALUATED
+                ).value
+            elif candidate.status != CandidateStatus.EVALUATED.value:
+                raise ValueError(
+                    "only draft or evaluated candidates can run a frozen experiment"
+                )
+            await session.flush()
+            await session.refresh(candidate)
+            await session.refresh(experiment)
+            return _improvement_candidate_view(candidate, experiment)
+
+    async def request_improvement_review(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        if self._candidate_review_runtime is None:
+            raise CandidateReviewUnavailableError(
+                "Candidate review runtime is not configured."
+            )
+        operation_key = f"candidate-review:{sha256(idempotency_key.encode()).hexdigest()}"
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            candidate = await session.scalar(
+                select(ImprovementCandidate)
+                .where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None:
+                return None
+            experiment = await session.scalar(
+                select(ImprovementExperiment)
+                .where(ImprovementExperiment.candidate_id == candidate.id)
+                .order_by(
+                    ImprovementExperiment.created_at.desc(),
+                    ImprovementExperiment.id.desc(),
+                )
+                .limit(1)
+            )
+            if (
+                experiment is None
+                or experiment.status != "succeeded"
+                or not bool(experiment.gate_report.get("approved"))
+            ):
+                raise ValueError(
+                    "Candidate review requires a passing frozen Release Gate."
+                )
+            review = await session.scalar(
+                select(ImprovementReview)
+                .where(ImprovementReview.candidate_id == candidate.id)
+                .with_for_update()
+            )
+            if review is None:
+                if candidate.status != CandidateStatus.EVALUATED.value:
+                    raise ValueError(
+                        "only evaluated candidates can request human review"
+                    )
+                review_id_value = uuid4()
+                await UsageGovernanceRepository(session, resolved).admit_agent(
+                    task_type="candidate_review",
+                    resource_type="improvement_review",
+                    resource_id=str(review_id_value),
+                    idempotency_key=(
+                        f"candidate-review-admission:{review_id_value}"
+                    ),
+                    now=self._now(),
+                )
+                review = ImprovementReview(
+                    id=review_id_value,
+                    tenant_id=resolved.tenant_id,
+                    workspace_id=resolved.workspace_id,
+                    owner_user_id=resolved.user_id,
+                    candidate_id=candidate.id,
+                    task_id=None,
+                    run_id=None,
+                    interrupt_pause_id=None,
+                    reviewer_user_id=None,
+                    status="pending",
+                    idempotency_key=operation_key,
+                    response=None,
+                    decided_at=None,
+                )
+                candidate.status = transition_candidate(
+                    CandidateStatus.EVALUATED, CandidateStatus.PENDING_REVIEW
+                ).value
+                session.add(review)
+                await session.flush()
+                await session.refresh(candidate)
+                await session.refresh(review)
+            elif review.idempotency_key != operation_key:
+                raise IdempotencyConflictError(
+                    "Candidate already has a review under another idempotency key."
+                )
+            if review.official_interrupt_id is not None:
+                return _improvement_candidate_view(candidate, experiment, review)
+            review_id = str(review.id)
+            candidate_version = candidate.candidate_version
+            rationale = candidate.rationale
+
+        receipt = await self._candidate_review_runtime.start(
+            actor=actor,
+            review_id=review_id,
+            candidate_id=str(candidate_id),
+            candidate_version=candidate_version,
+            rationale=rationale,
+        )
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            candidate = await session.scalar(
+                select(ImprovementCandidate).where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+            )
+            review = await session.scalar(
+                select(ImprovementReview)
+                .where(
+                    ImprovementReview.id == UUID(review_id),
+                    ImprovementReview.candidate_id == candidate_id,
+                    ImprovementReview.tenant_id == resolved.tenant_id,
+                    ImprovementReview.workspace_id == resolved.workspace_id,
+                    ImprovementReview.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None or review is None or review.status != "pending":
+                raise RuntimeError("Candidate review changed while Aegra was starting")
+            review.official_assistant_id = receipt.handle.assistant_id
+            review.official_thread_id = receipt.handle.thread_id
+            review.official_run_id = receipt.handle.run_id
+            review.official_interrupt_id = receipt.interrupt.interrupt_id
+            review.interrupt_payload = receipt.interrupt.value
+            review.checkpoint = {
+                "thread_id": receipt.checkpoint.thread_id,
+                "checkpoint_ns": receipt.checkpoint.checkpoint_ns,
+                "checkpoint_id": receipt.checkpoint.checkpoint_id,
+                "checkpoint_map": receipt.checkpoint.checkpoint_map,
+            }
+            await session.flush()
+            await session.refresh(review)
+            experiment = await session.scalar(
+                select(ImprovementExperiment)
+                .where(ImprovementExperiment.candidate_id == candidate.id)
+                .order_by(ImprovementExperiment.created_at.desc())
+                .limit(1)
+            )
+            return _improvement_candidate_view(candidate, experiment, review)
+
+    async def decide_improvement_review(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReviewDecisionSubmission,
+    ) -> dict[str, Any] | None:
+        if self._candidate_review_runtime is None:
+            raise CandidateReviewUnavailableError(
+                "Candidate review runtime is not configured."
+            )
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            candidate = await session.scalar(
+                select(ImprovementCandidate).where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+            )
+            review = await session.scalar(
+                select(ImprovementReview).where(
+                    ImprovementReview.candidate_id == candidate_id,
+                    ImprovementReview.tenant_id == resolved.tenant_id,
+                    ImprovementReview.workspace_id == resolved.workspace_id,
+                    ImprovementReview.owner_user_id == resolved.user_id,
+                )
+            )
+            if candidate is None or review is None:
+                return None
+            if review.status != "pending":
+                return _improvement_candidate_view(candidate, review=review)
+            receipt = _candidate_review_receipt(review)
+            review_id = str(review.id)
+
+        result = await self._candidate_review_runtime.decide(
+            actor=actor,
+            review_id=review_id,
+            receipt=receipt,
+            action=submission.action,
+            comment=submission.comment,
+        )
+        expected_status = (
+            CandidateStatus.APPROVED
+            if submission.action == "approve"
+            else CandidateStatus.REJECTED
+        )
+        if result.get("status") != expected_status.value:
+            raise RuntimeError("Aegra candidate review returned an inconsistent status")
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            candidate = await session.scalar(
+                select(ImprovementCandidate)
+                .where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            review = await session.scalar(
+                select(ImprovementReview)
+                .where(ImprovementReview.candidate_id == candidate_id)
+                .with_for_update()
+            )
+            if candidate is None or review is None:
+                raise RuntimeError("Candidate review disappeared after Aegra resume")
+            if review.status == "pending":
+                candidate.status = transition_candidate(
+                    CandidateStatus(candidate.status), expected_status
+                ).value
+                review.status = expected_status.value
+                review.reviewer_user_id = resolved.user_id
+                review.response = {
+                    "action": submission.action,
+                    **(
+                        {"comment": submission.comment}
+                        if submission.comment is not None
+                        else {}
+                    ),
+                }
+                review.decided_at = self._now()
+                await session.flush()
+                await session.refresh(candidate)
+                await session.refresh(review)
+            experiment = await session.scalar(
+                select(ImprovementExperiment)
+                .where(ImprovementExperiment.candidate_id == candidate.id)
+                .order_by(ImprovementExperiment.created_at.desc())
+                .limit(1)
+            )
+            return _improvement_candidate_view(candidate, experiment, review)
+
+    async def run_improvement_shadow(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementShadowSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        operation_key = f"candidate-shadow:{sha256(idempotency_key.encode()).hexdigest()}"
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            candidate = await session.scalar(
+                select(ImprovementCandidate)
+                .where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None:
+                return None
+            review = await session.scalar(
+                select(ImprovementReview).where(
+                    ImprovementReview.candidate_id == candidate.id
+                )
+            )
+            experiment = await session.scalar(
+                select(ImprovementExperiment)
+                .where(ImprovementExperiment.candidate_id == candidate.id)
+                .order_by(ImprovementExperiment.created_at.desc())
+                .limit(1)
+            )
+            if (
+                review is None
+                or review.status != "approved"
+                or experiment is None
+                or experiment.status != "succeeded"
+            ):
+                raise ValueError(
+                    "Shadow requires an approved review and passing experiment."
+                )
+            existing = await session.scalar(
+                select(ImprovementShadowRun).where(
+                    ImprovementShadowRun.tenant_id == resolved.tenant_id,
+                    ImprovementShadowRun.workspace_id == resolved.workspace_id,
+                    ImprovementShadowRun.owner_user_id == resolved.user_id,
+                    ImprovementShadowRun.idempotency_key == operation_key,
+                )
+            )
+            if existing is not None:
+                return _improvement_candidate_view(
+                    candidate, experiment, review, existing
+                )
+            observed_runs = len(experiment.case_results)
+            passed = (
+                observed_runs >= submission.minimum_runs
+                and bool(experiment.gate_report.get("approved"))
+            )
+            comparison = {
+                "mode": "frozen_replay_shadow",
+                "allow_live_fetch": False,
+                "allow_live_side_effects": False,
+                "candidate_metrics": experiment.metrics,
+                "baseline_thresholds": experiment.gate_report.get("thresholds", {}),
+                "release_gate_approved": bool(
+                    experiment.gate_report.get("approved")
+                ),
+                "reasons": (
+                    []
+                    if passed
+                    else [
+                        "insufficient_frozen_cases"
+                        if observed_runs < submission.minimum_runs
+                        else "release_gate_failed"
+                    ]
+                ),
+            }
+            source_hash = _payload_hash(
+                {
+                    "candidate": candidate.version_hash,
+                    "experiment": experiment.source_hash,
+                    "minimum_runs": submission.minimum_runs,
+                    "observed_runs": observed_runs,
+                    "comparison": comparison,
+                }
+            )
+            shadow = ImprovementShadowRun(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                candidate_id=candidate.id,
+                baseline_version=candidate.base_version,
+                status="passed" if passed else "failed",
+                minimum_runs=submission.minimum_runs,
+                observed_runs=min(observed_runs, submission.minimum_runs),
+                comparison=comparison,
+                source_hash=source_hash,
+                idempotency_key=operation_key,
+                completed_at=self._now(),
+            )
+            session.add(shadow)
+            candidate.status = transition_candidate(
+                CandidateStatus(candidate.status), CandidateStatus.SHADOW
+            ).value
+            await session.flush()
+            await session.refresh(candidate)
+            await session.refresh(shadow)
+            return _improvement_candidate_view(candidate, experiment, review, shadow)
+
+    async def promote_improvement_candidate(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+    ) -> dict[str, Any] | None:
+        return await self._record_improvement_release(
+            actor,
+            candidate_id,
+            action="promoted",
+            reason=submission.reason,
+        )
+
+    async def rollback_improvement_candidate(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+    ) -> dict[str, Any] | None:
+        return await self._record_improvement_release(
+            actor,
+            candidate_id,
+            action="rolled_back",
+            reason=submission.reason,
+        )
+
+    async def _record_improvement_release(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        *,
+        action: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            candidate = await session.scalar(
+                select(ImprovementCandidate)
+                .where(
+                    ImprovementCandidate.id == candidate_id,
+                    ImprovementCandidate.tenant_id == resolved.tenant_id,
+                    ImprovementCandidate.workspace_id == resolved.workspace_id,
+                    ImprovementCandidate.owner_user_id == resolved.user_id,
+                )
+                .with_for_update()
+            )
+            if candidate is None:
+                return None
+            review = await session.scalar(
+                select(ImprovementReview).where(
+                    ImprovementReview.candidate_id == candidate.id
+                )
+            )
+            shadow = await session.scalar(
+                select(ImprovementShadowRun)
+                .where(ImprovementShadowRun.candidate_id == candidate.id)
+                .order_by(ImprovementShadowRun.created_at.desc())
+                .limit(1)
+            )
+            experiment = await session.scalar(
+                select(ImprovementExperiment)
+                .where(ImprovementExperiment.candidate_id == candidate.id)
+                .order_by(ImprovementExperiment.created_at.desc())
+                .limit(1)
+            )
+            if review is None or shadow is None or experiment is None:
+                raise ValueError("Release requires review, experiment and shadow receipts.")
+            events = list(
+                (
+                    await session.scalars(
+                        select(ImprovementReleaseEvent)
+                        .where(ImprovementReleaseEvent.candidate_id == candidate.id)
+                        .order_by(ImprovementReleaseEvent.created_at)
+                    )
+                ).all()
+            )
+            existing = next((event for event in events if event.action == action), None)
+            if existing is not None:
+                return _improvement_candidate_view(
+                    candidate, experiment, review, shadow, events
+                )
+            if action == "promoted":
+                if (
+                    candidate.status != CandidateStatus.SHADOW.value
+                    or review.status != "approved"
+                    or shadow.status != "passed"
+                ):
+                    raise ValueError(
+                        "Promotion requires approved review and passing shadow."
+                    )
+                from_version = candidate.base_version
+                to_version = candidate.candidate_version
+                target_status = CandidateStatus.ACTIVE
+            elif action == "rolled_back":
+                if candidate.status != CandidateStatus.ACTIVE.value or not any(
+                    event.action == "promoted" for event in events
+                ):
+                    raise ValueError("Rollback requires an active promoted candidate.")
+                from_version = candidate.candidate_version
+                to_version = candidate.rollback_target_version
+                target_status = CandidateStatus.ROLLED_BACK
+            else:
+                raise ValueError("unsupported improvement release action")
+            evidence = {
+                "review_id": str(review.id),
+                "official_thread_id": review.official_thread_id,
+                "official_run_id": review.official_run_id,
+                "experiment_source_hash": experiment.source_hash,
+                "shadow_source_hash": shadow.source_hash,
+                "shadow_mode": shadow.comparison.get("mode"),
+            }
+            source_hash = _payload_hash(
+                {
+                    "candidate": candidate.version_hash,
+                    "action": action,
+                    "from_version": from_version,
+                    "to_version": to_version,
+                    "reason": reason,
+                    "evidence": evidence,
+                }
+            )
+            event = ImprovementReleaseEvent(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                candidate_id=candidate.id,
+                review_id=review.id,
+                shadow_run_id=shadow.id,
+                action=action,
+                from_version=from_version,
+                to_version=to_version,
+                rollback_target_version=candidate.rollback_target_version,
+                reason=reason,
+                evidence=evidence,
+                source_hash=source_hash,
+            )
+            session.add(event)
+            candidate.status = transition_candidate(
+                CandidateStatus(candidate.status), target_status
+            ).value
+            await session.flush()
+            await session.refresh(candidate)
+            await session.refresh(event)
+            return _improvement_candidate_view(
+                candidate, experiment, review, shadow, [*events, event]
+            )
 
     async def list_artifacts(
         self,
@@ -3847,3 +5467,246 @@ class ProductAnalysisService:
         self, actor: ActorContext, deletion_id: UUID
     ) -> dict[str, Any] | None:
         return await self._lifecycle.get_deletion(actor, deletion_id)
+
+    async def list_memory(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+        include_disabled: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            conditions = [
+                MemoryEntry.tenant_id == resolved.tenant_id,
+                MemoryEntry.workspace_id == resolved.workspace_id,
+                MemoryEntry.owner_user_id == resolved.user_id,
+            ]
+            if not include_disabled:
+                conditions.extend(
+                    (MemoryEntry.enabled.is_(True), MemoryEntry.deleted_at.is_(None))
+                )
+            if session_id is not None:
+                conditions.append(MemoryEntry.session_id == session_id)
+            records = list(
+                (
+                    await session.scalars(
+                        select(MemoryEntry)
+                        .where(*conditions)
+                        .order_by(MemoryEntry.updated_at.desc(), MemoryEntry.id.desc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+            return {"items": [_memory_view(item) for item in records], "limit": limit}
+
+    async def create_memory(
+        self,
+        actor: ActorContext,
+        submission: MemoryCreateSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        del idempotency_key
+        now = self._now()
+        if submission.expires_at is not None and submission.expires_at <= now:
+            raise ValueError("Memory expiry must be in the future.")
+        MemoryRecord(
+            memory_id=uuid4(),
+            scope=submission.scope,
+            purpose=submission.purpose,
+            key=submission.key,
+            content=submission.content,
+            enabled=submission.enabled,
+            expires_at=submission.expires_at,
+            refreshed_at=submission.refreshed_at,
+            source_artifact_id=submission.source_artifact_id,
+        )
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            existing = await session.scalar(
+                select(MemoryEntry)
+                .where(
+                    MemoryEntry.tenant_id == resolved.tenant_id,
+                    MemoryEntry.workspace_id == resolved.workspace_id,
+                    MemoryEntry.owner_user_id == resolved.user_id,
+                    MemoryEntry.session_id == submission.session_id,
+                    MemoryEntry.purpose == submission.purpose,
+                    MemoryEntry.memory_key == submission.key,
+                    MemoryEntry.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if existing is not None:
+                existing.content = submission.content
+                existing.enabled = submission.enabled
+                existing.expires_at = submission.expires_at
+                existing.refreshed_at = submission.refreshed_at
+                existing.source_artifact_id = submission.source_artifact_id
+                existing.updated_at = now
+                await session.flush()
+                return _memory_view(existing)
+            memory = MemoryEntry(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                session_id=submission.session_id,
+                scope=submission.scope,
+                purpose=submission.purpose,
+                memory_key=submission.key,
+                content=submission.content,
+                enabled=submission.enabled,
+                expires_at=submission.expires_at,
+                refreshed_at=submission.refreshed_at,
+                source_artifact_id=submission.source_artifact_id,
+            )
+            session.add(memory)
+            await session.flush()
+            return _memory_view(memory)
+
+    async def update_memory(
+        self,
+        actor: ActorContext,
+        memory_id: UUID,
+        submission: MemoryUpdateSubmission,
+    ) -> dict[str, Any] | None:
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            memory = await session.scalar(
+                select(MemoryEntry)
+                .where(
+                    MemoryEntry.id == memory_id,
+                    MemoryEntry.tenant_id == resolved.tenant_id,
+                    MemoryEntry.workspace_id == resolved.workspace_id,
+                    MemoryEntry.owner_user_id == resolved.user_id,
+                    MemoryEntry.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if memory is None:
+                return None
+            if submission.content is not None:
+                memory.content = submission.content
+            if submission.enabled is not None:
+                memory.enabled = submission.enabled
+            if submission.expires_at is not None:
+                if submission.expires_at <= self._now():
+                    raise ValueError("Memory expiry must be in the future.")
+                memory.expires_at = submission.expires_at
+            if submission.refreshed_at is not None:
+                memory.refreshed_at = submission.refreshed_at
+            if memory.purpose == "event" and memory.refreshed_at is None:
+                raise ValueError("event memory requires refreshed_at")
+            memory.updated_at = self._now()
+            await session.flush()
+            return _memory_view(memory)
+
+    async def delete_memory(
+        self,
+        actor: ActorContext,
+        memory_id: UUID,
+        submission: MemoryDeleteSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        del submission
+        async with self._session_factory() as session, session.begin():
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_write(resolved)
+            memory = await session.scalar(
+                select(MemoryEntry)
+                .where(
+                    MemoryEntry.id == memory_id,
+                    MemoryEntry.tenant_id == resolved.tenant_id,
+                    MemoryEntry.workspace_id == resolved.workspace_id,
+                    MemoryEntry.owner_user_id == resolved.user_id,
+                    MemoryEntry.deleted_at.is_(None),
+                )
+                .with_for_update()
+            )
+            if memory is None:
+                return None
+            existing = await session.scalar(
+                select(MemoryDeletionJob).where(
+                    MemoryDeletionJob.tenant_id == resolved.tenant_id,
+                    MemoryDeletionJob.workspace_id == resolved.workspace_id,
+                    MemoryDeletionJob.owner_user_id == resolved.user_id,
+                    MemoryDeletionJob.idempotency_key == idempotency_key,
+                )
+            )
+            if existing is not None:
+                if existing.memory_id != memory.id:
+                    raise IdempotencyConflictError(
+                        "Idempotency-Key was already used for a different Memory."
+                    )
+                return {
+                    "memory_id": existing.memory_id,
+                    "status": existing.status,
+                    "requested_at": existing.requested_at,
+                    "completed_at": existing.completed_at,
+                }
+            memory.enabled = False
+            job = MemoryDeletionJob(
+                id=uuid4(),
+                tenant_id=resolved.tenant_id,
+                workspace_id=resolved.workspace_id,
+                owner_user_id=resolved.user_id,
+                memory_id=memory.id,
+                idempotency_key=idempotency_key,
+                status="queued",
+                requested_at=self._now(),
+            )
+            session.add(job)
+            await session.flush()
+            return {
+                "memory_id": job.memory_id,
+                "status": job.status,
+                "requested_at": job.requested_at,
+                "completed_at": job.completed_at,
+            }
+
+    async def list_outcomes(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+        status_filter: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            resolved = await resolve_actor(session, actor)
+            _require_analysis_read(resolved)
+            conditions = [
+                OutcomeObservation.tenant_id == resolved.tenant_id,
+                OutcomeObservation.workspace_id == resolved.workspace_id,
+                OutcomeObservation.owner_user_id == resolved.user_id,
+            ]
+            if status_filter is not None:
+                conditions.append(OutcomeObservation.status == status_filter)
+            records = list(
+                (
+                    await session.scalars(
+                        select(OutcomeObservation)
+                        .where(*conditions)
+                        .order_by(OutcomeObservation.created_at.desc(), OutcomeObservation.id.desc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+            matured = [item for item in records if item.status == "matured"]
+            window_start = min((item.created_at for item in matured), default=None)
+            reportable = bool(
+                window_start is not None
+                and quality_is_reportable(
+                    sample_count=len(matured), window_start=window_start, now=self._now()
+                )
+            )
+            return {
+                "items": [_outcome_view(item) for item in records],
+                "limit": limit,
+                "reportable": reportable,
+                "sample_count": len(matured),
+                "window_start": window_start,
+            }

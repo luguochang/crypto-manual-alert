@@ -12,6 +12,11 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import SecretStr
 
+from crypto_alert_v2.integrations.secret_store import (
+    EnvironmentSecretStore,
+    SecretStore,
+)
+
 
 class NotificationCredentialError(RuntimeError):
     pass
@@ -227,14 +232,25 @@ def _parse_decrypt_keys(encoded_keys: str) -> dict[str, str]:
 def notification_credential_cipher_from_environment() -> (
     NotificationCredentialCipher | None
 ):
-    encoded_key = os.getenv("NOTIFICATION_CREDENTIAL_KEY", "").strip()
-    if not encoded_key:
+    return notification_credential_cipher_from_secret_store(
+        EnvironmentSecretStore()
+    )
+
+
+def notification_credential_cipher_from_secret_store(
+    secret_store: SecretStore,
+) -> NotificationCredentialCipher | None:
+    encoded_key_secret = secret_store.get_secret("notification_credential_key")
+    if encoded_key_secret is None:
         return None
+    encoded_key = encoded_key_secret.get_secret_value()
     key_version = os.getenv("NOTIFICATION_CREDENTIAL_KEY_VERSION", "v1").strip()
-    encoded_decrypt_keys = os.getenv(
-        "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS",
-        "",
-    ).strip()
+    decrypt_secret = secret_store.get_secret("notification_credential_decrypt_keys")
+    encoded_decrypt_keys = (
+        decrypt_secret.get_secret_value().strip()
+        if decrypt_secret is not None
+        else ""
+    )
     return NotificationCredentialCipher.from_urlsafe_base64(
         encoded_key,
         key_version=key_version,
@@ -248,4 +264,5 @@ __all__ = [
     "NotificationCredentialCipher",
     "NotificationCredentialError",
     "notification_credential_cipher_from_environment",
+    "notification_credential_cipher_from_secret_store",
 ]

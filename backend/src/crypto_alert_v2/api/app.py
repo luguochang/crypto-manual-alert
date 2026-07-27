@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from base64 import b64decode
 from binascii import Error as BinasciiError
+from datetime import datetime
 from hashlib import sha256
 import asyncio
 import hmac
@@ -15,6 +16,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from crypto_alert_v2.api.request_identity import request_identity_middleware
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    DecisionAdmissionView,
+    DecisionRequestSubmission,
     DataDeletionSubmission,
     DataDeletionView,
     DataExportBundleView,
@@ -32,6 +35,19 @@ from crypto_alert_v2.api.schemas import (
     ForkSubmission,
     FeedbackSubmission,
     FeedbackView,
+    ImprovementCandidateListView,
+    ImprovementCandidateSubmission,
+    ImprovementCandidateView,
+    ImprovementDatasetListView,
+    ImprovementDatasetSubmission,
+    ImprovementDatasetView,
+    ImprovementExperimentSubmission,
+    ImprovementReviewDecisionSubmission,
+    ImprovementReleaseSubmission,
+    ImprovementShadowSubmission,
+    PostmortemListView,
+    PostmortemSubmission,
+    PostmortemView,
     HealthView,
     HomeView,
     IDEMPOTENCY_KEY_PATTERN,
@@ -47,6 +63,13 @@ from crypto_alert_v2.api.schemas import (
     MonitorStatusFilter,
     MonitorTriggerListView,
     MonitorView,
+    MemoryCreateSubmission,
+    MemoryDeleteSubmission,
+    MemoryListView,
+    MemoryUpdateSubmission,
+    MemoryView,
+    MemoryDeleteView,
+    OutcomeListView,
     NotificationListView,
     NotificationResendSubmission,
     NotificationSettingsUpdate,
@@ -55,6 +78,9 @@ from crypto_alert_v2.api.schemas import (
     RunDetailView,
     RunListView,
     TaskView,
+    UsageGovernanceView,
+    UsageReconciliationSubmission,
+    UsageReconciliationView,
 )
 from crypto_alert_v2.api.service import (
     ForkConflictError,
@@ -62,6 +88,7 @@ from crypto_alert_v2.api.service import (
     InvalidInboxCursorError,
     InterruptResponseConflictError,
     ProductAnalysisService,
+    CandidateReviewUnavailableError,
     FeedbackConflictError,
     RunNotCancellableError,
     NotificationSettingsConflictError,
@@ -79,7 +106,10 @@ from crypto_alert_v2.notifications.outbox import (
     NotificationRetryBudgetExhausted,
 )
 from crypto_alert_v2.notifications.credentials import (
-    notification_credential_cipher_from_environment,
+    notification_credential_cipher_from_secret_store,
+)
+from crypto_alert_v2.integrations.secret_store import (
+    integration_secret_store_from_environment,
 )
 from crypto_alert_v2.testing.failure_injection import (
     FailureInjectionController,
@@ -103,9 +133,38 @@ from crypto_alert_v2.auth.membership import (
 )
 from crypto_alert_v2.config import Settings, get_settings
 from crypto_alert_v2.lifecycle import LifecycleError
+from crypto_alert_v2.evaluation.review_runtime import CandidateReviewRuntime
+from crypto_alert_v2.persistence.usage_governance import (
+    UsageEntitlementDenied,
+    UsageGovernanceError,
+    UsageModeDenied,
+    UsageQuotaExceeded,
+)
 
 
 class ProductService(Protocol):
+    async def get_usage_governance(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def reconcile_usage(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+        repair: bool = True,
+    ) -> dict[str, Any]: ...
+
+    async def create_decision_request(
+        self,
+        actor: ActorContext,
+        submission: DecisionRequestSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
     async def create_analysis(
         self,
         actor: ActorContext,
@@ -331,12 +390,173 @@ class ProductService(Protocol):
         self, actor: ActorContext, deletion_id: UUID
     ) -> dict[str, Any] | None: ...
 
+    async def create_postmortem(
+        self,
+        actor: ActorContext,
+        run_id: str,
+        submission: PostmortemSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_postmortems(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+    ) -> dict[str, Any]: ...
+
+    async def freeze_postmortem(
+        self,
+        actor: ActorContext,
+        postmortem_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_memory(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+        include_disabled: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def create_improvement_dataset(
+        self,
+        actor: ActorContext,
+        submission: ImprovementDatasetSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_improvement_datasets(
+        self, actor: ActorContext, *, limit: int
+    ) -> dict[str, Any]: ...
+
+    async def create_improvement_candidate(
+        self,
+        actor: ActorContext,
+        submission: ImprovementCandidateSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_improvement_candidates(
+        self, actor: ActorContext, *, limit: int
+    ) -> dict[str, Any]: ...
+
+    async def run_improvement_experiment(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementExperimentSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def request_improvement_review(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def decide_improvement_review(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReviewDecisionSubmission,
+    ) -> dict[str, Any] | None: ...
+
+    async def run_improvement_shadow(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementShadowSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def promote_improvement_candidate(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+    ) -> dict[str, Any] | None: ...
+
+    async def rollback_improvement_candidate(
+        self,
+        actor: ActorContext,
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+    ) -> dict[str, Any] | None: ...
+
+    async def create_memory(
+        self,
+        actor: ActorContext,
+        submission: MemoryCreateSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    async def update_memory(
+        self,
+        actor: ActorContext,
+        memory_id: UUID,
+        submission: MemoryUpdateSubmission,
+    ) -> dict[str, Any] | None: ...
+
+    async def delete_memory(
+        self,
+        actor: ActorContext,
+        memory_id: UUID,
+        submission: MemoryDeleteSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_outcomes(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+        status_filter: str | None = None,
+    ) -> dict[str, Any]: ...
+
 
 class TokenVerifier(Protocol):
     def verify_authorization(self, authorization: str | None) -> Mapping[str, Any]: ...
 
 
 class UnavailableProductService:
+    async def get_usage_governance(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+    ) -> dict[str, Any]:
+        del actor, period_start
+        raise HTTPException(
+            status_code=503, detail="Product persistence is not configured"
+        )
+
+    async def reconcile_usage(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+        repair: bool = True,
+    ) -> dict[str, Any]:
+        del actor, period_start, repair
+        raise HTTPException(
+            status_code=503, detail="Product persistence is not configured"
+        )
+
+    async def create_decision_request(
+        self,
+        actor: ActorContext,
+        submission: DecisionRequestSubmission,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        del actor, submission, idempotency_key
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Product persistence is not configured",
+        )
+
     async def create_analysis(
         self,
         actor: ActorContext,
@@ -394,6 +614,33 @@ class UnavailableProductService:
     ) -> dict[str, Any] | None:
         del actor, deletion_id
         return None
+
+    async def list_memory(self, actor: ActorContext, *, limit: int,
+                          include_disabled: bool = False,
+                          session_id: str | None = None) -> dict[str, Any]:
+        del actor, limit, include_disabled, session_id
+        raise HTTPException(status_code=503, detail="Product persistence is not configured")
+
+    async def create_memory(self, actor: ActorContext, submission: MemoryCreateSubmission,
+                            idempotency_key: str) -> dict[str, Any]:
+        del actor, submission, idempotency_key
+        raise HTTPException(status_code=503, detail="Product persistence is not configured")
+
+    async def update_memory(self, actor: ActorContext, memory_id: UUID,
+                            submission: MemoryUpdateSubmission) -> dict[str, Any] | None:
+        del actor, memory_id, submission
+        raise HTTPException(status_code=503, detail="Product persistence is not configured")
+
+    async def delete_memory(self, actor: ActorContext, memory_id: UUID,
+                            submission: MemoryDeleteSubmission,
+                            idempotency_key: str) -> dict[str, Any] | None:
+        del actor, memory_id, submission, idempotency_key
+        raise HTTPException(status_code=503, detail="Product persistence is not configured")
+
+    async def list_outcomes(self, actor: ActorContext, *, limit: int,
+                            status_filter: str | None = None) -> dict[str, Any]:
+        del actor, limit, status_filter
+        raise HTTPException(status_code=503, detail="Product persistence is not configured")
 
     async def create_deep_research(
         self,
@@ -869,6 +1116,20 @@ def create_app(
             },
         )
 
+    @product.exception_handler(UsageGovernanceError)
+    async def usage_governance_denied(
+        _: Request, exc: UsageGovernanceError
+    ) -> JSONResponse:
+        status_code = status.HTTP_429_TOO_MANY_REQUESTS
+        if isinstance(exc, UsageModeDenied):
+            status_code = status.HTTP_403_FORBIDDEN
+        elif isinstance(exc, UsageEntitlementDenied):
+            status_code = status.HTTP_429_TOO_MANY_REQUESTS
+        detail: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if isinstance(exc, UsageQuotaExceeded):
+            detail.update(unit=exc.unit, current=exc.current, limit=exc.limit)
+        return JSONResponse(status_code=status_code, content={"detail": detail})
+
     @product.get("/api/v2/health", response_model=HealthView)
     async def health() -> HealthView:
         return HealthView()
@@ -1052,6 +1313,165 @@ def create_app(
                 },
             ) from exc
         return _auth_context_view(context)
+
+    @product.post(
+        "/api/v2/decision-requests",
+        response_model=DecisionAdmissionView,
+    )
+    async def create_decision_request(
+        submission: DecisionRequestSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            return await service.create_decision_request(
+                actor,
+                submission,
+                idempotency_key,
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+
+    @product.get(
+        "/api/v2/usage",
+        response_model=UsageGovernanceView,
+    )
+    async def get_usage_governance(
+        request: Request,
+        period_start: datetime | None = Query(default=None),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        return await service.get_usage_governance(
+            actor, period_start=period_start
+        )
+
+    @product.post(
+        "/api/v2/usage/reconciliations",
+        response_model=UsageReconciliationView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def reconcile_usage(
+        submission: UsageReconciliationSubmission,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        return await service.reconcile_usage(
+            actor,
+            period_start=submission.period_start,
+            repair=submission.repair,
+        )
+
+    @product.get("/api/v2/memory", response_model=MemoryListView)
+    async def list_memory(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+        include_disabled: bool = Query(default=False),
+        session_id: str | None = Query(default=None, min_length=1, max_length=255),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request, mode=mode, token_verifier=token_verifier,
+            development_actor=development_actor, membership_authority=membership_authority,
+        )
+        return await service.list_memory(
+            actor, limit=limit, include_disabled=include_disabled, session_id=session_id
+        )
+
+    @product.post("/api/v2/memory", response_model=MemoryView, status_code=status.HTTP_201_CREATED)
+    async def create_memory(
+        submission: MemoryCreateSubmission,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request, mode=mode, token_verifier=token_verifier,
+            development_actor=development_actor, membership_authority=membership_authority,
+        )
+        try:
+            return await service.create_memory(actor, submission, idempotency_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @product.patch("/api/v2/memory/{memory_id}", response_model=MemoryView)
+    async def update_memory(
+        memory_id: UUID,
+        submission: MemoryUpdateSubmission,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request, mode=mode, token_verifier=token_verifier,
+            development_actor=development_actor, membership_authority=membership_authority,
+        )
+        try:
+            memory = await service.update_memory(actor, memory_id, submission)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if memory is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return memory
+
+    @product.delete("/api/v2/memory/{memory_id}", response_model=MemoryDeleteView,
+                    status_code=status.HTTP_202_ACCEPTED)
+    async def delete_memory(
+        memory_id: UUID,
+        submission: MemoryDeleteSubmission,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request, mode=mode, token_verifier=token_verifier,
+            development_actor=development_actor, membership_authority=membership_authority,
+        )
+        try:
+            memory = await service.delete_memory(
+                actor, memory_id, submission, idempotency_key
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if memory is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return memory
+
+    @product.get("/api/v2/outcomes", response_model=OutcomeListView)
+    async def list_outcomes(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+        outcome_status: str | None = Query(default=None, alias="status", min_length=1, max_length=32),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request, mode=mode, token_verifier=token_verifier,
+            development_actor=development_actor, membership_authority=membership_authority,
+        )
+        return await service.list_outcomes(actor, limit=limit, status_filter=outcome_status)
 
     @product.post(
         "/api/v2/analysis",
@@ -1473,6 +1893,401 @@ def create_app(
         if feedback is None:
             raise HTTPException(status_code=404, detail="Run not found")
         return feedback
+
+    @product.post(
+        "/api/v2/runs/{run_id}/postmortems",
+        response_model=PostmortemView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_postmortem(
+        run_id: str,
+        submission: PostmortemSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            case = await service.create_postmortem(
+                actor,
+                run_id,
+                submission,
+                idempotency_key,
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        if case is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return case
+
+    @product.get(
+        "/api/v2/improvement/postmortems",
+        response_model=PostmortemListView,
+    )
+    async def list_postmortems(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        return await service.list_postmortems(actor, limit=limit)
+
+    @product.post(
+        "/api/v2/improvement/postmortems/{postmortem_id}/freeze",
+        response_model=PostmortemView,
+    )
+    async def freeze_postmortem(
+        postmortem_id: str,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        del idempotency_key
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        case = await service.freeze_postmortem(actor, postmortem_id)
+        if case is None:
+            raise HTTPException(status_code=404, detail="Postmortem not found")
+        return case
+
+    @product.post(
+        "/api/v2/improvement/datasets",
+        response_model=ImprovementDatasetView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_improvement_dataset(
+        submission: ImprovementDatasetSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            dataset = await service.create_improvement_dataset(
+                actor,
+                submission,
+                idempotency_key,
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="Frozen replay not found")
+        return dataset
+
+    @product.get(
+        "/api/v2/improvement/datasets",
+        response_model=ImprovementDatasetListView,
+    )
+    async def list_improvement_datasets(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        return await service.list_improvement_datasets(actor, limit=limit)
+
+    @product.post(
+        "/api/v2/improvement/candidates",
+        response_model=ImprovementCandidateView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_improvement_candidate(
+        submission: ImprovementCandidateSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.create_improvement_candidate(
+                actor,
+                submission,
+                idempotency_key,
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate
+
+    @product.get(
+        "/api/v2/improvement/candidates",
+        response_model=ImprovementCandidateListView,
+    )
+    async def list_improvement_candidates(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        return await service.list_improvement_candidates(actor, limit=limit)
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/experiments",
+        response_model=ImprovementCandidateView,
+    )
+    async def run_improvement_experiment(
+        candidate_id: UUID,
+        submission: ImprovementExperimentSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.run_improvement_experiment(
+                actor,
+                candidate_id,
+                submission,
+                idempotency_key,
+            )
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate or Dataset not found")
+        return candidate
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/review",
+        response_model=ImprovementCandidateView,
+    )
+    async def request_improvement_review(
+        candidate_id: UUID,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.request_improvement_review(
+                actor,
+                candidate_id,
+                idempotency_key,
+            )
+        except CandidateReviewUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except IdempotencyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/review/decision",
+        response_model=ImprovementCandidateView,
+    )
+    async def decide_improvement_review(
+        candidate_id: UUID,
+        submission: ImprovementReviewDecisionSubmission,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.decide_improvement_review(
+                actor,
+                candidate_id,
+                submission,
+            )
+        except CandidateReviewUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate review not found")
+        return candidate
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/shadow",
+        response_model=ImprovementCandidateView,
+    )
+    async def run_improvement_shadow(
+        candidate_id: UUID,
+        submission: ImprovementShadowSubmission,
+        request: Request,
+        idempotency_key: Annotated[
+            str,
+            Header(
+                alias="Idempotency-Key",
+                min_length=1,
+                max_length=255,
+                pattern=IDEMPOTENCY_KEY_PATTERN,
+            ),
+        ],
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.run_improvement_shadow(
+                actor,
+                candidate_id,
+                submission,
+                idempotency_key,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/promote",
+        response_model=ImprovementCandidateView,
+    )
+    async def promote_improvement_candidate(
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.promote_improvement_candidate(
+                actor, candidate_id, submission
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate
+
+    @product.post(
+        "/api/v2/improvement/candidates/{candidate_id}/rollback",
+        response_model=ImprovementCandidateView,
+    )
+    async def rollback_improvement_candidate(
+        candidate_id: UUID,
+        submission: ImprovementReleaseSubmission,
+        request: Request,
+    ) -> dict[str, Any]:
+        actor = await _actor_for_request(
+            request,
+            mode=mode,
+            token_verifier=token_verifier,
+            development_actor=development_actor,
+            membership_authority=membership_authority,
+        )
+        try:
+            candidate = await service.rollback_improvement_candidate(
+                actor, candidate_id, submission
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate
 
     @product.get("/api/v2/artifacts", response_model=ArtifactLibraryView)
     async def list_artifacts(
@@ -2052,7 +2867,12 @@ def create_app(
 def create_default_app(*, token_audience: str | None = None) -> FastAPI:
     settings = get_settings()
     failure_injection = failure_injection_from_settings(settings)
-    notification_credential_cipher = notification_credential_cipher_from_environment()
+    secret_store = integration_secret_store_from_environment(
+        app_environment=settings.app_environment
+    )
+    notification_credential_cipher = notification_credential_cipher_from_secret_store(
+        secret_store
+    )
     if (
         settings.app_environment in {"staging", "production"}
         and notification_credential_cipher is None
@@ -2062,10 +2882,18 @@ def create_default_app(*, token_audience: str | None = None) -> FastAPI:
         )
     engine = create_async_engine(settings.product_database_url, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    candidate_review_runtime = None
+    try:
+        candidate_review_runtime = CandidateReviewRuntime.from_settings(settings)
+    except RuntimeError:
+        # Keep the Product API available for read-only/evaluation work; the review
+        # endpoint returns an explicit 503 until the official Aegra auth boundary is configured.
+        candidate_review_runtime = None
     service = ProductAnalysisService(
         session_factory=session_factory,
         inbox_cursor_key=_configured_inbox_cursor_key(settings),
         notification_credential_cipher=notification_credential_cipher,
+        candidate_review_runtime=candidate_review_runtime,
     )
     mode = settings.app_environment
     development_actor = configured_development_actor(settings)

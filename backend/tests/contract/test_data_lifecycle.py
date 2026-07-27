@@ -23,6 +23,7 @@ from crypto_alert_v2.persistence.models import (
     DATA_LIFECYCLE_DELETION_STATUSES,
     DATA_LIFECYCLE_EXPORT_STATUSES,
     DataDeletionJob,
+    DataDeletionReceipt,
     DataExportJob,
     DataLifecyclePolicy,
 )
@@ -45,8 +46,14 @@ def test_lifecycle_models_are_scoped_and_have_explicit_status_constraints() -> N
         "data_lifecycle_policies",
         "data_export_jobs",
         "data_deletion_jobs",
+        "data_deletion_receipts",
     }
-    for model in (DataLifecyclePolicy, DataExportJob, DataDeletionJob):
+    for model in (
+        DataLifecyclePolicy,
+        DataExportJob,
+        DataDeletionJob,
+        DataDeletionReceipt,
+    ):
         assert model.__table__.schema == PRODUCT_SCHEMA
         assert {"tenant_id", "workspace_id", "owner_user_id"} <= set(model.__table__.c.keys())
         assert frozenset({"tenant_id", "workspace_id", "owner_user_id"}) in _unique_sets(model) or (
@@ -61,6 +68,8 @@ def test_lifecycle_models_are_scoped_and_have_explicit_status_constraints() -> N
     assert isinstance(DataExportJob.__table__.c.manifest.type, JSONB)
     assert isinstance(DataExportJob.__table__.c.bundle.type, JSONB)
     assert isinstance(DataDeletionJob.__table__.c.system_status.type, JSONB)
+    assert isinstance(DataDeletionReceipt.__table__.c.reference.type, JSONB)
+    assert isinstance(DataDeletionReceipt.__table__.c.evidence.type, JSONB)
     assert set(DATA_LIFECYCLE_EXPORT_STATUSES) == {"queued", "running", "succeeded", "failed"}
     assert set(DATA_LIFECYCLE_DELETION_STATUSES) == {
         "queued", "running", "pending_external", "succeeded", "blocked_legal_hold", "failed"

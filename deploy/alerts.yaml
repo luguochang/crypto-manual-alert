@@ -1,0 +1,59 @@
+schema_version: 2026-07-23.production-alerts.v1
+status: requires_hosted_receiver_verification
+default_route: production-oncall
+rules:
+  - id: agent_readiness_unavailable
+    source: metrics
+    selector: {metric: crypto_alert_agent_readiness, condition: "value < 1 for 2m"}
+    severity: critical
+    route: production-oncall
+  - id: market_provider_exhausted
+    source: structured_logs
+    selector: {event: provider_retry_exhausted, provider: market}
+    severity: critical
+    route: product-runtime
+  - id: search_provider_exhausted
+    source: structured_logs
+    selector: {event: provider_retry_exhausted, provider: search}
+    severity: warning
+    route: product-runtime
+  - id: model_provider_exhausted
+    source: structured_logs
+    selector: {event: provider_retry_exhausted, provider: model}
+    severity: critical
+    route: product-runtime
+  - id: langsmith_delivery_exhausted
+    source: structured_logs
+    selector: {event: observability_delivery_exhausted, provider: langsmith, fingerprint: provider_delivery_exhausted}
+    severity: warning
+    route: observability
+  - id: langfuse_delivery_exhausted
+    source: structured_logs
+    selector: {event: observability_delivery_exhausted, provider: langfuse, fingerprint: provider_delivery_exhausted}
+    severity: warning
+    route: observability
+  - id: projection_lag_high
+    source: metrics
+    selector: {metric: crypto_alert_projection_lag_seconds, condition: "value > 30 for 5m"}
+    severity: warning
+    route: product-runtime
+  - id: worker_stale
+    source: metrics
+    selector: {metric: crypto_alert_worker_last_success_age_seconds, condition: "value > 120 for 2m"}
+    severity: critical
+    route: product-runtime
+  - id: outbox_dead_letter_present
+    source: metrics
+    selector: {metric: crypto_alert_outbox_dead_letter_total, condition: "increase > 0 over 5m"}
+    severity: warning
+    route: product-runtime
+  - id: security_denial_spike
+    source: metrics
+    selector: {metric: crypto_alert_auth_denial_total, condition: "rate > baseline for 5m"}
+    severity: critical
+    route: security
+  - id: error_budget_burn_fast
+    source: metrics
+    selector: {metric: crypto_alert_error_budget_burn_rate, condition: "value > 14.4 for 5m"}
+    severity: critical
+    route: production-oncall

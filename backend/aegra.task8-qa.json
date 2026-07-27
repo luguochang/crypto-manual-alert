@@ -1,0 +1,13 @@
+{
+  "graphs": {
+    "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph_factory",
+    "candidate_review": "./src/crypto_alert_v2/evaluation/review_graph.py:graph_factory",
+    "single_interrupt_fixture": "./src/crypto_alert_v2/testing/multi_interrupt_fixture.py:single_graph",
+    "multi_interrupt_fixture": "./src/crypto_alert_v2/testing/multi_interrupt_fixture.py:graph",
+    "aegra_durability_fixture": "./src/crypto_alert_v2/testing/aegra_durability_fixture.py:graph"
+  },
+  "auth": {
+    "path": "./src/crypto_alert_v2/auth/agent_server.py:auth",
+    "disable_studio_auth": true
+  }
+}

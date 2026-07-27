@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -11,6 +12,36 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "tools" / "v2" / "rehearse_product_database_backup.sh"
 SECRET_URL = "postgresql+asyncpg://backup-user:do-not-print@db.invalid/product"
+
+
+def _bash_executable() -> str:
+    if os.name != "nt":
+        return "bash"
+    bash = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/bin/bash.exe"
+    assert bash.is_file(), "Git Bash is required for Windows shell contracts"
+    return str(bash)
+
+
+def _bash_command() -> list[str]:
+    if os.name != "nt":
+        return [str(SCRIPT)]
+    return [
+        _bash_executable(),
+        "-lc",
+        'PATH="$TEST_FAKE_BIN:/usr/bin:$PATH"; exec "$1"',
+        "backup-rehearsal-test",
+        SCRIPT.as_posix(),
+    ]
+
+
+def _msys_path(path: Path) -> str:
+    resolved = path.resolve()
+    drive = resolved.drive.rstrip(":").lower()
+    return f"/{drive}{resolved.as_posix()[2:]}"
+
+
+def _shell_path(path: Path) -> str:
+    return _msys_path(path) if os.name == "nt" else str(path)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -133,15 +164,27 @@ def fake_gate_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
         esac
         """,
     )
+    if os.name == "nt":
+        python_executable = Path(sys.executable).as_posix()
+        _write_executable(
+            fake_bin / "python3",
+            f"""
+            #!/usr/bin/env bash
+            set -euo pipefail
+            export SOURCE_ENVIRONMENT_FILE="$(cygpath -w "$SOURCE_ENVIRONMENT_FILE")"
+            exec "{python_executable}" "$@"
+            """,
+        )
 
     environment = os.environ.copy()
     environment.update(
         {
             "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
             "PRODUCT_DATABASE_URL": SECRET_URL,
-            "FAKE_CALL_LOG": str(call_log),
-            "FAKE_STATE_DIR": str(state_dir),
-            "TMPDIR": str(temp_dir),
+            "FAKE_CALL_LOG": _shell_path(call_log),
+            "FAKE_STATE_DIR": _shell_path(state_dir),
+            "TEST_FAKE_BIN": _msys_path(fake_bin),
+            "TMPDIR": _shell_path(temp_dir),
         }
     )
     for name in (
@@ -155,10 +198,16 @@ def fake_gate_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
 
 
 def _run(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    child_environment = environment.copy()
+    report_path = child_environment.get("BACKUP_REHEARSAL_REPORT_PATH")
+    if os.name == "nt" and report_path:
+        child_environment["BACKUP_REHEARSAL_REPORT_PATH"] = _msys_path(
+            Path(report_path)
+        )
     return subprocess.run(
-        [str(SCRIPT)],
+        _bash_command(),
         cwd=ROOT,
-        env=environment,
+        env=child_environment,
         capture_output=True,
         text=True,
         check=False,
@@ -168,7 +217,7 @@ def _run(environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
 
 def test_backup_restore_rehearsal_script_has_valid_bash_syntax() -> None:
     result = subprocess.run(
-        ["bash", "-n", str(SCRIPT)],
+        [_bash_executable(), "-n", SCRIPT.as_posix()],
         capture_output=True,
         text=True,
         check=False,
@@ -184,6 +233,8 @@ def test_backup_restore_rehearsal_is_secret_safe_and_non_destructive() -> None:
     assert "umask 077" in source
     assert "trap cleanup EXIT" in source
     assert "unset PRODUCT_DATABASE_URL" in source
+    assert "BACKUP_REHEARSAL_SOURCE_CONTAINER" in source
+    assert "owned-source-container-client" in source
     assert "urlsplit(source)" in source
     assert 'values["PGPASSWORD"]' in source
     assert 'PGDATABASE="$source_conninfo"' not in source
@@ -193,6 +244,12 @@ def test_backup_restore_rehearsal_is_secret_safe_and_non_destructive() -> None:
     assert "source_counts_stable" in source
     assert "restored_counts_match" in source
     assert "production_rto_rpo" in source
+    assert "source_client_mode" in source
+    assert "BACKUP_REHEARSAL_PYTHON" in source
+    assert 'for candidate in python3 python' in source
+    assert "command -v sha256sum" in source
+    assert "command -v shasum" in source
+    assert "required SHA-256 command is unavailable" in source
     assert "@sha256:" in source
     assert ".env" not in source
     assert "set -x" not in source
@@ -243,7 +300,8 @@ def test_rehearsal_restores_into_ephemeral_container_and_emits_redacted_report(
         "cross_region_restore",
         "production_rto_rpo",
     ]
-    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
 
     calls = call_log.read_text(encoding="utf-8")
     combined_output = result.stdout + result.stderr + calls

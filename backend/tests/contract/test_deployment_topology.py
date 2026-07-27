@@ -7,22 +7,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_local_integration_start_fails_fast_without_agent_entitlement() -> None:
-    environment = os.environ.copy()
-    environment.pop("LANGGRAPH_CLOUD_LICENSE_KEY", None)
-    environment.pop("LANGSMITH_API_KEY", None)
+def test_local_integration_uses_aegra_without_commercial_entitlement() -> None:
+    script = (ROOT / "tools" / "v2" / "start_integration_stack.sh").read_text()
 
-    result = subprocess.run(
-        ["bash", str(ROOT / "tools" / "v2" / "start_integration_stack.sh")],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 78
-    assert "license key" in result.stderr.lower()
+    assert "aegra.json" in script
+    assert "verify_agent_image.sh" in script
+    assert "LANGGRAPH_CLOUD_LICENSE_KEY" not in script
+    assert "agent-server-image.lock" not in script
 
 
 def test_docker_context_excludes_local_langgraph_state() -> None:
@@ -122,7 +113,6 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
             "NOTIFICATION_CREDENTIAL_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS": '{"v0":"old-key-placeholder"}',
             "INTERNAL_JWT_PUBLIC_KEYS": '{"old":"old-public-key-placeholder"}',
-            "LANGGRAPH_CLOUD_LICENSE_KEY": "langgraph-license-test",
         },
         capture_output=True,
         text=True,
@@ -137,6 +127,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "langgraph-redis",
         "migrate",
         "internal-jwt-keys",
+        "integration-secret-files",
         "development-bootstrap",
         "langgraph-api",
         "langgraph-api-readiness",
@@ -177,23 +168,43 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert services["langgraph-api"]["environment"]["PRODUCT_DATABASE_URL"].startswith(
         "postgresql+asyncpg://"
     )
-    assert (
-        services["langgraph-api"]["environment"]["LANGGRAPH_CLOUD_LICENSE_KEY"]
-        == "langgraph-license-test"
-    )
+    assert services["langgraph-api"]["command"] == [
+        "aegra",
+        "serve",
+        "--config",
+        "aegra.json",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+    ]
+    aegra_environment = services["langgraph-api"]["environment"]
+    assert aegra_environment["REDIS_BROKER_ENABLED"] == "true"
+    assert aegra_environment["REDIS_URL"] == "redis://langgraph-redis:6379/0"
+    assert aegra_environment["WORKER_COUNT"] == "1"
+    assert aegra_environment["N_JOBS_PER_WORKER"] == "2"
+    assert aegra_environment["LEASE_DURATION_SECONDS"] == "30"
+    assert aegra_environment["HEARTBEAT_INTERVAL_SECONDS"] == "10"
+    assert aegra_environment["REAPER_INTERVAL_SECONDS"] == "15"
+    assert aegra_environment["STUCK_PENDING_THRESHOLD_SECONDS"] == "120"
+    assert "LANGGRAPH_CLOUD_LICENSE_KEY" not in aegra_environment
     assert services["langgraph-api"]["environment"]["SEARCH_PROVIDER"] == (
         "builtin_web_search"
     )
     assert services["langgraph-api"]["environment"]["SEARCH_HTTP_PROXY"] == ""
-    assert (
-        services["langgraph-api"]["environment"]["NOTIFICATION_CREDENTIAL_KEY"]
-        == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    secret_store_environment = services["integration-secret-files"]["environment"]
+    assert secret_store_environment["NOTIFICATION_CREDENTIAL_KEY"] == (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    )
+    assert secret_store_environment["NOTIFICATION_CREDENTIAL_DECRYPT_KEYS"] == (
+        '{"v0":"old-key-placeholder"}'
     )
     for service_name in ("langgraph-api", "command-worker"):
         environment = services[service_name]["environment"]
-        assert environment["NOTIFICATION_CREDENTIAL_DECRYPT_KEYS"] == (
-            '{"v0":"old-key-placeholder"}'
-        )
+        assert environment["INTEGRATION_SECRET_STORE"] == "file"
+        assert environment["INTEGRATION_SECRET_FILE_DIR"] == "/run/integration-secrets"
+        assert "NOTIFICATION_CREDENTIAL_KEY" not in environment
+        assert "NOTIFICATION_CREDENTIAL_DECRYPT_KEYS" not in environment
         assert environment["INTERNAL_JWT_PUBLIC_KEYS"] == (
             '{"old":"old-public-key-placeholder"}'
         )
@@ -263,6 +274,9 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     readiness_environment = services["langgraph-api-readiness"]["environment"]
     assert readiness_environment["AGENT_SERVER_URL"] == "http://langgraph-api:8000"
     assert readiness_environment["SEARCH_PROVIDER"] == "builtin_web_search"
+    assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
+        "builtin_web_search"
+    )
     assert readiness_environment["AGENT_READINESS_HOST"] == "0.0.0.0"
     assert readiness_environment["AGENT_READINESS_PORT"] == "9091"
     assert readiness_environment["AGENT_HEALTHCHECK_SUBJECT"] == "probe-user"
@@ -283,6 +297,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "AGENT_HEALTHCHECK_WORKSPACE_ID",
         "AGENT_HEALTHCHECK_ROLES",
         "AGENT_HEALTHCHECK_PERMISSIONS",
+        "AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER",
     }
     for service_name, service in services.items():
         if service_name != "langgraph-api-readiness":
@@ -291,7 +306,8 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
                 for name in service.get("environment", {})
             )
     agent_liveness = services["langgraph-api"]["healthcheck"]["test"]
-    assert agent_liveness == ["CMD", "python", "/api/healthcheck.py"]
+    assert agent_liveness[:3] == ["CMD", "python", "-c"]
+    assert "http://127.0.0.1:8000/health" in agent_liveness[-1]
     assert (
         "INTERNAL_JWT_PRIVATE_KEY_FILE" not in services["langgraph-api"]["environment"]
     )
@@ -326,10 +342,12 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     for service_name in (
         "development-bootstrap",
         "langgraph-api-readiness",
-        "command-worker",
         "frontend",
     ):
         assert "MARKET_DATA_HTTP_PROXY" not in services[service_name]["environment"]
+    assert services["command-worker"]["environment"]["MARKET_DATA_HTTP_PROXY"] == (
+        "http://proxy.example:7890"
+    )
     assert "INTERNAL_JWT_AUDIENCE" not in services["langgraph-api"]["environment"]
     assert (
         services["langgraph-api"]["environment"]["INTERNAL_JWT_MAX_TTL_SECONDS"] == "60"
@@ -338,6 +356,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert _volume_sources(services["command-worker"]) == {
         "/run/internal-jwt-private": "internal-jwt-private",
         "/run/internal-jwt-public": "internal-jwt-public",
+        "/run/integration-secrets": "integration-secret-files",
     }
     assert (
         services["command-worker"]["environment"]["INTERNAL_JWT_PUBLIC_KEY_FILE"]
@@ -349,6 +368,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert _volume_sources(services["langgraph-api"]) == {
         "/run/internal-jwt-public": "internal-jwt-public",
         "/run/product-inbox-cursor-key": "product-inbox-cursor-key",
+        "/run/integration-secrets": "integration-secret-files",
     }
     assert _volume_sources(services["langgraph-api-readiness"]) == {
         "/run/internal-jwt-private": "internal-jwt-private"
@@ -380,6 +400,7 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
         "langgraph-redis": "service_healthy",
         "migrate": "service_completed_successfully",
         "internal-jwt-keys": "service_completed_successfully",
+        "integration-secret-files": "service_completed_successfully",
         "development-bootstrap": "service_completed_successfully",
     }
     assert (
@@ -396,6 +417,9 @@ def test_compose_starts_the_complete_v2_vertical_path() -> None:
     assert "langgraph dev" not in compose_source
     assert "8011" not in compose_source
     assert "AGENT_SERVER_LOCAL_TOKEN" not in compose_source
+    assert "LANGGRAPH_CLOUD_LICENSE_KEY" not in compose_source
+    assert "aegra serve" not in compose_source
+    assert "- aegra" in compose_source
     assert "local-agent-dev-only" not in compose_source
     assert "host.docker.internal:7890" not in compose_source
 

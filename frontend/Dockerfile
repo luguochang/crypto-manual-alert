@@ -1,0 +1,30 @@
+FROM public.ecr.aws/docker/library/node:22@sha256:175215a1f306ed5df592434b99cc2019f70624373fe49cb659240a618a846aed AS deps
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+FROM public.ecr.aws/docker/library/node:22@sha256:175215a1f306ed5df592434b99cc2019f70624373fe49cb659240a618a846aed AS builder
+
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app/frontend
+COPY --from=deps /app/frontend/node_modules ./node_modules
+COPY frontend ./
+RUN npm run build
+
+FROM public.ecr.aws/docker/library/node:22@sha256:175215a1f306ed5df592434b99cc2019f70624373fe49cb659240a618a846aed AS runner
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app/frontend
+
+COPY --chown=node:node --from=builder /app/frontend/package.json ./package.json
+COPY --chown=node:node --from=builder /app/frontend/package-lock.json ./package-lock.json
+COPY --chown=node:node --from=builder /app/frontend/node_modules ./node_modules
+COPY --chown=node:node --from=builder /app/frontend/.next ./.next
+COPY --chown=node:node --from=builder /app/frontend/public ./public
+
+USER node
+EXPOSE 3001
+
+CMD ["npm", "exec", "next", "--", "start", "--hostname", "0.0.0.0", "--port", "3001"]

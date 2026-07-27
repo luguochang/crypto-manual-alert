@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from pydantic import SecretStr
@@ -110,6 +111,29 @@ def test_seed_fixture_registry_requires_real_official_interrupt_counts() -> None
         "deep_research": 1,
         "multi_interrupt": 2,
     }
+
+
+def test_seeded_checkpoint_runs_use_an_official_aegra_compatible_command() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "crypto_alert_v2"
+        / "commands"
+        / "seed_hitl_e2e.py"
+    ).read_text(encoding="utf-8")
+
+    assert source.count('initial_command = {"goto": "review_policy"}') == 2
+    assert "command=initial_command" in source
+    for field in (
+        '"official_thread_id"',
+        '"official_run_id"',
+        '"pause_id"',
+        '"pause_version"',
+        '"checkpoint_id"',
+        '"interrupt_ids"',
+        '"review_iteration"',
+    ):
+        assert field in source
 
 
 def test_seed_deep_research_state_contains_a_typed_reviewable_draft() -> None:

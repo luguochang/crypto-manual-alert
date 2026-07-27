@@ -275,6 +275,41 @@ describe("Product BFF proxy", () => {
       .toBe("deep-research-admission-1");
   });
 
+  it("allows only the exact unified DecisionRequest admission route", async () => {
+    const fetcher = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      void input;
+      void init;
+      return Response.json({ route: { status: "admitted" } });
+    });
+    const request = new Request(
+      "http://127.0.0.1:3101/api/product/api/v2/decision-requests",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "decision-admission-1",
+        },
+        body: JSON.stringify({ entry_kind: "manual" }),
+      },
+    );
+
+    const response = await proxyProductRequest(
+      request,
+      ["api", "v2", "decision-requests"],
+      fetcher,
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8123/app/api/v2/decision-requests",
+    );
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key"))
+      .toBe("decision-admission-1");
+  });
+
   it("generates one transport request ID and returns it when upstream is unavailable", async () => {
     const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
       void _input;
@@ -918,6 +953,36 @@ describe("Product BFF proxy", () => {
 
     expect(response.status).toBe(404);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("allows only the exact usage read and reconciliation routes", async () => {
+    process.env.APP_ENVIRONMENT = "development";
+    process.env.AGENT_SERVER_LOCAL_TOKEN = "server-owned-local-token";
+    const fetcher = vi.fn(async () => Response.json({ status: "reconciled" }));
+
+    const read = await proxyProductRequest(
+      new Request("http://127.0.0.1:3101/api/product/api/v2/usage"),
+      ["api", "v2", "usage"],
+      fetcher,
+    );
+    const reconcile = await proxyProductRequest(
+      new Request(
+        "http://127.0.0.1:3101/api/product/api/v2/usage/reconciliations",
+        { method: "POST", body: JSON.stringify({ repair: true }) },
+      ),
+      ["api", "v2", "usage", "reconciliations"],
+      fetcher,
+    );
+    const lookalike = await proxyProductRequest(
+      new Request("http://127.0.0.1:3101/api/product/api/v2/usage/export"),
+      ["api", "v2", "usage", "export"],
+      fetcher,
+    );
+
+    expect(read.status).toBe(200);
+    expect(reconcile.status).toBe(200);
+    expect(lookalike.status).toBe(404);
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });
 

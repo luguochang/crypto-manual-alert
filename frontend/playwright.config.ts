@@ -3,6 +3,10 @@ import path from "node:path";
 
 const frontendBaseUrl = process.env.PLAYWRIGHT_FRONTEND_BASE_URL ?? "http://127.0.0.1:3101";
 const externalServer = process.env.PLAYWRIGHT_EXTERNAL_SERVER === "1";
+const browserChannel = process.env.PLAYWRIGHT_BROWSER_CHANNEL?.trim();
+if (browserChannel && browserChannel !== "chromium") {
+  throw new Error("PLAYWRIGHT_BROWSER_CHANNEL must be chromium when configured");
+}
 const fixtureMatch = [
   "**/work-product.spec.ts",
   "**/runs-product.spec.ts",
@@ -13,6 +17,8 @@ const fixtureMatch = [
 const realProviderMatch = ["**/real-product-flow.spec.ts"];
 const realMonitorMatch = ["**/real-monitor-flow.spec.ts"];
 const realDataLifecycleMatch = ["**/real-data-lifecycle.spec.ts"];
+const hostedProductionMatch = ["**/e2e/hosted-production.spec.ts"];
+const hostedSecurityMatch = ["**/e2e/hosted-security.spec.ts"];
 const failureInjectionMatch = [
   "**/provider-failures.spec.ts",
   "**/database-rollback.spec.ts",
@@ -33,6 +39,8 @@ const profileMatches = {
   "real-monitor": realMonitorMatch,
   "real-data-lifecycle": realDataLifecycleMatch,
   "m4-security": ["**/cross-tenant-security.spec.ts"],
+  "hosted-production": hostedProductionMatch,
+  "hosted-security": hostedSecurityMatch,
 } satisfies Record<string, string[]>;
 
 type E2EProfile = keyof typeof profileMatches;
@@ -69,6 +77,7 @@ const requiredEnvironment: Partial<Record<E2EProfile, readonly string[]>> = {
   "real-deep-research": [
     "REAL_PRODUCT_E2E",
     "REAL_DEEP_RESEARCH_E2E",
+    "REAL_DEEP_RESEARCH_AEGRA_RESTART",
     "PLAYWRIGHT_EVIDENCE_DIR",
   ],
   "real-monitor": ["REAL_MONITOR_E2E", "PLAYWRIGHT_EVIDENCE_DIR"],
@@ -82,6 +91,18 @@ const requiredEnvironment: Partial<Record<E2EProfile, readonly string[]>> = {
     "DATA_LIFECYCLE_E2E_EXPECTED_OWNER_USER_ID",
   ],
   "m4-security": ["M4_SECURITY_E2E"],
+  "hosted-production": [
+    "HOSTED_PRODUCTION_E2E",
+    "HOSTED_PRODUCTION_TASK_ID",
+    "HOSTED_PRODUCTION_RUN_ID",
+    "HOSTED_OWNER_STORAGE_STATE",
+    "PLAYWRIGHT_EVIDENCE_DIR",
+  ],
+  "hosted-security": [
+    "HOSTED_SECURITY_E2E",
+    "HOSTED_SECURITY_MATRIX_FILE",
+    "PLAYWRIGHT_EVIDENCE_DIR",
+  ],
 };
 
 const booleanEnvironment = new Set([
@@ -92,10 +113,13 @@ const booleanEnvironment = new Set([
   "REAL_MULTI_INTERRUPT_E2E",
   "CONTROLLED_DEEP_RESEARCH_HITL_E2E",
   "REAL_DEEP_RESEARCH_E2E",
+  "REAL_DEEP_RESEARCH_AEGRA_RESTART",
   "REAL_MONITOR_E2E",
   "REAL_DATA_LIFECYCLE_E2E",
   "DATA_LIFECYCLE_E2E_ISOLATED_DATABASE",
   "M4_SECURITY_E2E",
+  "HOSTED_PRODUCTION_E2E",
+  "HOSTED_SECURITY_E2E",
 ]);
 
 const selectedProfile = process.env.V2_E2E_PROFILE ?? "fixture";
@@ -118,6 +142,8 @@ const profilesRequiringAbsoluteEvidence = new Set<E2EProfile>([
   "real-deep-research",
   "real-monitor",
   "real-data-lifecycle",
+  "hosted-production",
+  "hosted-security",
 ]);
 if (
   profilesRequiringAbsoluteEvidence.has(profile)
@@ -166,7 +192,28 @@ const projects = profile === "real-provider"
         },
       },
     ]
-  : profile === "failure-injection"
+    : profile === "hosted-production"
+      ? [
+          {
+            name: "hosted-production-desktop",
+            testMatch: hostedProductionMatch,
+            use: {...devices["Desktop Chrome"], viewport: {width: 1440, height: 1000}},
+          },
+          {
+            name: "hosted-production-pixel-7",
+            testMatch: hostedProductionMatch,
+            use: {...devices["Pixel 7"], viewport: {width: 412, height: 915}},
+          },
+        ]
+      : profile === "hosted-security"
+        ? [
+            {
+              name: "hosted-security-desktop",
+              testMatch: hostedSecurityMatch,
+              use: {...devices["Desktop Chrome"], viewport: {width: 1440, height: 1000}},
+            },
+          ]
+    : profile === "failure-injection"
     ? [
         {
           name: "failure-injection-desktop",
@@ -226,7 +273,7 @@ const projects = profile === "real-provider"
       : fixtureNamedProjects;
 
 export default defineConfig({
-  testDir: "./tests/e2e-v2",
+  testDir: "./tests",
   outputDir: evidenceDirectory
     ? path.join(evidenceDirectory, "test-results")
     : "./test-results",
@@ -247,7 +294,15 @@ export default defineConfig({
   },
   use: {
     baseURL: frontendBaseUrl,
-    trace: evidenceDirectory ? "on" : "retain-on-failure",
+    channel: browserChannel || undefined,
+    trace: evidenceDirectory
+      ? {
+          mode: "on",
+          screenshots: false,
+          snapshots: true,
+          sources: true,
+        }
+      : "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
   },

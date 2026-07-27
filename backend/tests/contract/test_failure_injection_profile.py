@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import tempfile
 from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
@@ -41,13 +42,18 @@ from crypto_alert_v2.providers.retry_policy import RetryPolicy
 from crypto_alert_v2.providers.search import ResearchResult
 
 
+ABSOLUTE_SCENARIO_FILE = str(
+    (Path(tempfile.gettempdir()) / "crypto-alert-failure-scenario.json").resolve()
+)
+
+
 def test_failure_injection_requires_a_non_production_local_profile() -> None:
     with pytest.raises(ValidationError, match="non-production local"):
         Settings(
             app_environment="production",
             failure_injection_enabled=True,
             failure_injection_profile="task12",
-            failure_injection_scenario_file="/tmp/scenario.json",
+            failure_injection_scenario_file=ABSOLUTE_SCENARIO_FILE,
             failure_injection_control_token=SecretStr("control-token"),
         )
 
@@ -69,7 +75,7 @@ def test_e2e_profiles_contain_only_non_sensitive_controls() -> None:
         app_environment="development",
         failure_injection_enabled=True,
         failure_injection_profile="task12",
-        failure_injection_scenario_file="/tmp/scenario.json",
+        failure_injection_scenario_file=ABSOLUTE_SCENARIO_FILE,
         failure_injection_control_token=SecretStr("control-token"),
     )
     assert failure_injection_from_settings(settings) is not None
@@ -89,7 +95,7 @@ def test_failure_injection_requires_an_absolute_shared_scenario_file() -> None:
         app_environment="test",
         failure_injection_enabled=True,
         failure_injection_profile="task12",
-        failure_injection_scenario_file="/tmp/crypto-alert-scenario.json",
+        failure_injection_scenario_file=ABSOLUTE_SCENARIO_FILE,
         failure_injection_control_token=SecretStr("control-token"),
     )
     controller = failure_injection_from_settings(settings)

@@ -10,7 +10,10 @@ readonly POSTGRES_IMAGE="postgres:16-alpine@sha256:57c72fd2a128e416c7fcc49995886
 readonly BASELINE_REVISION="0015_observability_delivery"
 readonly DOMAIN_EVENT_BASE_REVISION="0017_domain_events"
 readonly PROGRESSIVE_EVENT_REVISION="0018_progressive_events"
-readonly FINAL_REVISION="0019_ddgs_provenance"
+readonly PROVIDER_PROVENANCE_REVISION="0019_ddgs_provenance"
+readonly ENTITLEMENTS_REVISION="0020_entitlements_usage"
+readonly MONITORS_REVISION="0021_scheduled_monitors"
+readonly FINAL_REVISION="0022_data_lifecycle"
 
 output_root=""
 profile="local-rehearsal"
@@ -76,12 +79,17 @@ output_entries=("$output_root"/*)
 shopt -u dotglob nullglob
 (( ${#output_entries[@]} == 0 )) || fail "--output-root must be empty" 64
 
-for command_name in docker jq chmod date git mktemp rm sleep mv psql; do
+for command_name in docker jq chmod date git mktemp rm sleep mv; do
   command -v "$command_name" >/dev/null 2>&1 \
     || fail "required command is unavailable: $command_name"
 done
-[[ -x "$BACKEND_ROOT/.venv/bin/alembic" ]] \
-  || fail "required backend executable is unavailable: $BACKEND_ROOT/.venv/bin/alembic"
+if [[ -x "$BACKEND_ROOT/.venv/bin/alembic" ]]; then
+  readonly BACKEND_ALEMBIC="$BACKEND_ROOT/.venv/bin/alembic"
+elif [[ -x "$BACKEND_ROOT/.venv/Scripts/alembic.exe" ]]; then
+  readonly BACKEND_ALEMBIC="$BACKEND_ROOT/.venv/Scripts/alembic.exe"
+else
+  fail "required backend executable is unavailable: alembic"
+fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-alert-v2-upgrade-rollback.XXXXXX")"
 chmod 700 "$work_dir"
@@ -111,7 +119,12 @@ published="$(docker port "$container_name" 5432/tcp)"
 database_port="${published##*:}"
 [[ "$database_port" =~ ^[0-9]+$ ]] || fail "temporary PostgreSQL port is invalid"
 readonly database_url="postgresql+asyncpg://postgres@127.0.0.1:${database_port}/postgres"
-readonly psql_url="postgresql://postgres@127.0.0.1:${database_port}/postgres"
+
+run_psql() {
+  docker exec "$container_name" \
+    psql --username postgres --dbname postgres \
+      --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$@"
+}
 
 run_alembic() {
   local revision="$1"
@@ -120,30 +133,31 @@ run_alembic() {
   if ! (
     cd "$BACKEND_ROOT"
     PRODUCT_DATABASE_URL="$database_url" \
-      ./.venv/bin/alembic -c alembic.ini "$action" "$target"
+      "$BACKEND_ALEMBIC" -c alembic.ini "$action" "$target"
   ) >"$work_dir/alembic-${revision// /-}.stdout" 2>"$work_dir/alembic-${revision// /-}.stderr"; then
     fail "alembic $revision failed; details suppressed"
   fi
 }
 
 run_alembic "upgrade head"
-initial_version="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT version_num FROM app.alembic_version;")"
+initial_version="$(run_psql --command "SELECT version_num FROM app.alembic_version;")"
 [[ "$initial_version" == "$FINAL_REVISION" ]] || fail "initial upgrade did not reach the final revision"
 
 run_alembic "downgrade $BASELINE_REVISION"
-baseline_version="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT version_num FROM app.alembic_version;")"
+baseline_version="$(run_psql --command "SELECT version_num FROM app.alembic_version;")"
 [[ "$baseline_version" == "$BASELINE_REVISION" ]] || fail "downgrade did not reach the baseline revision"
 
 run_alembic "upgrade head"
-final_version="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT version_num FROM app.alembic_version;")"
+final_version="$(run_psql --command "SELECT version_num FROM app.alembic_version;")"
 [[ "$final_version" == "$FINAL_REVISION" ]] || fail "final upgrade did not reach the final revision"
 
-constraint_definition="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.runs'::regclass AND conname = 'fk_runs_fork_source_scope';")"
-unique_definition="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.runs'::regclass AND conname = 'uq_runs_fork_checkpoint_scope';")"
-event_unique_definition="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.domain_events'::regclass AND conname = 'uq_domain_events_run_source_key';")"
-event_scope_definition="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.domain_events'::regclass AND conname = 'fk_domain_events_run_scope';")"
-event_payload_columns="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'domain_events' AND column_name IN ('source_event_key', 'source_event_id', 'payload') AND (column_name = 'source_event_id' OR is_nullable = 'NO');")"
-thread_counter_columns="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'threads' AND column_name = 'next_domain_event_sequence' AND is_nullable = 'NO';")"
+constraint_definition="$(run_psql --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.runs'::regclass AND conname = 'fk_runs_fork_source_scope';")"
+unique_definition="$(run_psql --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.runs'::regclass AND conname = 'uq_runs_fork_checkpoint_scope';")"
+event_unique_definition="$(run_psql --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.domain_events'::regclass AND conname = 'uq_domain_events_run_source_key';")"
+event_scope_definition="$(run_psql --command "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'app.domain_events'::regclass AND conname = 'fk_domain_events_run_scope';")"
+event_payload_columns="$(run_psql --command "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'domain_events' AND column_name IN ('source_event_key', 'source_event_id', 'payload') AND (column_name = 'source_event_id' OR is_nullable = 'NO');")"
+thread_counter_columns="$(run_psql --command "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'threads' AND column_name = 'next_domain_event_sequence' AND is_nullable = 'NO';")"
+final_feature_tables="$(run_psql --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'app' AND table_name IN ('workspace_entitlements', 'usage_ledger_entries', 'monitor_definitions', 'data_lifecycle_policies');")"
 [[ "$constraint_definition" == *"forked_from_checkpoint_id"* ]] \
   || fail "final fork foreign key does not include the source checkpoint"
 [[ "$unique_definition" == *"checkpoint_id"* ]] \
@@ -156,6 +170,8 @@ thread_counter_columns="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align 
   || fail "final Domain Event immutable payload columns are incomplete"
 [[ "$thread_counter_columns" == "1" ]] \
   || fail "final Thread event sequence counter is missing"
+[[ "$final_feature_tables" == "4" ]] \
+  || fail "final entitlement, monitor or lifecycle tables are incomplete"
 
 git_head="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
 generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -170,7 +186,11 @@ jq -n \
   --arg final_version "$final_version" \
   --arg domain_event_base_revision "$DOMAIN_EVENT_BASE_REVISION" \
   --arg progressive_event_revision "$PROGRESSIVE_EVENT_REVISION" \
+  --arg provider_provenance_revision "$PROVIDER_PROVENANCE_REVISION" \
+  --arg entitlements_revision "$ENTITLEMENTS_REVISION" \
+  --arg monitors_revision "$MONITORS_REVISION" \
   --argjson fork_scope_columns 6 \
+  --argjson final_feature_tables "$final_feature_tables" \
   '{
     schema_version: "2026-07-18.upgrade-rollback-rehearsal.v1",
     status: "passed",
@@ -183,7 +203,11 @@ jq -n \
       final_upgrade: $final_version,
       domain_event_base_revision: $domain_event_base_revision,
       progressive_event_revision: $progressive_event_revision,
+      provider_provenance_revision: $provider_provenance_revision,
+      entitlements_revision: $entitlements_revision,
+      monitors_revision: $monitors_revision,
       fork_scope_columns: $fork_scope_columns,
+      final_feature_tables: $final_feature_tables,
       constraint_verified: true,
       progressive_event_schema_verified: true
     },

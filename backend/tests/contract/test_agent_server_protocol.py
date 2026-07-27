@@ -264,6 +264,28 @@ async def test_python_sdk_lifts_a_fork_checkpoint_to_top_level_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_python_sdk_serializes_an_official_fork_checkpoint_object() -> None:
+    checkpoint = {
+        "thread_id": "thread-fork-contract",
+        "checkpoint_ns": "",
+        "checkpoint_id": "checkpoint-fork-contract",
+        "checkpoint_map": {"": "checkpoint-fork-contract"},
+    }
+    request, _ = await _record_runs_create(
+        checkpoint=checkpoint,
+        durability="sync",
+    )
+
+    body = _request_json(request)
+    assert body["checkpoint"] == checkpoint, _capability_gap(
+        "runs-fork-checkpoint-object",
+        "fork checkpoint object was not preserved by the official SDK.",
+    )
+    assert "checkpoint_id" not in body
+    assert "input" not in body
+
+
+@pytest.mark.asyncio
 async def test_live_merged_openapi_keeps_product_and_official_route_spaces() -> None:
     base_url = _live_base_url()
     async with httpx.AsyncClient(

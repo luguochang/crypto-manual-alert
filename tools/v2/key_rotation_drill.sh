@@ -3,6 +3,9 @@ set -euo pipefail
 
 umask 077
 
+export APP_ENVIRONMENT=test
+export CRYPTO_ALERT_DISABLE_DOTENV=1
+
 readonly SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
 readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly BACKEND_ROOT="$REPOSITORY_ROOT/backend"
@@ -13,7 +16,43 @@ profile="local-rehearsal"
 work_dir=""
 container_name=""
 rotation_pid=""
+rotation_launcher_pid=""
+rotation_pid_kind="posix"
 summary_tmp=""
+current_stage="initialization"
+last_probe_report=""
+failure_evidence_enabled=false
+
+force_kill_rotation() {
+  local process_id="$1"
+  local kill_status=0
+  if [[ "$rotation_pid_kind" == "windows" ]]; then
+    MSYS_NO_PATHCONV=1 taskkill.exe /PID "$process_id" /T /F >/dev/null 2>&1 \
+      || kill_status=$?
+    if [[ -n "$rotation_launcher_pid" ]]; then
+      MSYS_NO_PATHCONV=1 taskkill.exe /PID "$rotation_launcher_pid" /F \
+        >/dev/null 2>&1 || true
+    fi
+    return "$kill_status"
+  else
+    kill -KILL "$process_id"
+  fi
+}
+
+rotation_is_running() {
+  local process_id="$1"
+  if [[ "$rotation_pid_kind" == "windows" ]]; then
+    ROTATION_CHECK_PID="$process_id" \
+      powershell.exe -NoProfile -NonInteractive -Command '
+        if (Get-Process -Id ([int]$env:ROTATION_CHECK_PID) -ErrorAction SilentlyContinue) {
+          exit 0
+        }
+        exit 1
+      ' >/dev/null 2>&1
+  else
+    kill -0 "$process_id" >/dev/null 2>&1
+  fi
+}
 
 fail() {
   printf 'key rotation drill failed: %s\n' "$1" >&2
@@ -21,19 +60,55 @@ fail() {
 }
 
 cleanup() {
-  if [[ -n "$rotation_pid" ]] && kill -0 "$rotation_pid" >/dev/null 2>&1; then
-    kill -KILL "$rotation_pid" >/dev/null 2>&1 || true
-    wait "$rotation_pid" >/dev/null 2>&1 || true
+  local exit_status="$?"
+  local probe_status="unknown" probe_stage="unknown" probe_error_type="unknown"
+  local failure_path failure_tmp
+  if [[ "$exit_status" != "0" && -n "$last_probe_report" && -s "$last_probe_report" ]]; then
+    probe_status="$(jq -r '.status // "unknown"' "$last_probe_report" 2>/dev/null || true)"
+    probe_stage="$(jq -r '.probe_stage // "unknown"' "$last_probe_report" 2>/dev/null || true)"
+    probe_error_type="$(jq -r '.error_type // "unknown"' "$last_probe_report" 2>/dev/null || true)"
+  fi
+  if [[ "$exit_status" != "0" && "$failure_evidence_enabled" == "true" && -n "$output_root" && -d "$output_root" ]]; then
+    failure_path="$output_root/key-rotation-failure.json"
+    failure_tmp="$output_root/.key-rotation-failure.$$"
+    jq -n \
+      --arg stage "$current_stage" \
+      --arg probe_status "$probe_status" \
+      --arg probe_stage "$probe_stage" \
+      --arg probe_error_type "$probe_error_type" \
+      --argjson exit_code "$exit_status" \
+      '{schema_version:"2026-07-22.key-rotation-failure.v1",status:"failed",stage:$stage,exit_code:$exit_code,probe:{status:$probe_status,stage:$probe_stage,error_type:$probe_error_type}}' \
+      >"$failure_tmp" 2>/dev/null || true
+    if [[ -s "$failure_tmp" ]]; then
+      chmod 600 "$failure_tmp" >/dev/null 2>&1 || true
+      mv -f "$failure_tmp" "$failure_path" >/dev/null 2>&1 || true
+      printf 'key rotation drill failed at stage: %s (%s/%s)\n' \
+        "$current_stage" "$probe_stage" "$probe_error_type" >&2
+    fi
+  fi
+  if [[ -n "$rotation_pid" ]] && rotation_is_running "$rotation_pid"; then
+    force_kill_rotation "$rotation_pid" >/dev/null 2>&1 || true
+    if [[ "$rotation_pid_kind" != "windows" ]]; then
+      wait "$rotation_pid" >/dev/null 2>&1 || true
+    fi
   fi
   if [[ -n "$container_name" ]]; then
     docker rm --force "$container_name" >/dev/null 2>&1 || true
   fi
   if [[ -n "$work_dir" ]]; then
-    rm -rf "$work_dir"
+    for ((cleanup_attempt = 1; cleanup_attempt <= 50; cleanup_attempt += 1)); do
+      rm -rf "$work_dir" >/dev/null 2>&1 && break
+      sleep 0.1
+    done
+    if [[ -d "$work_dir" ]]; then
+      printf 'key rotation drill cleanup failed: temporary work directory remains\n' >&2
+      return 1
+    fi
   fi
   if [[ -n "$summary_tmp" ]]; then
     rm -f "$summary_tmp"
   fi
+  return "$exit_status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -79,17 +154,36 @@ if (( ${#output_entries[@]} != 0 )); then
   fail "--output-root must be empty" 64
 fi
 
-for command_name in docker jq openssl psql chmod date git mktemp rm sleep tr grep mv; do
+for command_name in docker jq openssl chmod date git mktemp rm sleep tr grep mv; do
   command -v "$command_name" >/dev/null 2>&1 \
     || fail "required command is unavailable: $command_name"
 done
-[[ -x "$BACKEND_ROOT/.venv/bin/python" ]] \
-  || fail "required backend executable is unavailable: $BACKEND_ROOT/.venv/bin/python"
-[[ -x "$BACKEND_ROOT/.venv/bin/alembic" ]] \
-  || fail "required backend executable is unavailable: $BACKEND_ROOT/.venv/bin/alembic"
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    for command_name in cygpath powershell.exe taskkill.exe; do
+      command -v "$command_name" >/dev/null 2>&1 \
+        || fail "required command is unavailable: $command_name"
+    done
+    ;;
+esac
+if [[ -x "$BACKEND_ROOT/.venv/bin/python" ]]; then
+  readonly BACKEND_PYTHON="$BACKEND_ROOT/.venv/bin/python"
+elif [[ -x "$BACKEND_ROOT/.venv/Scripts/python.exe" ]]; then
+  readonly BACKEND_PYTHON="$BACKEND_ROOT/.venv/Scripts/python.exe"
+else
+  fail "required backend executable is unavailable: python"
+fi
+if [[ -x "$BACKEND_ROOT/.venv/bin/alembic" ]]; then
+  readonly BACKEND_ALEMBIC="$BACKEND_ROOT/.venv/bin/alembic"
+elif [[ -x "$BACKEND_ROOT/.venv/Scripts/alembic.exe" ]]; then
+  readonly BACKEND_ALEMBIC="$BACKEND_ROOT/.venv/Scripts/alembic.exe"
+else
+  fail "required backend executable is unavailable: alembic"
+fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crypto-alert-v2-key-rotation.XXXXXX")"
 chmod 700 "$work_dir"
+failure_evidence_enabled=true
 container_name="crypto-alert-v2-key-rotation-$$-${RANDOM}"
 
 docker run \
@@ -116,11 +210,16 @@ published="$(docker port "$container_name" 5432/tcp)"
 database_port="${published##*:}"
 [[ "$database_port" =~ ^[0-9]+$ ]] || fail "temporary PostgreSQL port is invalid"
 readonly database_url="postgresql+asyncpg://postgres@127.0.0.1:${database_port}/postgres"
-readonly psql_url="postgresql://postgres@127.0.0.1:${database_port}/postgres"
+
+run_psql() {
+  docker exec "$container_name" \
+    psql --username postgres --dbname postgres \
+      --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$@"
+}
 
 (
   cd "$BACKEND_ROOT"
-  PRODUCT_DATABASE_URL="$database_url" ./.venv/bin/alembic -c alembic.ini upgrade head
+  PRODUCT_DATABASE_URL="$database_url" "$BACKEND_ALEMBIC" -c alembic.ini upgrade head
 ) >/dev/null
 
 old_notification_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
@@ -128,7 +227,7 @@ new_notification_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 notification_canary="$(openssl rand -hex 24)"
 decrypt_keyring="$(
   ROTATION_OLD_KEY="$old_notification_key" \
-    "$BACKEND_ROOT/.venv/bin/python" - <<'PY'
+    "$BACKEND_PYTHON" - <<'PY'
 import json
 import os
 
@@ -142,7 +241,7 @@ NOTIFICATION_CREDENTIAL_KEY="$old_notification_key" \
 NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v1" \
 ROTATION_CANARY="$notification_canary" \
 ROTATION_SNAPSHOT="$work_dir/original-ciphertext.json" \
-"$BACKEND_ROOT/.venv/bin/python" - <<'PY'
+"$BACKEND_PYTHON" - <<'PY'
 import asyncio
 from base64 import b64encode
 import json
@@ -215,15 +314,22 @@ run_capture_delivery() {
   local active_key="$1"
   local active_version="$2"
   local decrypt_keys="$3"
-  PRODUCT_DATABASE_URL="$database_url" \
+  local probe_report="$work_dir/delivery-probe-${active_version}.json"
+  local process_status=0 probe_status probe_stage probe_error_type
+  rm -f "$probe_report"
+  last_probe_report="$probe_report"
+  if PRODUCT_DATABASE_URL="$database_url" \
   NOTIFICATION_CREDENTIAL_KEY="$active_key" \
   NOTIFICATION_CREDENTIAL_KEY_VERSION="$active_version" \
   NOTIFICATION_CREDENTIAL_DECRYPT_KEYS="$decrypt_keys" \
   ROTATION_CANARY="$notification_canary" \
-  "$BACKEND_ROOT/.venv/bin/python" - <<'PY'
+  ROTATION_DELIVERY_REPORT="$probe_report" \
+  "$BACKEND_PYTHON" - <<'PY'
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -235,8 +341,19 @@ from crypto_alert_v2.notifications.credentials import notification_credential_ci
 from crypto_alert_v2.notifications.resolver import DatabaseNotificationAdapterResolver
 from crypto_alert_v2.persistence.models import NotificationDestination
 
+probe_stage = "initialization"
+report_path = Path(os.environ["ROTATION_DELIVERY_REPORT"])
+
+
+def write_report(payload: dict[str, object]) -> None:
+    report_path.write_text(
+        json.dumps(payload, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
 async def main() -> None:
+    global probe_stage
+    probe_stage = "cipher_init"
     deliveries = 0
 
     async def capture(request: httpx.Request) -> httpx.Response:
@@ -251,6 +368,7 @@ async def main() -> None:
     cipher = notification_credential_cipher_from_environment()
     assert cipher is not None
     async with httpx.AsyncClient(transport=httpx.MockTransport(capture)) as client:
+        probe_stage = "load_destinations"
         resolver = DatabaseNotificationAdapterResolver(
             session_factory=sessions,
             credential_cipher=cipher,
@@ -259,6 +377,7 @@ async def main() -> None:
         async with sessions() as session:
             destinations = list((await session.scalars(select(NotificationDestination).order_by(NotificationDestination.id))).all())
         for destination in destinations:
+            probe_stage = "resolve_adapter"
             request = DeliveryRequest(
                 notification_id=uuid4(), task_id=uuid4(), run_id=uuid4(),
                 artifact_id=uuid4(), decision_id=uuid4(), channel="bark",
@@ -269,81 +388,236 @@ async def main() -> None:
             )
             adapter = await resolver.resolve(request)
             assert adapter is not None
+            probe_stage = "send"
             result = await adapter.send(request)
             assert result.outcome == "delivered"
+    probe_stage = "delivery_count"
     assert deliveries == 4
     await engine.dispose()
+    write_report({"status": "passed"})
 
 
-asyncio.run(main())
+try:
+    asyncio.run(main())
+except Exception as exc:
+    write_report(
+        {
+            "status": "failed",
+            "probe_stage": probe_stage,
+            "error_type": type(exc).__name__,
+        }
+    )
+    raise SystemExit(1) from None
 PY
+  then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  for ((probe_attempt = 1; probe_attempt <= 100; probe_attempt += 1)); do
+    [[ -s "$probe_report" ]] && break
+    sleep 0.05
+  done
+  [[ -s "$probe_report" ]] \
+    || fail "delivery probe produced no bounded report ($process_status)"
+  probe_status="$(jq -r '.status // empty' "$probe_report")"
+  if [[ "$probe_status" != "passed" ]]; then
+    probe_stage="$(jq -r '.probe_stage // "unknown"' "$probe_report")"
+    probe_error_type="$(jq -r '.error_type // "unknown"' "$probe_report")"
+    fail "delivery probe failed: $probe_stage/$probe_error_type"
+  fi
+  return 0
 }
 
-run_capture_delivery "$old_notification_key" "rotation-v1" ""
+current_stage="delivery_before_rotation"
+run_capture_delivery "$old_notification_key" "rotation-v1" "" \
+  || fail "delivery probe wrapper failed before rotation"
 delivery_before_rotation="delivered"
-run_capture_delivery "$new_notification_key" "rotation-v2" "$decrypt_keyring"
+current_stage="delivery_during_overlap"
+run_capture_delivery "$new_notification_key" "rotation-v2" "$decrypt_keyring" \
+  || fail "delivery probe wrapper failed during overlap"
 delivery_during_overlap="delivered"
 
 rotation_interrupted=false
-(
-  cd "$BACKEND_ROOT"
-  PRODUCT_DATABASE_URL="$database_url" \
-  NOTIFICATION_CREDENTIAL_KEY="$new_notification_key" \
-  NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v2" \
-  NOTIFICATION_CREDENTIAL_DECRYPT_KEYS="$decrypt_keyring" \
-  ./.venv/bin/python -m crypto_alert_v2.notifications.rotate_credentials \
-    --batch-size 1 \
-    --inter-batch-delay-seconds 10 \
-    --output "$work_dir/interrupted-report.json"
-) >"$work_dir/interrupted.stdout" 2>"$work_dir/interrupted.stderr" &
-rotation_pid=$!
+current_stage="start_interrupted_rotation"
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    rotation_pid_kind="windows"
+    rotation_pid_file="$work_dir/rotation.pid"
+    rotation_launch_report="$work_dir/rotation-launch.json"
+    ROTATION_BACKEND_PYTHON="$(cygpath -w "$BACKEND_PYTHON")" \
+    ROTATION_BACKEND_ROOT="$(cygpath -w "$BACKEND_ROOT")" \
+    ROTATION_OUTPUT="$(cygpath -w "$work_dir/interrupted-report.json")" \
+    ROTATION_STDOUT="$(cygpath -w "$work_dir/interrupted.stdout")" \
+    ROTATION_STDERR="$(cygpath -w "$work_dir/interrupted.stderr")" \
+    ROTATION_PID_FILE="$(cygpath -w "$rotation_pid_file")" \
+    ROTATION_LAUNCH_REPORT="$(cygpath -w "$rotation_launch_report")" \
+    PRODUCT_DATABASE_URL="$database_url" \
+    NOTIFICATION_CREDENTIAL_KEY="$new_notification_key" \
+    NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v2" \
+    NOTIFICATION_CREDENTIAL_DECRYPT_KEYS="$decrypt_keyring" \
+      powershell.exe -NoProfile -NonInteractive -Command '
+        try {
+          $arguments = @(
+          "-m", "crypto_alert_v2.notifications.rotate_credentials",
+          "--batch-size", "1",
+          "--inter-batch-delay-seconds", "10",
+          "--output", $env:ROTATION_OUTPUT
+        )
+          $process = Start-Process `
+          -FilePath $env:ROTATION_BACKEND_PYTHON `
+          -ArgumentList $arguments `
+          -WorkingDirectory $env:ROTATION_BACKEND_ROOT `
+          -RedirectStandardOutput $env:ROTATION_STDOUT `
+          -RedirectStandardError $env:ROTATION_STDERR `
+          -WindowStyle Hidden `
+          -PassThru
+          $deadline = [DateTime]::UtcNow.AddSeconds(10)
+          $child = $null
+          while ($null -eq $child -and [DateTime]::UtcNow -lt $deadline) {
+            $child = Get-CimInstance Win32_Process |
+              Where-Object {
+                $_.ParentProcessId -eq $process.Id -and
+                $_.ExecutablePath -like "*python.exe"
+              } |
+              Select-Object -First 1
+            if ($null -eq $child) { Start-Sleep -Milliseconds 50 }
+          }
+          if ($null -eq $child) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw [InvalidOperationException]::new("child process unavailable")
+          }
+          [IO.File]::WriteAllText(
+            $env:ROTATION_PID_FILE,
+            "$($process.Id)|$($child.ProcessId)" + [char]10
+          )
+          [IO.File]::WriteAllText(
+            $env:ROTATION_LAUNCH_REPORT,
+            (@{status="passed"} | ConvertTo-Json -Compress)
+          )
+        } catch {
+          [IO.File]::WriteAllText(
+            $env:ROTATION_LAUNCH_REPORT,
+            (@{status="failed";error_type=$_.Exception.GetType().Name} | ConvertTo-Json -Compress)
+          )
+          exit 1
+        }
+      ' >/dev/null || {
+        rotation_launch_status=$?
+        rotation_launch_error_type="$(
+          jq -r '.error_type // "unknown"' "$rotation_launch_report" 2>/dev/null || true
+        )"
+        [[ -n "$rotation_launch_error_type" ]] || rotation_launch_error_type="unknown"
+        fail "Windows rotation launcher failed: $rotation_launch_error_type ($rotation_launch_status)"
+      }
+    IFS='|' read -r rotation_launcher_pid rotation_pid <"$rotation_pid_file"
+    [[ "$rotation_launcher_pid" =~ ^[0-9]+$ && "$rotation_pid" =~ ^[0-9]+$ ]] \
+      || fail "Windows rotation process IDs are invalid"
+    ;;
+  *)
+    rotation_pid_kind="posix"
+    (
+      cd "$BACKEND_ROOT"
+      PRODUCT_DATABASE_URL="$database_url" \
+      NOTIFICATION_CREDENTIAL_KEY="$new_notification_key" \
+      NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v2" \
+      NOTIFICATION_CREDENTIAL_DECRYPT_KEYS="$decrypt_keyring" \
+      "$BACKEND_PYTHON" -m crypto_alert_v2.notifications.rotate_credentials \
+        --batch-size 1 \
+        --inter-batch-delay-seconds 10 \
+        --output "$work_dir/interrupted-report.json"
+    ) >"$work_dir/interrupted.stdout" 2>"$work_dir/interrupted.stderr" &
+    rotation_pid=$!
+    ;;
+esac
 
+current_stage="observe_partial_commit"
 partial_commit=0
 for ((attempt = 1; attempt <= 200; attempt += 1)); do
-  new_rows="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM app.notification_destinations WHERE credential_key_version = 'rotation-v2';")"
-  old_rows="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM app.notification_destinations WHERE credential_key_version = 'rotation-v1';")"
+  IFS='|' read -r new_rows old_rows <<<"$(
+    run_psql --command "
+      SELECT
+        count(*) FILTER (WHERE credential_key_version = 'rotation-v2'),
+        count(*) FILTER (WHERE credential_key_version = 'rotation-v1')
+      FROM app.notification_destinations;
+    "
+  )"
   if (( new_rows >= 1 && old_rows >= 1 )); then
     partial_commit=1
     break
   fi
+  if ! rotation_is_running "$rotation_pid"; then
+    rotation_status=0
+    if [[ "$rotation_pid_kind" == "windows" ]]; then
+      rotation_status=1
+    else
+      wait "$rotation_pid" || rotation_status=$?
+    fi
+    rotation_pid=""
+    rotation_error_type="$(
+      jq -r 'select(.status == "failed") | .error_type // empty' \
+        "$work_dir/interrupted.stderr" 2>/dev/null || true
+    )"
+    [[ -n "$rotation_error_type" ]] || rotation_error_type="unknown"
+    fail "rotation process exited before resumable boundary: $rotation_error_type ($rotation_status)"
+  fi
   sleep 0.05
 done
 [[ "$partial_commit" == "1" ]] || fail "rotation did not expose a committed resumable boundary"
-kill -KILL "$rotation_pid"
-if wait "$rotation_pid" >/dev/null 2>&1; then
-  fail "interrupted rotation exited successfully before SIGKILL"
+current_stage="force_interrupt"
+force_kill_rotation "$rotation_pid" \
+  || fail "rotation process could not be force-terminated"
+if [[ "$rotation_pid_kind" == "windows" ]]; then
+  for ((attempt = 1; attempt <= 40; attempt += 1)); do
+    rotation_is_running "$rotation_pid" || break
+    sleep 0.05
+  done
+  rotation_is_running "$rotation_pid" \
+    && fail "force-terminated rotation process is still running"
+else
+  if wait "$rotation_pid" >/dev/null 2>&1; then
+    fail "interrupted rotation exited successfully before SIGKILL"
+  fi
 fi
 rotation_pid=""
+rotation_launcher_pid=""
 rotation_interrupted=true
 
-run_capture_delivery "$new_notification_key" "rotation-v2" "$decrypt_keyring"
+current_stage="post_interrupt_delivery"
+run_capture_delivery "$new_notification_key" "rotation-v2" "$decrypt_keyring" \
+  || fail "delivery probe wrapper failed after interruption"
 
+current_stage="resume_rotation"
 (
   cd "$BACKEND_ROOT"
   PRODUCT_DATABASE_URL="$database_url" \
   NOTIFICATION_CREDENTIAL_KEY="$new_notification_key" \
   NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v2" \
   NOTIFICATION_CREDENTIAL_DECRYPT_KEYS="$decrypt_keyring" \
-  ./.venv/bin/python -m crypto_alert_v2.notifications.rotate_credentials \
+  "$BACKEND_PYTHON" -m crypto_alert_v2.notifications.rotate_credentials \
     --batch-size 1 \
     --output "$work_dir/completed-report.json"
 ) >"$work_dir/completed.stdout" 2>"$work_dir/completed.stderr"
 
+current_stage="resume_validation"
 rows_rewrapped="$((4 - old_rows))"
 completed_rewrapped="$(jq -r '.rewrapped_rows' "$work_dir/completed-report.json")"
 rows_rewrapped="$((rows_rewrapped + completed_rewrapped))"
-old_rows_remaining="$(psql "$psql_url" --no-psqlrc --tuples-only --no-align --command "SELECT count(*) FROM app.notification_destinations WHERE credential_key_version != 'rotation-v2';")"
+old_rows_remaining="$(run_psql --command "SELECT count(*) FROM app.notification_destinations WHERE credential_key_version != 'rotation-v2';")"
 [[ "$old_rows_remaining" == "0" ]] || fail "old notification key versions remain after resume"
 [[ "$rows_rewrapped" == "4" ]] || fail "rewrapped row count does not match seeded destinations"
 
-run_capture_delivery "$new_notification_key" "rotation-v2" ""
+current_stage="delivery_after_retirement"
+run_capture_delivery "$new_notification_key" "rotation-v2" "" \
+  || fail "delivery probe wrapper failed after retirement"
 delivery_after_retirement="delivered"
 
+current_stage="retired_ciphertext_rejection"
 PRODUCT_DATABASE_URL="$database_url" \
 NOTIFICATION_CREDENTIAL_KEY="$new_notification_key" \
 NOTIFICATION_CREDENTIAL_KEY_VERSION="rotation-v2" \
 ROTATION_SNAPSHOT="$work_dir/original-ciphertext.json" \
-"$BACKEND_ROOT/.venv/bin/python" - <<'PY'
+"$BACKEND_PYTHON" - <<'PY'
 from base64 import b64decode
 import json
 import os
@@ -371,13 +645,14 @@ else:
     raise SystemExit("retired notification key unexpectedly decrypted old ciphertext")
 PY
 
+current_stage="jwt_rotation"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work_dir/jwt-v1-private.pem" 2>/dev/null
 openssl pkey -in "$work_dir/jwt-v1-private.pem" -pubout -out "$work_dir/jwt-v1-public.pem" 2>/dev/null
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work_dir/jwt-v2-private.pem" 2>/dev/null
 openssl pkey -in "$work_dir/jwt-v2-private.pem" -pubout -out "$work_dir/jwt-v2-public.pem" 2>/dev/null
 chmod 600 "$work_dir"/jwt-*.pem
 
-JWT_WORK_DIR="$work_dir" "$BACKEND_ROOT/.venv/bin/python" - <<'PY'
+JWT_WORK_DIR="$work_dir" "$BACKEND_PYTHON" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -419,6 +694,7 @@ new_retired = retired.verify(new_token)["sub"] == "rotation-worker"
 }, sort_keys=True), encoding="utf-8")
 PY
 
+current_stage="summary_publish"
 jwt_result="$(<"$work_dir/jwt-result.json")"
 git_head="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
 generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"

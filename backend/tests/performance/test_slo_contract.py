@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -100,7 +101,8 @@ def test_synthetic_source_candidate_covers_every_internal_alpha_slo(
     assert report["metrics"]["api_agent_availability_rate"]["threshold"] is None
     assert report["metrics"]["api_agent_availability_rate"]["passed"] is None
     assert "secret_scan" not in report
-    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
 def test_slo_contract_fails_when_any_threshold_is_missed(tmp_path: Path) -> None:

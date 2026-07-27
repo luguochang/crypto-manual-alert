@@ -6,6 +6,10 @@ from crypto_alert_v2.workers.notification import (
 )
 from crypto_alert_v2.workers.runtime import WorkerRuntime
 from crypto_alert_v2.workers.lifecycle import LifecycleWorker
+from crypto_alert_v2.workers.memory_outcome import (
+    MemoryDeletionWorker,
+    OutcomeMaturationWorker,
+)
 
 __all__ = [
     "NotificationLease",
@@ -13,5 +17,7 @@ __all__ = [
     "NotificationRetryBudgetExhausted",
     "OutboxWorker",
     "LifecycleWorker",
+    "MemoryDeletionWorker",
+    "OutcomeMaturationWorker",
     "WorkerRuntime",
 ]

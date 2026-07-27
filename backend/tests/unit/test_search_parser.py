@@ -5,6 +5,7 @@ import pytest
 from langchain_core.messages import AIMessage
 from openai import APITimeoutError
 
+from crypto_alert_v2.providers import search as search_module
 from crypto_alert_v2.providers.search import (
     BuiltinWebSearchProvider,
     DdgsMetasearchProvider,
@@ -1301,6 +1302,97 @@ def test_tavily_invocation_exception_is_typed_research_unavailable() -> None:
     assert raised.value.provider == "tavily"
     assert raised.value.error_type == "RuntimeError"
     assert "provider internals" not in str(raised.value)
+
+
+def test_tavily_default_retry_policy_reserves_eighteen_seconds_first() -> None:
+    class EmptyTool:
+        def invoke(self, input: object, config: object = None) -> object:
+            del input, config
+            return {"results": []}
+
+    provider = TavilySearchProvider(tool=EmptyTool())  # type: ignore[arg-type]
+
+    assert provider._retry_policy._attempt_timeout_seconds(30, 1) == pytest.approx(18)
+
+
+def test_tavily_proxy_keeps_the_official_tool_boundary() -> None:
+    provider = TavilySearchProvider(
+        api_key="test-tavily-key",
+        proxy="http://proxy.example:7890",
+    )
+
+    assert provider._tool.__class__.__name__ == "TavilySearch"
+    assert provider._tool.api_wrapper.proxy == "http://proxy.example:7890"
+
+
+def test_tavily_sync_proxy_routes_the_official_wrapper_through_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"results": []}
+
+    class Client:
+        def __init__(self, *, proxy: str, timeout: object) -> None:
+            captured["proxy"] = proxy
+            captured["timeout"] = timeout
+
+        def __enter__(self) -> "Client":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, object],
+            headers: dict[str, str],
+        ) -> Response:
+            captured["url"] = url
+            captured["json"] = json
+            captured["client_source"] = headers["X-Client-Source"]
+            return Response()
+
+    monkeypatch.setattr(search_module.httpx, "Client", Client)
+    provider = TavilySearchProvider(
+        api_key="test-tavily-key",
+        proxy="http://proxy.example:7890",
+    )
+
+    payload = provider._tool.api_wrapper.raw_results(
+        query="bitcoin market",
+        max_results=3,
+        search_depth="basic",
+    )
+
+    assert payload == {"results": []}
+    assert captured == {
+        "proxy": "http://proxy.example:7890",
+        "timeout": None,
+        "url": "https://api.tavily.com/search",
+        "json": {
+            "query": "bitcoin market",
+            "max_results": 3,
+            "search_depth": "basic",
+        },
+        "client_source": "langchain-tavily",
+    }
+
+
+def test_tavily_search_depth_is_forwarded_to_the_official_tool() -> None:
+    provider = TavilySearchProvider(
+        api_key="test-tavily-key",
+        search_depth="basic",
+    )
+
+    assert provider._tool.__class__.__name__ == "TavilySearch"
+    assert provider._tool.search_depth == "basic"
 
 
 def test_tavily_empty_and_invalid_evidence_retry_under_one_owner() -> None:

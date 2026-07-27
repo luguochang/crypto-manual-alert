@@ -15,6 +15,7 @@ from crypto_alert_v2.auth.agent_server import (
     scope_cron_read,
     scope_cron_search,
     scope_cron_update,
+    scope_run_access,
     scope_store,
     scope_thread_access,
     scope_thread_create,
@@ -50,6 +51,14 @@ async def test_local_agent_auth_requires_loopback_peer_and_exact_token() -> None
 
     assert user["identity"] == "dev-user"
     assert "tenant:dev-tenant" in user["permissions"]
+
+
+@pytest.mark.asyncio
+async def test_local_agent_auth_accepts_aegra_header_callback() -> None:
+    user = await authenticate({"authorization": "Bearer test-local-token"})
+
+    assert user["identity"] == "dev-user"
+    assert "workspace:dev-workspace" in user["permissions"]
 
 
 @pytest.mark.asyncio
@@ -241,6 +250,55 @@ async def test_unknown_thread_action_is_denied() -> None:
         await scope_thread_access(SimpleNamespace(action="unknown", user=User()), {})
 
     assert getattr(error.value, "status_code", None) == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["read", "search"])
+async def test_run_reads_require_analysis_read(action: str) -> None:
+    assert await scope_run_access(
+        SimpleNamespace(action=action, user=User()),
+        {"thread_id": "thread-1", "run_id": "run-1"},
+    ) is True
+
+    read_denied = SimpleNamespace(
+        identity="oidc|user-1",
+        permissions=(
+            "analysis:write",
+            "tenant:tenant-1",
+            "workspace:workspace-1",
+        ),
+    )
+    with pytest.raises(Exception) as error:
+        await scope_run_access(
+            SimpleNamespace(action=action, user=read_denied),
+            {"thread_id": "thread-1", "run_id": "run-1"},
+        )
+    assert getattr(error.value, "status_code", None) == 403
+
+
+@pytest.mark.asyncio
+async def test_run_delete_requires_analysis_write_and_scope() -> None:
+    assert await scope_run_access(
+        SimpleNamespace(action="delete", user=User()),
+        {"thread_id": "thread-1", "run_id": "run-1"},
+    ) is True
+
+    for permissions in (
+        ("analysis:read", "tenant:tenant-1", "workspace:workspace-1"),
+        ("analysis:write", "tenant:tenant-1"),
+    ):
+        with pytest.raises(Exception) as error:
+            await scope_run_access(
+                SimpleNamespace(
+                    action="delete",
+                    user=SimpleNamespace(
+                        identity="oidc|user-1",
+                        permissions=permissions,
+                    ),
+                ),
+                {"thread_id": "thread-1", "run_id": "run-1"},
+            )
+        assert getattr(error.value, "status_code", None) == 403
 
 
 def test_isolated_settings_can_disable_dotenv_loading(
@@ -463,6 +521,40 @@ async def test_cron_create_scopes_stable_references_to_authenticated_actor() -> 
 
 
 @pytest.mark.asyncio
+async def test_cron_create_accepts_aegra_flat_callback_shape() -> None:
+    value = {
+        "assistant_id": "crypto_analysis",
+        "config": {},
+        "context": None,
+        "enabled": False,
+        "end_time": None,
+        **_monitor_ingress_payload(),
+        "interrupt_after": None,
+        "interrupt_before": None,
+        "multitask_strategy": "enqueue",
+        "on_run_completed": "delete",
+        "schedule": "*/15 * * * *",
+        "stream_mode": ["updates", "custom"],
+        "stream_subgraphs": False,
+        "timezone": "Asia/Shanghai",
+        "webhook": None,
+    }
+
+    await scope_cron_create(SimpleNamespace(user=User()), value)
+
+    assert value["metadata"] == {
+        **_monitor_ingress_payload()["metadata"],
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "user_id": "oidc|user-1",
+    }
+    assert value["config"] == {
+        "configurable": {"langgraph_auth_permissions": list(User.permissions)}
+    }
+    assert value["user_id"] == "oidc|user-1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("config", ({}, {"configurable": {}}, None))
 async def test_cron_create_accepts_empty_server_injected_config(
     config: object,
@@ -594,6 +686,26 @@ async def test_cron_create_rejects_alternate_data_channels(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("alternate_channel", ("context", "webhook"))
+async def test_cron_create_rejects_nonempty_flat_alternate_channels(
+    alternate_channel: str,
+) -> None:
+    value = {
+        "assistant_id": "crypto_analysis",
+        **_monitor_ingress_payload(),
+        "schedule": "*/15 * * * *",
+        "context": None,
+        "webhook": None,
+    }
+    value[alternate_channel] = {"secret": "must-not-cross"}
+
+    with pytest.raises(Exception) as error:
+        await scope_cron_create(SimpleNamespace(user=User()), value)
+
+    assert getattr(error.value, "status_code", None) == 403
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("handler", (scope_cron_read, scope_cron_search))
 async def test_cron_reads_require_read_permission_and_apply_actor_scope(
     handler: object,
@@ -639,6 +751,31 @@ async def test_cron_update_rescopes_reference_metadata() -> None:
     assert metadata["tenant_id"] == "tenant-1"
     assert metadata["workspace_id"] == "workspace-1"
     assert metadata["user_id"] == "oidc|user-1"
+
+
+@pytest.mark.asyncio
+async def test_cron_update_accepts_aegra_flat_callback_shape() -> None:
+    value = {
+        "cron_id": "cron-1",
+        **_monitor_ingress_payload(),
+        "schedule": "*/15 * * * *",
+        "context": None,
+        "webhook": None,
+    }
+
+    result = await scope_cron_update(SimpleNamespace(user=User()), value)
+
+    assert result == {
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "user_id": "oidc|user-1",
+    }
+    assert value["metadata"] == {
+        **_monitor_ingress_payload()["metadata"],
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "user_id": "oidc|user-1",
+    }
 
 
 @pytest.mark.asyncio

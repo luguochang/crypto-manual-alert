@@ -6,19 +6,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import math
-import os
 from pathlib import Path
 import socket
 import sys
-import tempfile
 from time import perf_counter
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
+from crypto_alert_v2.atomic_io import atomic_write_text
+
 
 SCHEMA_VERSION = "2026-07-18.local-http-load-preflight.v1"
-DEFAULT_PATH = "/app/api/v2/health"
+DEFAULT_PATH = "/api/product/api/v2/health"
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,23 +206,8 @@ def _write_report(path: Path, report: dict[str, object]) -> None:
     if not path.is_absolute():
         raise ValueError("load probe output path must be absolute")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(report, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+    atomic_write_text(path, payload, mode=0o600)
 
 
 def main() -> None:

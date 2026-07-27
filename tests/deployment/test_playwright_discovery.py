@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +13,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND = ROOT / "frontend"
-PLAYWRIGHT = FRONTEND / "node_modules" / ".bin" / "playwright"
+PLAYWRIGHT = FRONTEND / "node_modules" / ".bin" / (
+    "playwright.cmd" if os.name == "nt" else "playwright"
+)
 DISCOVERY_TASK_ID = "11111111-1111-4111-8111-111111111111"
 DISCOVERY_RUN_ID = "22222222-2222-4222-8222-222222222222"
 
@@ -126,6 +130,7 @@ PROFILE_CASES = (
         environment={
             "REAL_PRODUCT_E2E": "1",
             "REAL_DEEP_RESEARCH_E2E": "1",
+            "REAL_DEEP_RESEARCH_AEGRA_RESTART": "1",
             "PLAYWRIGHT_EVIDENCE_DIR": "/tmp/crypto-alert-v2-discovery-evidence",
         },
     ),
@@ -142,11 +147,24 @@ def _discovery_environment(
     profile: str, extra: dict[str, str] | None = None
 ) -> dict[str, str]:
     environment = {
-        "HOME": os.environ["HOME"],
+        "HOME": os.environ.get("HOME") or os.environ.get("USERPROFILE") or str(Path.home()),
         "PATH": os.environ["PATH"],
         "PLAYWRIGHT_EXTERNAL_SERVER": "1",
         "V2_E2E_PROFILE": profile,
     }
+    for name in (
+        "APPDATA",
+        "COMSPEC",
+        "LOCALAPPDATA",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "WINDIR",
+    ):
+        if value := os.environ.get(name):
+            environment[name] = value
     environment.update(extra or {})
     return environment
 
@@ -164,6 +182,8 @@ def _run_list(
         env=_discovery_environment(profile, environment),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -184,6 +204,23 @@ def _collected(
         {project for project, _ in pairs},
         pairs,
     )
+
+
+def test_discovery_subprocess_decodes_playwright_output_as_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_list(profile="fixture")
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
 
 
 @pytest.mark.parametrize("case", PROFILE_CASES, ids=lambda case: case.profile)
@@ -296,6 +333,7 @@ def test_each_playwright_profile_collects_only_its_owned_specs(
             {
                 "REAL_PRODUCT_E2E": "1",
                 "REAL_DEEP_RESEARCH_E2E": "1",
+                "REAL_DEEP_RESEARCH_AEGRA_RESTART": "1",
                 "PLAYWRIGHT_EVIDENCE_DIR": (
                     "/tmp/crypto-alert-v2-discovery-evidence"
                 ),
@@ -310,11 +348,26 @@ def test_real_npm_script_collects_its_target_spec_only(
     projects: set[str],
     environment: dict[str, str],
 ):
+    command = ["npm", "run", script, "--", "--list"]
+    if os.name == "nt":
+        git = shutil.which("git")
+        assert git is not None, "Git for Windows is required for POSIX npm scripts"
+        bash = Path(git).resolve().parents[1] / "bin" / "bash.exe"
+        assert bash.is_file(), "Git Bash is required for POSIX npm scripts"
+        command = [
+            str(bash),
+            "-lc",
+            f"npm run {shlex.quote(script)} -- --list",
+        ]
+        environment = {
+            **environment,
+            "npm_config_script_shell": str(bash),
+        }
     specs, collected_projects, pairs = _collected(
         _run_list(
             profile=profile,
             environment=environment,
-            command=["npm", "run", script, "--", "--list"],
+            command=command,
         )
     )
 

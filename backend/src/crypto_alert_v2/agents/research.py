@@ -348,8 +348,17 @@ class BuiltinResearchCollector(CitedResearchCollector):
 
 
 class TavilyResearchCollector(CitedResearchCollector):
-    def __init__(self, model: ChatOpenAI, *, api_key: str) -> None:
-        super().__init__(model, TavilySearchProvider(api_key=api_key))
+    def __init__(
+        self,
+        model: ChatOpenAI,
+        *,
+        api_key: str,
+        proxy: str | None = None,
+    ) -> None:
+        super().__init__(
+            model,
+            TavilySearchProvider(api_key=api_key, proxy=proxy),
+        )
 
 
 class DdgsMetasearchResearchCollector(CitedResearchCollector):
@@ -365,12 +374,15 @@ class CapabilityAwareResearchCollector:
         tavily_api_key: str | None,
         provider: SearchProvider,
         search_http_proxy: str | None = None,
+        tavily_fallback_ready: bool = False,
     ) -> None:
         self._model = model
         self._tavily_api_key = tavily_api_key
         self._provider = provider
         self._search_http_proxy = search_http_proxy
+        self._tavily_fallback_ready = tavily_fallback_ready
         self._selected: CitedResearchCollector | None = None
+        self._fallback: CitedResearchCollector | None = None
 
     def collect(
         self, query: str, config: RunnableConfig | None = None
@@ -391,5 +403,26 @@ class CapabilityAwareResearchCollector:
                 self._selected = TavilyResearchCollector(
                     self._model,
                     api_key=self._tavily_api_key,
+                    proxy=self._search_http_proxy,
                 )
-        return self._selected.collect(query, config=config)
+        try:
+            return self._selected.collect(query, config=config)
+        except ResearchUnavailable as exc:
+            if not self._can_fallback_to_tavily(exc):
+                raise
+            if self._fallback is None:
+                assert self._tavily_api_key is not None
+                self._fallback = TavilyResearchCollector(
+                    self._model,
+                    api_key=self._tavily_api_key,
+                    proxy=self._search_http_proxy,
+                )
+            return self._fallback.collect(query, config=config)
+
+    def _can_fallback_to_tavily(self, error: ResearchUnavailable) -> bool:
+        return (
+            self._provider is SearchProvider.BUILTIN
+            and bool(self._tavily_api_key)
+            and self._tavily_fallback_ready
+            and error.retryable
+        )

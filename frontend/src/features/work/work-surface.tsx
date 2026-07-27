@@ -33,8 +33,7 @@ import {
 import { TaskForkPanel } from "@/features/work/task-fork-panel";
 import {
   cancelTask,
-  createAnalysis,
-  createDeepResearch,
+  createDecisionRequest,
   getTask,
   ProductApiError,
   retryTask,
@@ -43,12 +42,15 @@ import {
 import {
   analysisSubmissionSchema,
   deepResearchSubmissionSchema,
+  decisionRequestSubmissionSchema,
   isAnalysisPendingInterrupt,
   isDeepResearchPendingInterrupt,
   respondAllInterruptsSchema,
   validateInterruptResponseForPayload,
   type AnalysisSubmission,
   type DeepResearchSubmission,
+  type DecisionEntryKind,
+  type DecisionRequestSubmission,
   type AgentStreamBinding,
   type InterruptResponse,
   type PendingInterruptPause,
@@ -73,6 +75,7 @@ const terminalTaskRevalidationDelaysMs = [5_000, 15_000, 30_000, 60_000] as cons
 const subscribeHydration = () => () => undefined;
 
 type WorkMode = "analysis" | "deep_research";
+type WorkEntryKind = DecisionEntryKind;
 
 type TerminalTaskRevalidationTimer = ReturnType<typeof setTimeout>;
 
@@ -263,6 +266,61 @@ export function resolveDeepResearchRequestIdentity(
   return previous?.fingerprint === fingerprint
     ? previous
     : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function resolveDecisionRequestIdentity(
+  input: DecisionRequestSubmission,
+  previous: AnalysisRequestIdentity | null,
+  createIdempotencyKey: () => string = () => crypto.randomUUID(),
+): AnalysisRequestIdentity {
+  const fingerprint = stableFingerprint(decisionRequestSubmissionSchema.parse(input));
+  return previous?.fingerprint === fingerprint
+    ? previous
+    : { fingerprint, idempotencyKey: createIdempotencyKey() };
+}
+
+export function buildWorkDecisionSubmission(input: {
+  entryKind: Exclude<WorkEntryKind, "scheduled">;
+  mode: WorkMode;
+  sessionId: string;
+  symbol: ProductSymbol;
+  horizon: string;
+  query: string;
+  sourceReferenceId?: string | null;
+}): DecisionRequestSubmission {
+  const live = input.entryKind === "manual";
+  const semantics = {
+    manual: {
+      intent: input.mode === "deep_research" ? "deep_research" : "market_analysis",
+      complexity: input.mode === "deep_research" ? "deep_research" : "standard",
+    },
+    postmortem: { intent: "postmortem", complexity: "eval_replay" },
+    eval: { intent: "evaluation", complexity: "eval_replay" },
+    replay: { intent: "replay", complexity: "eval_replay" },
+    system: { intent: "system_query", complexity: "eval_replay" },
+  } as const;
+  const route = semantics[input.entryKind];
+  return decisionRequestSubmissionSchema.parse({
+    entry_kind: input.entryKind,
+    session_id: input.sessionId,
+    intent: route.intent,
+    intent_confidence: 1,
+    complexity: route.complexity,
+    symbol: live ? input.symbol : null,
+    horizon: live ? input.horizon : null,
+    query_text: input.query,
+    requested_action: null,
+    position: null,
+    risk: { mode: "balanced" },
+    side_effects: {
+      live_market_data: live,
+      live_web_research: live,
+      product_writes: live,
+      external_notifications: false,
+      trade_execution: false,
+    },
+    source_reference_id: input.sourceReferenceId?.trim() || null,
+  });
 }
 
 export function preservesAnalysisRequestIdentity(error: unknown): boolean {
@@ -470,10 +528,11 @@ export function WorkSurface() {
     () => false,
   );
   const [symbol, setSymbol] = useState<ProductSymbol>("BTC-USDT-SWAP");
+  const [entryKind, setEntryKind] = useState<WorkEntryKind>("manual");
   const [mode, setMode] = useState<WorkMode>("analysis");
   const [horizon, setHorizon] = useState("4h");
   const [query, setQuery] = useState("");
-  const [notify, setNotify] = useState(false);
+  const [sourceReferenceId, setSourceReferenceId] = useState("");
   const [notificationRequestTaskId, setNotificationRequestTaskId] = useState<string | null>(null);
   const [task, setTask] = useState<ProductTask | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -493,6 +552,7 @@ export function WorkSurface() {
   const cancelLock = useRef(false);
   const cancelRequest = useRef<{ taskId: string; idempotencyKey: string } | null>(null);
   const analysisRequest = useRef<AnalysisRequestIdentity | null>(null);
+  const decisionSessionId = useRef<string | null>(null);
   const pollingLock = useRef(false);
   const reviewSubmissionLock = useRef(false);
   const taskRef = useRef<ProductTask | null>(null);
@@ -992,52 +1052,51 @@ export function WorkSurface() {
     setForkNoticeTaskId(null);
 
     try {
-      const notificationRequested = mode === "analysis" && notify;
-      let createdTask: ProductTask;
-      if (mode === "deep_research") {
-        const submission = deepResearchSubmissionSchema.parse({
-          symbol,
-          horizon,
-          query_text: query,
-        });
-        const request = resolveDeepResearchRequestIdentity(
-          submission,
-          analysisRequest.current,
-        );
-        analysisRequest.current = request;
-        createdTask = await createDeepResearch(
-          submission,
-          undefined,
-          request.idempotencyKey,
-        );
-      } else {
-        const submission = analysisSubmissionSchema.parse({
-          symbol,
-          horizon,
-          query_text: query,
-          notify: notificationRequested,
-        });
-        const request = resolveAnalysisRequestIdentity(
-          submission,
-          analysisRequest.current,
-        );
-        analysisRequest.current = request;
-        createdTask = await createAnalysis(
-            submission,
-            undefined,
-            request.idempotencyKey,
-        );
+      if (entryKind === "scheduled") {
+        window.location.assign("/monitors");
+        setSubmitting(false);
+        submitLock.current = false;
+        return;
       }
+      decisionSessionId.current ??= crypto.randomUUID();
+      const submission = buildWorkDecisionSubmission({
+        entryKind,
+        mode,
+        sessionId: decisionSessionId.current,
+        symbol,
+        horizon,
+        query,
+        sourceReferenceId,
+      });
+      const request = resolveDecisionRequestIdentity(
+        submission,
+        analysisRequest.current,
+      );
+      analysisRequest.current = request;
+      const admission = await createDecisionRequest(
+        submission,
+        undefined,
+        request.idempotencyKey,
+      );
       if (pollVersion.current !== version) {
         submitLock.current = false;
         return;
       }
 
       analysisRequest.current = null;
+      const createdTask = admission.task;
+      if (createdTask === null) {
+        setSubmitting(false);
+        submitLock.current = false;
+        setRequestError(
+          admission.route.status === "blocked_clarify"
+            ? `需要补充：${admission.route.missing_slots.join("、") || admission.route.reason}`
+            : "该请求已安全记录，当前尚未配置对应执行器。",
+        );
+        return;
+      }
       applyTaskProjection(createdTask);
-      setNotificationRequestTaskId(
-        notificationRequested ? createdTask.task_id : null,
-      );
+      setNotificationRequestTaskId(null);
       persistTaskId(createdTask.task_id);
       setSubmitting(false);
       submitLock.current = false;
@@ -1051,7 +1110,16 @@ export function WorkSurface() {
       setSubmitting(false);
       setRequestError(readableRequestError(error));
     }
-  }, [applyTaskProjection, horizon, mode, notify, query, startPolling, symbol]);
+  }, [
+    applyTaskProjection,
+    entryKind,
+    horizon,
+    mode,
+    query,
+    sourceReferenceId,
+    startPolling,
+    symbol,
+  ]);
 
   const retryCurrentTask = useCallback(async () => {
     const currentTask = taskRef.current;
@@ -1461,6 +1529,23 @@ export function WorkSurface() {
         </div>
 
         <form className="analysis-form" onSubmit={submitAnalysis}>
+          <label className="field-control">
+            <span>请求入口</span>
+            <select
+              value={entryKind}
+              onChange={(event) => setEntryKind(event.target.value as WorkEntryKind)}
+              disabled={controlsDisabled}
+            >
+              <option value="manual">手动决策</option>
+              <option value="scheduled">定时监控</option>
+              <option value="postmortem">结果复盘</option>
+              <option value="eval">质量评估</option>
+              <option value="replay">冻结回放</option>
+              <option value="system">系统查询</option>
+            </select>
+          </label>
+
+          {entryKind === "manual" ? <>
           <fieldset className="mode-fieldset" disabled={controlsDisabled}>
             <legend>任务模式</legend>
             <div className="segmented-control mode-segmented-control">
@@ -1521,6 +1606,19 @@ export function WorkSurface() {
               <option value="30d">30 天</option>
             </select>
           </label>
+          </> : null}
+
+          {entryKind !== "manual" && entryKind !== "scheduled" ? (
+            <label className="field-control">
+              <span>来源任务或版本</span>
+              <input
+                value={sourceReferenceId}
+                onChange={(event) => setSourceReferenceId(event.target.value)}
+                maxLength={255}
+                disabled={controlsDisabled}
+              />
+            </label>
+          ) : null}
 
           <label className="field-control query-control">
             <span>{mode === "deep_research" ? "研究问题" : "分析问题"}</span>
@@ -1538,21 +1636,6 @@ export function WorkSurface() {
             />
           </label>
 
-          {mode === "analysis" ? <label className="notification-toggle">
-            <input
-              type="checkbox"
-              aria-label="完成后通知 Bark"
-              checked={notify}
-              onChange={(event) => setNotify(event.target.checked)}
-              disabled={controlsDisabled}
-            />
-            <span className="notification-toggle-track" aria-hidden="true"><span /></span>
-            <span>
-              <strong>完成后通知</strong>
-              <small>Bark</small>
-            </span>
-          </label> : null}
-
           <div className="form-actions">
             <p>{mode === "deep_research"
               ? "研究报告保留可验证来源与证据缺口。"
@@ -1569,7 +1652,11 @@ export function WorkSurface() {
                   ? "正在停止"
                   : active
                     ? mode === "deep_research" ? "研究处理中" : "分析处理中"
-                    : mode === "deep_research" ? "开始深度研究" : "开始分析"}
+                    : entryKind === "scheduled"
+                      ? "前往监控"
+                      : entryKind === "manual"
+                        ? mode === "deep_research" ? "开始深度研究" : "开始分析"
+                        : "提交请求"}
             </button>
           </div>
         </form>

@@ -319,23 +319,44 @@ def establish_search_readiness(
     elif requested_provider is SearchProvider.TAVILY:
         if not tavily_configured:
             raise SearchReadinessError("Tavily is not configured")
-        connectivity_probe = tavily_probe or probe_tavily_connectivity
         try:
-            tavily_connected = bool(connectivity_probe(tavily_api_key or ""))
+            if tavily_probe is None:
+                tavily_connected = probe_tavily_connectivity(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(tavily_probe(tavily_api_key or ""))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
     elif requested_provider is None and not builtin_ready and tavily_configured:
-        connectivity_probe = tavily_probe or probe_tavily_connectivity
         try:
-            tavily_connected = bool(connectivity_probe(tavily_api_key or ""))
+            if tavily_probe is None:
+                tavily_connected = probe_tavily_connectivity(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(tavily_probe(tavily_api_key or ""))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
+    elif builtin_ready and tavily_configured:
+        try:
+            if tavily_probe is None:
+                tavily_connected = probe_tavily_connectivity(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(tavily_probe(tavily_api_key or ""))
+        except Exception:
+            tavily_connected = False
 
     selected_provider = (
         SearchProvider.DDGS_METASEARCH
@@ -423,23 +444,44 @@ async def establish_search_readiness_async(
     elif requested_provider is SearchProvider.TAVILY:
         if not tavily_configured:
             raise SearchReadinessError("Tavily is not configured")
-        connectivity_probe = tavily_probe or probe_tavily_connectivity_async
         try:
-            tavily_connected = bool(await connectivity_probe(tavily_api_key or ""))
+            if tavily_probe is None:
+                tavily_connected = await probe_tavily_connectivity_async(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(await tavily_probe(tavily_api_key or ""))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
     elif requested_provider is None and not builtin_ready and tavily_configured:
-        connectivity_probe = tavily_probe or probe_tavily_connectivity_async
         try:
-            tavily_connected = bool(await connectivity_probe(tavily_api_key or ""))
+            if tavily_probe is None:
+                tavily_connected = await probe_tavily_connectivity_async(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(await tavily_probe(tavily_api_key or ""))
         except Exception as exc:
             error_type = getattr(exc, "error_type", None) or type(exc).__name__
             raise SearchReadinessError(
                 f"Tavily connectivity failed: {error_type}"
             ) from exc
+    elif builtin_ready and tavily_configured:
+        try:
+            if tavily_probe is None:
+                tavily_connected = await probe_tavily_connectivity_async(
+                    tavily_api_key or "",
+                    proxy=search_http_proxy,
+                )
+            else:
+                tavily_connected = bool(await tavily_probe(tavily_api_key or ""))
+        except Exception:
+            tavily_connected = False
 
     selected_provider = (
         SearchProvider.DDGS_METASEARCH
@@ -465,15 +507,23 @@ async def establish_search_readiness_async(
     )
 
 
-def probe_tavily_connectivity(api_key: str) -> bool:
-    evidence = TavilySearchProvider(api_key=api_key).search(
+def probe_tavily_connectivity(
+    api_key: str,
+    *,
+    proxy: str | None = None,
+) -> bool:
+    evidence = TavilySearchProvider(api_key=api_key, proxy=proxy).search(
         "Find one current public Bitcoin market news source."
     )
     return bool(evidence)
 
 
-async def probe_tavily_connectivity_async(api_key: str) -> bool:
-    evidence = await TavilySearchProvider(api_key=api_key).asearch(
+async def probe_tavily_connectivity_async(
+    api_key: str,
+    *,
+    proxy: str | None = None,
+) -> bool:
+    evidence = await TavilySearchProvider(api_key=api_key, proxy=proxy).asearch(
         "Find one current public Bitcoin market news source."
     )
     return bool(evidence)

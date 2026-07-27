@@ -1,0 +1,314 @@
+name: crypto-manual-alert-v2-production
+
+x-backend-runtime: &backend-runtime
+  image: ${BACKEND_IMAGE:?set BACKEND_IMAGE to an immutable registry digest}
+  pull_policy: always
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+x-product-environment: &product-environment
+  APP_ENVIRONMENT: production
+  PRODUCT_DATABASE_URL: ${PRODUCT_DATABASE_URL:?set PRODUCT_DATABASE_URL}
+  AGENT_SERVER_URL: http://aegra-gateway:8080
+  AGENT_ASSISTANT_ID: crypto_analysis
+  INTERNAL_JWT_KID: ${INTERNAL_JWT_KEY_ID:?set INTERNAL_JWT_KEY_ID}
+  INTERNAL_JWT_ISSUER: ${INTERNAL_JWT_ISSUER:?set INTERNAL_JWT_ISSUER}
+  AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+  INTERNAL_JWT_MAX_TTL_SECONDS: "60"
+  INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
+  PRODUCT_INBOX_CURSOR_KEY_FILE: /run/product-inbox-cursor-key/key
+  INTEGRATION_SECRET_STORE: file
+  INTEGRATION_SECRET_FILE_DIR: /run/integration-secrets
+  NOTIFICATION_CREDENTIAL_KEY_VERSION: ${NOTIFICATION_CREDENTIAL_KEY_VERSION:?set NOTIFICATION_CREDENTIAL_KEY_VERSION}
+
+services:
+  product-postgres:
+    image: ${PRODUCT_POSTGRES_IMAGE:?set PRODUCT_POSTGRES_IMAGE to an immutable digest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PRODUCT_POSTGRES_DB:?set PRODUCT_POSTGRES_DB}
+      POSTGRES_USER: ${PRODUCT_POSTGRES_USER:?set PRODUCT_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${PRODUCT_POSTGRES_PASSWORD:?set PRODUCT_POSTGRES_PASSWORD}
+    volumes:
+      - product-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  agent-postgres:
+    image: ${AGENT_POSTGRES_IMAGE:?set AGENT_POSTGRES_IMAGE to an immutable digest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AGENT_POSTGRES_DB:?set AGENT_POSTGRES_DB}
+      POSTGRES_USER: ${AGENT_POSTGRES_USER:?set AGENT_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:?set AGENT_POSTGRES_PASSWORD}
+    command: [postgres, -c, shared_preload_libraries=vector]
+    volumes:
+      - agent-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langgraph-redis:
+    image: ${REDIS_IMAGE:?set REDIS_IMAGE to an immutable digest}
+    pull_policy: always
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /data:size=256m,mode=0700
+    command: [redis-server, --save, "", --appendonly, "no"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+
+  migrate:
+    <<: *backend-runtime
+    restart: "no"
+    environment:
+      PRODUCT_DATABASE_URL: ${PRODUCT_DATABASE_URL:?set PRODUCT_DATABASE_URL}
+    command: [alembic, -c, alembic.ini, upgrade, head]
+    depends_on:
+      product-postgres:
+        condition: service_healthy
+
+  integration-secret-files:
+    <<: *backend-runtime
+    restart: "no"
+    environment:
+      NOTIFICATION_CREDENTIAL_KEY: ${NOTIFICATION_CREDENTIAL_KEY:?set NOTIFICATION_CREDENTIAL_KEY}
+      NOTIFICATION_CREDENTIAL_DECRYPT_KEYS: ${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}
+    command: [python, -m, crypto_alert_v2.integrations.bootstrap_secrets, /run/integration-secrets]
+    volumes:
+      - integration-secret-files:/run/integration-secrets
+
+  langgraph-api:
+    <<: *backend-runtime
+    deploy:
+      replicas: ${AEGRA_API_REPLICAS:-2}
+    environment:
+      <<: *product-environment
+      ENV_MODE: PRODUCTION
+      AEGRA_CONFIG: aegra.json
+      DATABASE_URL: ${AGENT_DATABASE_URL:?set AGENT_DATABASE_URL}
+      REDIS_BROKER_ENABLED: "true"
+      REDIS_URL: redis://langgraph-redis:6379/0
+      WORKER_COUNT: ${AEGRA_WORKER_COUNT:-1}
+      N_JOBS_PER_WORKER: ${AEGRA_JOBS_PER_WORKER:-2}
+      LEASE_DURATION_SECONDS: "30"
+      HEARTBEAT_INTERVAL_SECONDS: "10"
+      REAPER_INTERVAL_SECONDS: "15"
+      STUCK_PENDING_THRESHOLD_SECONDS: "120"
+      RUN_MIGRATIONS_ON_STARTUP: "false"
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      MODEL_NAME: ${MODEL_NAME:?set MODEL_NAME}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:?set SEARCH_PROVIDER}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
+      SEARCH_HTTP_PROXY: ${SEARCH_HTTP_PROXY:-}
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-crypto-alert-v2}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    command: [aegra, serve, --config, aegra.json, --host, 0.0.0.0, --port, "8000"]
+    volumes:
+      - type: bind
+        source: ${INTERNAL_JWT_PUBLIC_KEY_PATH:?set INTERNAL_JWT_PUBLIC_KEY_PATH}
+        target: /run/internal-jwt-public/public.pem
+        read_only: true
+      - type: bind
+        source: ${PRODUCT_INBOX_CURSOR_KEY_PATH:?set PRODUCT_INBOX_CURSOR_KEY_PATH}
+        target: /run/product-inbox-cursor-key/key
+        read_only: true
+      - integration-secret-files:/run/integration-secrets:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 15s
+    depends_on:
+      agent-postgres:
+        condition: service_healthy
+      langgraph-redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      integration-secret-files:
+        condition: service_completed_successfully
+
+  aegra-gateway:
+    image: ${INGRESS_IMAGE:?set INGRESS_IMAGE to an immutable HAProxy digest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./production-aegra-haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -T 2 -O /dev/null http://127.0.0.1:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      langgraph-api:
+        condition: service_healthy
+
+  langgraph-api-readiness:
+    <<: *backend-runtime
+    environment:
+      APP_ENVIRONMENT: production
+      AGENT_SERVER_URL: http://aegra-gateway:8080
+      AGENT_ASSISTANT_ID: crypto_analysis
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:?set SEARCH_PROVIDER}
+      AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER: ${SEARCH_PROVIDER:?set SEARCH_PROVIDER}
+      AGENT_READINESS_HOST: 0.0.0.0
+      AGENT_READINESS_PORT: "9091"
+      INTERNAL_JWT_KID: ${INTERNAL_JWT_KEY_ID:?set INTERNAL_JWT_KEY_ID}
+      INTERNAL_JWT_ISSUER: ${INTERNAL_JWT_ISSUER:?set INTERNAL_JWT_ISSUER}
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      AGENT_HEALTHCHECK_SUBJECT: production-readiness-probe
+      AGENT_HEALTHCHECK_TENANT_ID: production-readiness
+      AGENT_HEALTHCHECK_WORKSPACE_ID: production-readiness
+      AGENT_HEALTHCHECK_ROLES: '["operator"]'
+      AGENT_HEALTHCHECK_PERMISSIONS: '["analysis:read"]'
+    command: [python, -m, crypto_alert_v2.auth.agent_healthcheck]
+    volumes:
+      - type: bind
+        source: ${INTERNAL_JWT_PRIVATE_KEY_PATH:?set INTERNAL_JWT_PRIVATE_KEY_PATH}
+        target: /run/internal-jwt-private/private.pem
+        read_only: true
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/readyz', timeout=3).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      aegra-gateway:
+        condition: service_healthy
+
+  command-worker:
+    <<: *backend-runtime
+    environment:
+      <<: *product-environment
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
+      SEARCH_HTTP_PROXY: ${SEARCH_HTTP_PROXY:-}
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: "9090"
+    command: [python, -m, crypto_alert_v2.workers, --worker-id, production-worker]
+    volumes:
+      - type: bind
+        source: ${INTERNAL_JWT_PRIVATE_KEY_PATH:?set INTERNAL_JWT_PRIVATE_KEY_PATH}
+        target: /run/internal-jwt-private/private.pem
+        read_only: true
+      - type: bind
+        source: ${INTERNAL_JWT_PUBLIC_KEY_PATH:?set INTERNAL_JWT_PUBLIC_KEY_PATH}
+        target: /run/internal-jwt-public/public.pem
+        read_only: true
+      - type: bind
+        source: ${PRODUCT_INBOX_CURSOR_KEY_PATH:?set PRODUCT_INBOX_CURSOR_KEY_PATH}
+        target: /run/product-inbox-cursor-key/key
+        read_only: true
+      - integration-secret-files:/run/integration-secrets:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/readyz', timeout=3).read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      integration-secret-files:
+        condition: service_completed_successfully
+      langgraph-api-readiness:
+        condition: service_healthy
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?set FRONTEND_IMAGE to an immutable registry digest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      APP_ENVIRONMENT: production
+      PRODUCT_API_BASE_URL: http://aegra-gateway:8080/app
+      PRODUCT_API_TIMEOUT_MS: "8000"
+      AGENT_SERVER_URL: http://aegra-gateway:8080
+      AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
+      INTERNAL_JWT_KID: ${INTERNAL_JWT_KEY_ID:?set INTERNAL_JWT_KEY_ID}
+      INTERNAL_JWT_ISSUER: ${INTERNAL_JWT_ISSUER:?set INTERNAL_JWT_ISSUER}
+      INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?set NEXTAUTH_URL to public HTTPS origin}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
+    volumes:
+      - type: bind
+        source: ${INTERNAL_JWT_PRIVATE_KEY_PATH:?set INTERNAL_JWT_PRIVATE_KEY_PATH}
+        target: /run/internal-jwt-private/private.pem
+        read_only: true
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/work').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      langgraph-api-readiness:
+        condition: service_healthy
+      command-worker:
+        condition: service_healthy
+
+  ingress:
+    image: ${INGRESS_IMAGE:?set INGRESS_IMAGE to an immutable HAProxy digest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${PRODUCTION_INGRESS_PORT:?set PRODUCTION_INGRESS_PORT}:8080"
+    volumes:
+      - ./production-frontend-haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -T 2 -O /dev/null http://127.0.0.1:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+volumes:
+  product-postgres-data:
+  agent-postgres-data:
+  integration-secret-files:

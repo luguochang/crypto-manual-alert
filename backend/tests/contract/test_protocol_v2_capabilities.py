@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 from importlib.metadata import distribution, version
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -47,14 +48,22 @@ IMPLEMENTED_SERVER_COMMANDS = {
 }
 
 
-def test_deployed_graph_modules_register_official_checkpoint_transformer() -> None:
+def test_product_graph_registers_official_checkpoint_transformer() -> None:
     from crypto_alert_v2.graph import create_graph
-    from crypto_alert_v2.testing.multi_interrupt_fixture import (
-        create_graph as create_fixture_graph,
-    )
 
     assert create_graph().stream_transformers == (CheckpointsTransformer,)
-    assert create_fixture_graph().stream_transformers == (CheckpointsTransformer,)
+
+
+def test_aegra_qa_fixtures_defer_checkpoint_projection_to_aegra() -> None:
+    from crypto_alert_v2.testing.multi_interrupt_fixture import (
+        create_graph as create_fixture_graph,
+        create_single_graph,
+    )
+    from crypto_alert_v2.testing.aegra_durability_fixture import create_graph as create_durability_fixture_graph
+
+    assert create_fixture_graph().stream_transformers == ()
+    assert create_single_graph().stream_transformers == ()
+    assert create_durability_fixture_graph().stream_transformers == ()
 
 
 def _capability_gap(capability: str, detail: str) -> str:
@@ -172,6 +181,10 @@ asyncio.run(main())
     environment = {
         "POSTGRES_URI": "postgresql://contract:contract@127.0.0.1:1/contract",
         "REDIS_URI": "redis://127.0.0.1:1/0",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "SYSTEMROOT": os.environ["SYSTEMROOT"],
+        "WINDIR": os.environ["WINDIR"],
     }
     completed = subprocess.run(
         [sys.executable, "-c", script],

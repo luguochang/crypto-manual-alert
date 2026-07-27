@@ -4,6 +4,7 @@ import { ProductApiError } from "../../src/lib/api/product-client";
 import { artifactReviewPayloadSchema } from "../../src/lib/schemas/product-api";
 import {
   buildRespondAllSubmission,
+  buildWorkDecisionSubmission,
   classifyReviewSubmissionFailure,
   createEmptyReviewBatchState,
   hasUnsubmittedReviewDrafts,
@@ -12,6 +13,7 @@ import {
   recordReviewDecision,
   preservesAnalysisRequestIdentity,
   resolveAnalysisRequestIdentity,
+  resolveDecisionRequestIdentity,
   resolveTaskSelection,
   resolveReviewBatchRequestIdentity,
   reviewPauseFingerprint,
@@ -32,6 +34,70 @@ import type {
 describe("work surface aggregate review coordinator", () => {
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("builds manual and evaluation entries with explicit side-effect boundaries", () => {
+    const manual = buildWorkDecisionSubmission({
+      entryKind: "manual",
+      mode: "deep_research",
+      sessionId: "session-1",
+      symbol: "BTC-USDT-SWAP",
+      horizon: "7d",
+      query: "Research BTC demand.",
+    });
+    const evaluation = buildWorkDecisionSubmission({
+      entryKind: "eval",
+      mode: "analysis",
+      sessionId: "session-1",
+      symbol: "BTC-USDT-SWAP",
+      horizon: "4h",
+      query: "Evaluate the selected result.",
+      sourceReferenceId: "run-1",
+    });
+
+    expect(manual).toMatchObject({
+      intent: "deep_research",
+      complexity: "deep_research",
+      side_effects: {
+        live_market_data: true,
+        live_web_research: true,
+        product_writes: true,
+        external_notifications: false,
+        trade_execution: false,
+      },
+    });
+    expect(evaluation).toMatchObject({
+      intent: "evaluation",
+      complexity: "eval_replay",
+      symbol: null,
+      horizon: null,
+      source_reference_id: "run-1",
+      side_effects: {
+        live_market_data: false,
+        live_web_research: false,
+        product_writes: false,
+      },
+    });
+  });
+
+  it("reuses a decision-request idempotency key only for the same envelope", () => {
+    const first = buildWorkDecisionSubmission({
+      entryKind: "manual",
+      mode: "analysis",
+      sessionId: "session-1",
+      symbol: "BTC-USDT-SWAP",
+      horizon: "4h",
+      query: "Assess BTC risk.",
+    });
+    const identity = resolveDecisionRequestIdentity(first, null, () => "request-1");
+
+    expect(resolveDecisionRequestIdentity(first, identity, () => "request-2"))
+      .toEqual(identity);
+    expect(resolveDecisionRequestIdentity(
+      { ...first, query_text: "Assess ETH risk." },
+      identity,
+      () => "request-2",
+    ).idempotencyKey).toBe("request-2");
   });
 
   it.each([

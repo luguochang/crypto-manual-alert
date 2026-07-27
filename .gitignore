@@ -56,6 +56,7 @@ frontend/yarn-error.log*
 
 # Generated test reports and local proof artifacts
 /artifacts/
+/backend/artifacts/
 /frontend/artifacts/
 test-results/
 playwright-report/

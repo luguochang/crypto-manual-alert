@@ -61,6 +61,22 @@ function positiveIntegerEnvironment(name, fallback) {
   return Number(raw);
 }
 
+function seedModeEnvironment(name, fallback) {
+  const value = process.env[name]?.trim() || fallback;
+  if (!["canonical", "none"].includes(value)) {
+    throw new ProbeError(`${name} must be canonical or none`, EX_USAGE);
+  }
+  return value;
+}
+
+function booleanEnvironment(name, fallback) {
+  const value = process.env[name]?.trim();
+  if (!value) return fallback;
+  if (value === "1") return true;
+  if (value === "0") return false;
+  throw new ProbeError(`${name} must be 0 or 1`, EX_USAGE);
+}
+
 function validatedAgentUrl(raw) {
   let url;
   try {
@@ -335,6 +351,7 @@ async function createPausedCanonicalThread({
   openStreams,
   seedMode,
   expectedInterrupts,
+  allowStateCheckpointFallback,
   capabilityGaps,
 }) {
   const requestedThreadId = randomUUID();
@@ -431,9 +448,11 @@ async function createPausedCanonicalThread({
     });
     checkpoint = stateCheckpointId(state);
     checkpointSource = "official-state-fallback";
-    capabilityGaps.add(
-      "root checkpoints channel emitted no lightweight Protocol checkpoint envelope",
-    );
+    if (!allowStateCheckpointFallback) {
+      capabilityGaps.add(
+        "root checkpoints channel emitted no lightweight Protocol checkpoint envelope",
+      );
+    }
   }
   return {
     threadId,
@@ -490,6 +509,7 @@ async function verifyReplayAndSingleResponse(context) {
     apiUrl,
     authorizationHeader,
     seedMode,
+    allowStateCheckpointFallback,
     capabilityGaps,
   } = context;
   const paused = await createPausedCanonicalThread({
@@ -502,6 +522,7 @@ async function verifyReplayAndSingleResponse(context) {
     openStreams,
     seedMode,
     expectedInterrupts: 1,
+    allowStateCheckpointFallback,
     capabilityGaps,
   });
   const sequences = paused.events.map((event) => event.seq);
@@ -614,6 +635,7 @@ async function verifyBatchResponse(context) {
     createdThreads,
     openStreams,
     seedMode,
+    allowStateCheckpointFallback,
     capabilityGaps,
   } = context;
   const paused = await createPausedCanonicalThread({
@@ -626,8 +648,18 @@ async function verifyBatchResponse(context) {
     openStreams,
     seedMode,
     expectedInterrupts: expectedBatchInterrupts,
+    allowStateCheckpointFallback,
     capabilityGaps,
   });
+  const namespaceDepths = paused.pending
+    .map((pending) => pending.namespace.length)
+    .sort((left, right) => left - right);
+  const nestedInterruptCount = namespaceDepths.filter((depth) => depth > 0).length;
+  if (!namespaceDepths.includes(0) || nestedInterruptCount === 0) {
+    throw new ProbeError(
+      "batch response did not include both root and nested interrupt namespaces",
+    );
+  }
   await withDeadline(
     paused.stream.input.respond({
       responses: paused.pending.map((pending) => ({
@@ -653,6 +685,8 @@ async function verifyBatchResponse(context) {
     responseCount: paused.pending.length,
     completionEventCount: completed.events.length,
     checkpointSource: paused.checkpointSource,
+    namespaceDepths,
+    nestedInterruptCount,
   };
 }
 
@@ -747,6 +781,15 @@ async function main() {
   const expectedSdkVersion = process.env.TASK8_EXPECTED_SDK_VERSION?.trim() || "1.9.25";
   const expectedProtocolVersion =
     process.env.TASK8_EXPECTED_PROTOCOL_VERSION?.trim() || "0.0.18";
+  const singleSeedMode = seedModeEnvironment(
+    "TASK8_SINGLE_SEED_MODE",
+    "canonical",
+  );
+  const batchSeedMode = seedModeEnvironment("TASK8_BATCH_SEED_MODE", "none");
+  const allowStateCheckpointFallback = booleanEnvironment(
+    "TASK8_ALLOW_STATE_CHECKPOINT_FALLBACK",
+    false,
+  );
   const { Client, ProtocolSseTransportAdapter } = await loadSdk(
     expectedSdkVersion,
     expectedProtocolVersion,
@@ -783,7 +826,8 @@ async function main() {
       ProtocolSseTransportAdapter,
       apiUrl,
       authorizationHeader,
-      seedMode: "canonical",
+      seedMode: singleSeedMode,
+      allowStateCheckpointFallback,
       capabilityGaps,
     });
     const batch = await verifyBatchResponse({
@@ -793,7 +837,8 @@ async function main() {
       expectedBatchInterrupts,
       createdThreads,
       openStreams,
-      seedMode: "none",
+      seedMode: batchSeedMode,
+      allowStateCheckpointFallback,
       capabilityGaps,
     });
 
@@ -806,6 +851,8 @@ async function main() {
       `single_completion_events=${replay.completionEventCount}`,
       `single_checkpoint=${replay.checkpointSource}`,
       `batch_responses=${batch.responseCount}`,
+      `batch_namespace_depths=${batch.namespaceDepths.join(",")}`,
+      `batch_nested_interrupts=${batch.nestedInterruptCount}`,
       `batch_completion_events=${batch.completionEventCount}`,
       `batch_checkpoint=${batch.checkpointSource}`,
       "state_fork=unknown_command_compatibility_exception",

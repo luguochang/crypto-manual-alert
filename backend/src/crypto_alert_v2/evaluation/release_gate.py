@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -44,11 +45,19 @@ def evaluate_release_gate(
     result: OfflineExperimentResult,
     *,
     thresholds: Mapping[str, float] = DEFAULT_THRESHOLDS,
+    expected_case_names: Collection[str] | None = None,
 ) -> ReleaseGateReport:
     reasons: list[str] = []
     actual_cases = {case.case_name for case in result.case_results}
-    missing_cases = set(MINIMUM_RELEASE_CASE_NAMES) - actual_cases
-    extra_cases = actual_cases - set(MINIMUM_RELEASE_CASE_NAMES)
+    expected_cases = set(
+        MINIMUM_RELEASE_CASE_NAMES
+        if expected_case_names is None
+        else expected_case_names
+    )
+    if not expected_cases:
+        reasons.append("missing_expected_cases")
+    missing_cases = expected_cases - actual_cases
+    extra_cases = actual_cases - expected_cases
     if missing_cases:
         reasons.append("missing_cases:" + ",".join(sorted(missing_cases)))
     if extra_cases:

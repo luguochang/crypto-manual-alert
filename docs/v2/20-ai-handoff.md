@@ -59,7 +59,7 @@
 
     backend/.env
 
-`backend/.env` 被 `.gitignore` 忽略，禁止读取后打印，禁止提交，禁止写入交接文档。模型、Tavily、LangSmith、Langfuse、LangGraph license 和通知加密密钥必须由人工从密码管理器或服务控制台迁移；代理只负责检查变量是否存在、是否满足 readiness，不得在日志中输出值。
+`backend/.env` 被 `.gitignore` 忽略，禁止读取后打印，禁止提交，禁止写入交接文档。模型、Tavily、可选 LangSmith/Langfuse 和通知加密密钥必须由人工从密码管理器或服务控制台迁移；代理只负责检查变量是否存在、是否满足 readiness，不得在日志中输出值。Aegra 不需要商业 Agent Server license。
 
 需要人工配置的主要变量：
 
@@ -68,7 +68,6 @@
     MODEL_NAME
     SEARCH_PROVIDER
     TAVILY_API_KEY
-    LANGGRAPH_CLOUD_LICENSE_KEY
     LANGSMITH_API_KEY
     LANGSMITH_TRACING
     LANGSMITH_PROJECT
@@ -95,7 +94,7 @@ Compose 会自动生成并保存在 Docker volume 中的运行时密钥包括：
 2. 将仓库放在 WSL Linux 文件系统，例如 `~/src/crypto-manual-alert-v2`，不要长期放在 `/mnt/c`。
 3. 复制 `backend/.env.example` 为 `backend/.env`，由人工填入真实值。
 4. 根据模型能力选择 `SEARCH_PROVIDER`。使用 Tavily 时才填写 `TAVILY_API_KEY`；不能把模型服务密钥当作 Tavily 密钥。
-5. 如果启动 durable Docker Agent Server，准备 `LANGGRAPH_CLOUD_LICENSE_KEY` 或具备对应部署权限的 `LANGSMITH_API_KEY`。
+5. Durable Docker Agent Server 使用 ADR 0011 锁定的 Aegra `0.9.24`，不需要商业 license；只在启用 LangSmith 观测时配置 `LANGSMITH_API_KEY`。
 6. 为当前环境生成独立的 `NOTIFICATION_CREDENTIAL_KEY`；如果恢复旧通知数据，必须保留旧解密密钥并执行轮换流程。
 7. 先运行健康检查和静态测试，再启动完整 Compose，不要在配置未通过 readiness 时直接运行浏览器回归。
 
@@ -125,7 +124,7 @@ Compose 会自动生成并保存在 Docker volume 中的运行时密钥包括：
     cd ..
     uv run pytest -q tests/structure tests/deployment
 
-只有这些检查通过后，才启动 `bash tools/v2/start_integration_stack.sh`。完整 Docker 栈会同时启动 Product PostgreSQL、Agent PostgreSQL、Redis、官方 Agent Server、readiness、Worker 和 Next.js，内存不足时不要重复启动第二套服务。
+只有这些检查通过后，才启动 `bash tools/v2/start_integration_stack.sh`。完整 Docker 栈会同时启动 Product PostgreSQL、Agent PostgreSQL、Redis、Aegra Agent Protocol Server、readiness、Worker 和 Next.js，内存不足时不要重复启动第二套服务。
 
 ## 6. 当前主线和生产缺口
 
@@ -141,13 +140,23 @@ Compose 会自动生成并保存在 Docker volume 中的运行时密钥包括：
 
 当前仍然开放的生产门禁包括：
 
-- 授权版持久化 Agent Server 的真实 restart/replay、checkpoint recovery 和 state fork 证明。
+2026-07-21 的 fresh Windows 本地供应链门禁已完成 4/4 source/lock 扫描且零 skip：
+uv/npm 漏洞均为 0，Python/前端 CycloneDX 已生成并校验哈希，证据位于
+`E:\project\study\codex\crypto\local-supply-chain-20260721-08`。随后
+`container-image-sbom-20260721-06` 以 Docker Scout `local://<exact image ID>` 生成
+773-component/2668-dependency CycloneDX；`container-image-signature-20260721-03`
+以固定 Cosign digest 完成无网络 ephemeral-key blob signature、正向 verify、tamper
+拒绝和私钥删除。三者均绑定 dirty worktree/local image；镜像 CVE audit、registry repo
+digest、KMS/keyless identity、tlog/timestamp、signed OCI attestation 和 production
+release 仍未证明。
+
+- 本地 Aegra `resume-18` 已证明 QA cancel、distinct checkpoint fork、Product PostgreSQL provisioned 用户矩阵（owner `200`、同 workspace peer `404`、cross-tenant `404`、错配 context `401`）、authority metadata overwrite、同 superstep root + depth-1 子图 interrupt aggregate resume、Redis worker kill/reaper、Protocol `since` replay，以及受控 post-provider canonical checkpoint 跨真实 server restart 后保持 identity 并通过 official approve resume 到 `succeeded + committed`；`-08` 已证明固定摘要 HAProxy 下的双实例顺序 stop/start、跨实例 checkpoint、唯一恢复提交和 600/600 健康请求。两者均通过 cleanup 后工件哈希，但完整 Provider Product Graph 跨重启、Product fork/cancel/retry、hosted OIDC-backed 多主体租户矩阵、canonical provider nested interrupt、生产入口和 rolling upgrade 仍未证明。
 - Hosted OIDC、HTTPS 和真实多用户身份/权限矩阵。
 - LangSmith 和 Langfuse 的真实外部投递、关联、脱敏和 outage 证据。
 - 正式通知 provider 回执、失败重试和人工 resend 闭环。
 - Memory、Outcome、完整 entitlement/usage 和 webhook worker。
 - PostgreSQL PITR、跨环境备份恢复、正式 RTO/RPO 和灾备演练。
-- 正式 SLO、压力测试、安全审计、SBOM、发布签名和 release attestation。
+- 正式 SLO、压力测试、安全审计、镜像 CVE audit、registry/KMS/keyless 签名、signed OCI attestation 和 release attestation。
 - Inbox 新增直接审核路径在真实持久化 Agent Server 上的完整 Playwright 点击回读证明。
 
 ## 7. 继续实施顺序
@@ -155,7 +164,7 @@ Compose 会自动生成并保存在 Docker volume 中的运行时密钥包括：
 不要一接手就做全仓库重构，也不要先做视觉细节。推荐顺序：
 
 1. 先恢复新环境并跑通现有本地 Product 主流程，确认真实页面能看到 Task、Evidence、Artifact 和失败状态。
-2. 优先关闭 Task 8：授权版 Agent Server、checkpoint、restart/replay、state fork 和跨重启 Product Task 绑定。
+2. 优先关闭 Task 8 剩余项：Aegra 上的真实 Provider Product Graph 跨重启绑定、Protocol checkpoint envelope/state fork、Product retry/cancel/fork 跨重启、有效多主体租户矩阵、canonical 并行/嵌套 provider interrupt 和生产 rolling upgrade。
 3. 再关闭外部观测和通知回执，确保同一执行可以通过 correlation ID 在 Product、LangSmith、Langfuse 和通知 Outbox 中追踪。
 4. 再做 PITR/DR、OIDC/HTTPS、多用户矩阵、SLO、安全和发布证明。
 5. 最后补齐 Inbox 真实持久化点击回归、Memory/Outcome、entitlement/usage/webhook 等剩余产品门禁。

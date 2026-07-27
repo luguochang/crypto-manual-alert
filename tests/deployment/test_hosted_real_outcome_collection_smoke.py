@@ -208,7 +208,8 @@ def test_hosted_real_outcome_collection_runs_compose_collector_then_evidence_gat
     assert collect_command[-5:] == ["collect-outcomes", "--limit", "50", "--symbol", "ETH-USDT-SWAP"]
 
     evidence_command = runner.commands[2]
-    assert "tools/deployment/smoke_real_outcome_evidence.py" in " ".join(evidence_command)
+    normalized_evidence_command = " ".join(evidence_command).replace("\\", "/")
+    assert "tools/deployment/smoke_real_outcome_evidence.py" in normalized_evidence_command
     assert "--api-base" in evidence_command
     assert "http://127.0.0.1:8010" in evidence_command
     assert "--symbol" in evidence_command

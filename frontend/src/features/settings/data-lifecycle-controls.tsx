@@ -32,6 +32,7 @@ import {
   persistExportId,
   readPersistedExportId,
 } from "@/features/settings/data-lifecycle-state";
+import { LifecycleReceiptList } from "@/features/settings/lifecycle-receipt-list";
 import type {
   DataDeletion,
   DataExport,
@@ -335,6 +336,7 @@ export function DataLifecycleControls() {
           <section className="settings-panel lifecycle-danger-panel" aria-labelledby="deletion-heading">
             <header className="settings-panel-header"><span className="settings-channel-icon" aria-hidden="true"><Trash2 size={20} /></span><div><h2 id="deletion-heading">删除我的数据</h2><p>只删除当前用户在当前工作区的 Product 数据。外部系统必须返回真实回执后才会从 pending_external 继续。</p></div></header>
             {deletion ? <div className="lifecycle-system-list" role="status"><strong>删除任务：{deletionStatusLabel(deletion.status)}</strong>{Object.entries(deletion.system_status).map(([system, state]) => <div key={system}><span>{systemLabels[system] ?? system}</span><span data-state={state}>{state}</span></div>)}</div> : null}
+            <LifecycleReceiptList receipts={deletion?.receipts ?? []} />
             <form className="settings-form" onSubmit={startDeletion}>
               <label className="settings-key-field"><span>输入 DELETE MY DATA 以确认</span><input value={confirmation} autoComplete="off" spellCheck={false} onChange={(event) => setConfirmation(event.target.value)} disabled={deleting || policy.legal_hold_active} /></label>
               <div className="settings-actions"><button className="danger-button" type="submit" disabled={deleting || policy.legal_hold_active || confirmation !== DELETE_CONFIRMATION}>{deleting ? <LoaderCircle className="spinning-icon" size={17} aria-hidden="true" /> : <LockKeyhole size={17} aria-hidden="true" />}{deleting ? "正在提交" : "提交删除请求"}</button></div>

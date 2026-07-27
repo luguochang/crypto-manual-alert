@@ -10,6 +10,7 @@ from crypto_alert_v2.notifications.credentials import (
     NotificationCredentialCipher,
     NotificationCredentialError,
     notification_credential_cipher_from_environment,
+    notification_credential_cipher_from_secret_store,
 )
 from crypto_alert_v2.notifications.resolver import DatabaseNotificationAdapterResolver
 from crypto_alert_v2.notifications.outbox import (
@@ -34,6 +35,7 @@ __all__ = [
     "NotificationCredentialCipher",
     "NotificationCredentialError",
     "notification_credential_cipher_from_environment",
+    "notification_credential_cipher_from_secret_store",
     "DatabaseNotificationAdapterResolver",
     "NotificationLineageConflict",
     "NotificationNotResendable",

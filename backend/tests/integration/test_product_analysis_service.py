@@ -11,14 +11,14 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 import crypto_alert_v2.api.service as service_module
 from crypto_alert_v2.api.agent_server import (
@@ -28,6 +28,7 @@ from crypto_alert_v2.api.agent_server import (
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
+    DecisionRequestSubmission,
     DeepResearchSubmission,
     FeedbackSubmission,
     ForkSubmission,
@@ -73,7 +74,12 @@ from crypto_alert_v2.persistence.models import (
     Tenant,
     Thread,
     WebEvidence,
+    UsageLedgerEntry,
+    UsageReconciliation,
+    Workspace,
+    WorkspaceEntitlement,
 )
+from crypto_alert_v2.persistence.usage_governance import UsageQuotaExceeded
 from crypto_alert_v2.persistence.repositories import ResolvedActor
 from crypto_alert_v2.providers.search import WebEvidence as DomainWebEvidence
 from tests.fixtures.golden_cases import (
@@ -444,6 +450,98 @@ class SuccessfulDeepResearchRemoteRunner(SuccessfulRemoteRunner):
 class RunningRemoteRunner(SuccessfulRemoteRunner):
     async def get(self, _: RemoteRunHandle) -> RemoteRunState:
         return RemoteRunState(status="running")
+
+
+class CapturingDecisionRemoteRunner(SuccessfulRemoteRunner):
+    def __init__(self) -> None:
+        self.start_options: dict[str, object] = {}
+
+    async def start(self, **options: object) -> RemoteRunHandle:
+        self.start_options = options
+        return await super().start(**options)
+
+
+@pytest.mark.asyncio
+async def test_unified_decision_request_persists_and_uses_existing_worker_graph_contract(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    actor = ActorContext(
+        tenant_id="decision-request-tenant",
+        workspace_id="decision-request-workspace",
+        user_id="oidc|decision-request-user",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(session_factory=session_factory)
+    await service.bootstrap_actor(actor)
+    admitted = await service.create_decision_request(
+        actor,
+        DecisionRequestSubmission(
+            entry_kind="manual",
+            session_id="decision-session-1",
+            intent="market_analysis",
+            intent_confidence=1,
+            complexity="standard",
+            symbol="BTC-USDT-SWAP",
+            horizon="4h",
+            query_text="Assess current BTC risk with declared position context.",
+            position={
+                "side": "long",
+                "entry_price": "65000",
+                "size": "0.02",
+                "leverage": "2",
+            },
+            risk={
+                "mode": "conservative",
+                "max_loss_quote": "100",
+                "max_position_notional": "1500",
+            },
+            side_effects={
+                "live_market_data": True,
+                "live_web_research": True,
+                "product_writes": True,
+            },
+        ),
+        idempotency_key="unified-decision-admission-1",
+    )
+
+    assert admitted["route"].status == "admitted"
+    queued = admitted["task"]
+    assert queued is not None
+    task_id = UUID(str(queued["task_id"]))
+    async with session_factory() as session:
+        persisted = await session.scalar(select(Task).where(Task.id == task_id))
+        assert persisted is not None
+        assert persisted.request_payload["schema_version"] == "1.0"
+        assert persisted.request_payload["entry_kind"] == "manual"
+        assert persisted.request_payload["actor_id"] == actor.user_id
+        assert persisted.request_payload["position"]["entry_price"] == "65000"
+        assert persisted.request_payload["risk"]["mode"] == "conservative"
+
+    runner = CapturingDecisionRemoteRunner()
+    dispatcher = CommandDispatcher(
+        session_factory=session_factory,
+        runner=runner,
+        worker_id="decision-request-worker",
+    )
+    assert await dispatcher.dispatch_once() is True
+
+    view = await service.get_task(actor, str(task_id))
+    assert view is not None
+    assert view["status"] == "succeeded"
+    assert isinstance(runner.start_options["submission"], AnalysisSubmission)
+    graph_submission = runner.start_options["submission"]
+    assert graph_submission.model_dump(mode="json") == {
+        "symbol": "BTC-USDT-SWAP",
+        "horizon": "4h",
+        "query_text": "Assess current BTC risk with declared position context.",
+        "notify": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -3508,3 +3606,100 @@ async def test_task_stage_history_uses_selected_run_and_omits_event_payload(
         "recorded_at",
         "source",
     }
+
+
+@pytest.mark.asyncio
+async def test_agent_admission_quota_reconciliation_and_receipts_are_workspace_scoped(
+    connection: AsyncConnection,
+) -> None:
+    session_factory = async_sessionmaker(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    owner = ActorContext(
+        tenant_id="usage-tenant",
+        workspace_id="usage-workspace-a",
+        user_id="oidc|usage-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    other_workspace = ActorContext(
+        tenant_id="usage-tenant",
+        workspace_id="usage-workspace-b",
+        user_id="oidc|usage-owner",
+        roles=("member",),
+        permissions=("analysis:read", "analysis:write"),
+    )
+    service = ProductAnalysisService(
+        session_factory=session_factory,
+        clock=lambda: datetime(2026, 7, 23, 15, 0, tzinfo=UTC),
+    )
+    await service.bootstrap_actor(owner)
+    await service.bootstrap_actor(other_workspace)
+    async with session_factory() as session, session.begin():
+        entitlement = await session.scalar(
+            select(WorkspaceEntitlement).where(
+                WorkspaceEntitlement.workspace_id
+                == select(Workspace.id)
+                .where(Workspace.external_id == owner.workspace_id)
+                .scalar_subquery()
+            )
+        )
+        assert entitlement is not None
+        entitlement.monthly_agent_admission_limit = 1
+
+    first = await service.create_analysis(
+        owner,
+        submission(query_text="First quota-counted analysis."),
+        idempotency_key="usage-admission-1",
+    )
+    replay = await service.create_analysis(
+        owner,
+        submission(query_text="First quota-counted analysis."),
+        idempotency_key="usage-admission-1",
+    )
+    assert replay["task_id"] == first["task_id"]
+    with pytest.raises(UsageQuotaExceeded, match="agent_admission quota exceeded"):
+        await service.create_analysis(
+            owner,
+            submission(query_text="Second analysis exceeds the workspace quota."),
+            idempotency_key="usage-admission-2",
+        )
+
+    isolated = await service.create_analysis(
+        other_workspace,
+        submission(query_text="The other workspace has an independent quota."),
+        idempotency_key="usage-admission-other-workspace",
+    )
+    assert isolated["status"] == "queued"
+
+    receipt = await service.reconcile_usage(owner, repair=True)
+    assert receipt["status"] == "reconciled"
+    assert receipt["source_totals"]["agent_admission"] == 1
+    assert receipt["ledger_totals"]["agent_admission"] == 1
+    assert receipt["discrepancies"] == {}
+    governance = await service.get_usage_governance(owner)
+    assert governance["totals"]["agent_admission"] == 1
+    assert governance["latest_reconciliation"]["id"] == receipt["id"]
+
+    async with session_factory() as session:
+        assert (
+            int(
+                await session.scalar(
+                    select(func.count(UsageLedgerEntry.id)).where(
+                        UsageLedgerEntry.resource_id == str(first["task_id"]),
+                        UsageLedgerEntry.unit == "agent_admission",
+                    )
+                )
+                or 0
+            )
+            == 1
+        )
+    with pytest.raises(DBAPIError, match="usage_reconciliations is append-only"):
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                update(UsageReconciliation)
+                .where(UsageReconciliation.id == receipt["id"])
+                .values(status="discrepant")
+            )

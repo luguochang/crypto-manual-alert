@@ -21,6 +21,7 @@ __pycache__/
 **/out/
 **/test-results/
 **/playwright-report/
+backend/tests/
 **/*.tsbuildinfo
 **/.DS_Store
 **/Thumbs.db

@@ -4,16 +4,19 @@ import argparse
 import asyncio
 from datetime import UTC, datetime
 import json
-import os
 from pathlib import Path
 import sys
-import tempfile
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from crypto_alert_v2.atomic_io import atomic_write_text
+
 from crypto_alert_v2.config import get_settings
 from crypto_alert_v2.notifications.credentials import (
-    notification_credential_cipher_from_environment,
+    notification_credential_cipher_from_secret_store,
+)
+from crypto_alert_v2.integrations.secret_store import (
+    integration_secret_store_from_environment,
 )
 from crypto_alert_v2.notifications.rotation import rotate_notification_credentials
 
@@ -31,7 +34,11 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> dict[str, object]:
     settings = get_settings()
-    credential_cipher = notification_credential_cipher_from_environment()
+    credential_cipher = notification_credential_cipher_from_secret_store(
+        integration_secret_store_from_environment(
+            app_environment=settings.app_environment
+        )
+    )
     if credential_cipher is None:
         raise ValueError("notification credential keyring is not configured")
     engine = create_async_engine(settings.product_database_url, pool_pre_ping=True)
@@ -64,27 +71,7 @@ def _write_report(path: Path, report: dict[str, object]) -> None:
         raise ValueError("rotation output path must be absolute")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    atomic_write_text(path, payload, mode=0o600, sync_directory=True)
 
 
 def main() -> None:

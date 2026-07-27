@@ -6,9 +6,9 @@
 
 **Goal:** Build and verify the final multi-user crypto intelligence Agent product using the official LangChain, LangGraph, Deep Agents, Agent Server, LangSmith, Langfuse and React SDK contracts.
 
-**Architecture:** One canonical LangGraph runs on Agent Server. LangChain agent factories own model/tool/middleware assembly; deterministic domain code owns evidence and risk decisions; Product PostgreSQL owns user-visible business records; `@langchain/react` owns live runtime state while Product APIs own history and projections.
+**Architecture:** One canonical LangGraph runs on ADR 0011's self-hosted Aegra Agent Protocol Server. LangChain agent factories own model/tool/middleware assembly; deterministic domain code owns evidence and risk decisions; Product PostgreSQL owns user-visible business records; `@langchain/react` owns live runtime state while Product APIs own history and projections.
 
-**Tech Stack:** Python 3.12, uv, LangChain 1.3.13, LangGraph 1.2.9, Deep Agents 0.6.12, Agent Server, PostgreSQL 16, Redis 7, SQLAlchemy 2, Alembic, PyJWT, Next.js/React, Auth.js, `@langchain/react`, Zod, Playwright, LangSmith and Langfuse.
+**Tech Stack:** Python 3.12, uv, LangChain 1.3.13, LangGraph 1.2.9, Deep Agents 0.6.12, Aegra 0.9.24, PostgreSQL 16, Redis 7, SQLAlchemy 2, Alembic, PyJWT, Next.js/React, Auth.js, `@langchain/react`, Zod, Playwright, optional LangSmith and Langfuse.
 
 ---
 
@@ -677,6 +677,17 @@ Commit: `feat: add product persistence and notification outbox`
 - Create: `docs/v2/compatibility-exceptions/langgraph-api-0.11.0-checkpoints.md`
 - Create: `docs/v2/compatibility-exceptions/langgraph-api-0.11.0-state-fork.md`
 - Create: `docs/v2/implementation/2026-07-13-task-08-api.md`
+
+> ADR 0011 execution override (2026-07-21): references below to a licensed
+> `langgraph build` image or commercial deployment credential are historical. The
+> current server is Aegra `0.9.24` from the locked `aegra` extra, with production
+> `backend/aegra.json` and isolated `backend/aegra.task8-qa.json`. Aegra does not
+> implement server-effective `durability`, `stream_resumable` or `if_not_exists`
+> request fields, so field serialization cannot close Task 8. Equivalent live gates
+> must prove PostgreSQL checkpoint/history, Redis lease/reaper recovery on the same
+> Thread/Run, Protocol `since` replay identity, Product cross-restart binding,
+> cancel/retry/fork, tenant isolation and parallel/nested interrupts. Existing
+> `state.fork`/root-checkpoint compatibility exceptions remain open.
 
 - [ ] **Step 1: Write tenant-scoped API tests**
 

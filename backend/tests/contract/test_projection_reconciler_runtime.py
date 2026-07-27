@@ -73,6 +73,26 @@ class FakeLifecycleWorker:
         self.instances.append(self)
 
 
+class FakeMemoryDeletionWorker(FakeLifecycleWorker):
+    instances: list["FakeMemoryDeletionWorker"] = []
+
+
+class FakeOutcomeMaturationWorker(FakeLifecycleWorker):
+    instances: list["FakeOutcomeMaturationWorker"] = []
+
+
+class FakeMarketProvider:
+    instances: list["FakeMarketProvider"] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.closed = False
+        self.instances.append(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeProjectionReconciler:
     instances: list["FakeProjectionReconciler"] = []
 
@@ -117,6 +137,9 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
     FakeMonitorCronAdapter.instances.clear()
     FakeMonitorCronWorker.instances.clear()
     FakeLifecycleWorker.instances.clear()
+    FakeMemoryDeletionWorker.instances.clear()
+    FakeOutcomeMaturationWorker.instances.clear()
+    FakeMarketProvider.instances.clear()
     FakeRuntime.instances.clear()
     monkeypatch.setattr(
         worker_main,
@@ -144,6 +167,7 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
             worker_health_port=9090,
             worker_readiness_failure_threshold=4,
             worker_readiness_stale_after_seconds=45.0,
+            market_data_http_proxy="http://proxy.test:7890",
         ),
     )
     monkeypatch.setattr(
@@ -157,8 +181,13 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
     monkeypatch.setattr(worker_main.httpx, "AsyncClient", lambda **kwargs: http_client)
     monkeypatch.setattr(
         worker_main,
-        "notification_credential_cipher_from_environment",
-        lambda: None,
+        "integration_secret_store_from_environment",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        worker_main,
+        "notification_credential_cipher_from_secret_store",
+        lambda _: None,
     )
     monkeypatch.setattr(worker_main, "get_client", lambda **kwargs: agent_client)
     monkeypatch.setattr(
@@ -172,6 +201,9 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
     monkeypatch.setattr(worker_main, "AgentServerCronAdapter", FakeMonitorCronAdapter)
     monkeypatch.setattr(worker_main, "MonitorCronWorker", FakeMonitorCronWorker)
     monkeypatch.setattr(worker_main, "LifecycleWorker", FakeLifecycleWorker)
+    monkeypatch.setattr(worker_main, "MemoryDeletionWorker", FakeMemoryDeletionWorker)
+    monkeypatch.setattr(worker_main, "OutcomeMaturationWorker", FakeOutcomeMaturationWorker)
+    monkeypatch.setattr(worker_main, "OkxProvider", FakeMarketProvider)
     monkeypatch.setattr(
         worker_main,
         "ProductProjectionReconciler",
@@ -201,6 +233,8 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
         "monitor_crons",
         "observability",
         "lifecycle",
+        "memory_deletions",
+        "outcomes",
     ]
     assert runtime.kwargs["readiness_failure_threshold"] == 4
     assert runtime.kwargs["readiness_stale_after_seconds"] == 45.0
@@ -213,6 +247,9 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
     assert len(FakeMonitorCronAdapter.instances) == 1
     assert len(FakeMonitorCronWorker.instances) == 1
     assert len(FakeLifecycleWorker.instances) == 1
+    assert len(FakeMemoryDeletionWorker.instances) == 1
+    assert len(FakeOutcomeMaturationWorker.instances) == 1
+    assert len(FakeMarketProvider.instances) == 1
     runner = FakeDispatcher.instances[0].kwargs["runner"]
     assert FakeProjectionReconciler.instances[0].kwargs["runner"] is runner
     assert (
@@ -236,11 +273,28 @@ async def test_projection_reconciler_shares_one_runtime_and_agent_runner(
     assert monitor_adapter.kwargs["client"] is agent_client
     assert monitor_adapter.kwargs["authorization_provider"] is authorization_provider
     assert monitor_adapter.kwargs["include_end_time"] is False
-    assert FakeLifecycleWorker.instances[0].kwargs == {
-        "session_factory": session_factory,
-        "worker_id": "worker-1:lifecycle",
-    }
+    lifecycle_kwargs = FakeLifecycleWorker.instances[0].kwargs
+    assert lifecycle_kwargs["session_factory"] is session_factory
+    assert lifecycle_kwargs["worker_id"] == "worker-1:lifecycle"
+    lifecycle_adapters = lifecycle_kwargs["deletion_adapters"]
+    assert [adapter.system for adapter in lifecycle_adapters] == [
+        "checkpoint",
+        "store",
+        "object_storage",
+        "search",
+        "langsmith",
+        "langfuse",
+    ]
+    assert isinstance(lifecycle_adapters[0], worker_main.AegraCheckpointAdapter)
+    assert isinstance(lifecycle_adapters[1], worker_main.AegraStoreAdapter)
+    assert lifecycle_adapters[0]._client is agent_client
+    assert lifecycle_adapters[1]._client is agent_client
     assert runtime.kwargs["workers"]["monitor_crons"] is monitor_worker
     assert runtime.kwargs["workers"]["lifecycle"] is FakeLifecycleWorker.instances[0]
+    assert runtime.kwargs["workers"]["memory_deletions"] is FakeMemoryDeletionWorker.instances[0]
+    assert runtime.kwargs["workers"]["outcomes"] is FakeOutcomeMaturationWorker.instances[0]
+    assert FakeOutcomeMaturationWorker.instances[0].kwargs["provider"] is FakeMarketProvider.instances[0]
+    assert FakeMarketProvider.instances[0].kwargs == {"proxy": "http://proxy.test:7890"}
+    assert FakeMarketProvider.instances[0].closed is True
     assert engine.disposed is True
     assert http_client.closed is True

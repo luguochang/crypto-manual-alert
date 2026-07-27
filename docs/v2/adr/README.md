@@ -4,7 +4,7 @@
 >
 > 分类：Informative index（子 ADR 各自声明权威状态）
 >
-> 状态摘要：ADR 0001-0007、0009-0010 Accepted；ADR 0008 Proposed，保留生产证据门禁
+> 状态摘要：ADR 0001-0007、0009-0011 Accepted；ADR 0008 已被 ADR 0011 取代
 
 ADR 在用户批准前均不得视为实现授权。
 
@@ -17,9 +17,10 @@ ADR 在用户批准前均不得视为实现授权。
 | [0005](./0005-observability-and-prompt-source.md) | LangSmith/Langfuse 与 Prompt 发布源 | Accepted |
 | [0006](./0006-production-slo-retention-and-outcome.md) | 生产 SLO、保留、删除与 Outcome 门禁 | Accepted |
 | [0007](./0007-launch-and-financial-product-boundary.md) | 上线范围与金融产品边界 | Accepted |
-| [0008](./0008-production-deployment-profile.md) | 生产部署 Profile 与退出方案 | Proposed，证据门禁 |
+| [0008](./0008-production-deployment-profile.md) | hosted 商业生产部署 Profile | Superseded by ADR 0011 |
 | [0009](./0009-canonical-agent-and-research-harness.md) | Canonical Agent 边界与 Research Harness fallback | Accepted |
 | [0010](./0010-task13-restricted-deep-research-harness.md) | Task 13 受限 Deep Research Harness | Accepted |
+| [0011](./0011-aegra-self-hosted-agent-server.md) | Aegra 自托管开源 Agent Server | Accepted |
 
 状态只能按以下顺序变化：
 

@@ -1,7 +1,7 @@
 name: crypto-manual-alert-v2
 
-# The Agent image is built by the official `langgraph build` command before
-# Compose starts this durable local integration topology.
+# Aegra is the Apache-2.0 Agent Protocol server. The backend image installs the
+# locked `aegra` production extra and keeps the official LangGraph SDK/Graph.
 services:
   product-postgres:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
@@ -102,6 +102,23 @@ services:
         source: product-inbox-cursor-key
         target: /run/product-inbox-cursor-key
 
+  integration-secret-files:
+    image: crypto-manual-alert-v2-backend:local
+    pull_policy: never
+    restart: "no"
+    environment:
+      NOTIFICATION_CREDENTIAL_KEY: ${NOTIFICATION_CREDENTIAL_KEY:?NOTIFICATION_CREDENTIAL_KEY is required for the production Compose topology}
+      NOTIFICATION_CREDENTIAL_DECRYPT_KEYS: ${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}
+    command:
+      - python
+      - -m
+      - crypto_alert_v2.integrations.bootstrap_secrets
+      - /run/integration-secrets
+    volumes:
+      - type: volume
+        source: integration-secret-files
+        target: /run/integration-secrets
+
   development-bootstrap:
     image: crypto-manual-alert-v2-backend:local
     pull_policy: never
@@ -127,7 +144,7 @@ services:
         condition: service_completed_successfully
 
   langgraph-api:
-    image: ${LANGGRAPH_API_LOCAL_IMAGE:-crypto-manual-alert-v2-langgraph-api:local}
+    image: crypto-manual-alert-v2-backend:local
     pull_policy: never
     restart: unless-stopped
     init: true
@@ -136,15 +153,23 @@ services:
         required: false
     environment:
       APP_ENVIRONMENT: production
+      ENV_MODE: PRODUCTION
+      AEGRA_CONFIG: ${AEGRA_CONFIG_BASENAME:-aegra.json}
       PRODUCT_DATABASE_URL: ${COMPOSE_PRODUCT_DATABASE_URL:-postgresql+asyncpg://crypto_alert:crypto_alert_local@product-postgres:5432/crypto_alert_v2}
-      POSTGRES_URI: ${COMPOSE_AGENT_POSTGRES_URI:-postgres://langgraph:langgraph_local@agent-postgres:5432/langgraph?sslmode=disable}
-      REDIS_URI: redis://langgraph-redis:6379
+      DATABASE_URL: ${COMPOSE_AGENT_DATABASE_URL:-postgresql://langgraph:langgraph_local@agent-postgres:5432/langgraph?sslmode=disable}
+      REDIS_BROKER_ENABLED: "true"
+      REDIS_URL: redis://langgraph-redis:6379/0
+      WORKER_COUNT: "${AEGRA_WORKER_COUNT:-1}"
+      N_JOBS_PER_WORKER: "${AEGRA_JOBS_PER_WORKER:-2}"
+      LEASE_DURATION_SECONDS: "${AEGRA_LEASE_DURATION_SECONDS:-30}"
+      HEARTBEAT_INTERVAL_SECONDS: "${AEGRA_HEARTBEAT_INTERVAL_SECONDS:-10}"
+      REAPER_INTERVAL_SECONDS: "${AEGRA_REAPER_INTERVAL_SECONDS:-15}"
+      STUCK_PENDING_THRESHOLD_SECONDS: "${AEGRA_STUCK_PENDING_THRESHOLD_SECONDS:-120}"
+      RUN_MIGRATIONS_ON_STARTUP: "true"
       AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
       AGENT_READINESS_URL: http://langgraph-api-readiness:9091/readyz
       WORKER_READINESS_URL: http://command-worker:9090/readyz
-      LANGGRAPH_CLOUD_LICENSE_KEY: ${LANGGRAPH_CLOUD_LICENSE_KEY:-}
-      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       SEARCH_PROVIDER: ${SEARCH_PROVIDER:-builtin_web_search}
       MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
       SEARCH_HTTP_PROXY: ${SEARCH_HTTP_PROXY:-}
@@ -154,12 +179,21 @@ services:
       INTERNAL_JWT_MAX_TTL_SECONDS: "60"
       INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
       PRODUCT_INBOX_CURSOR_KEY_FILE: /run/product-inbox-cursor-key/key
-      NOTIFICATION_CREDENTIAL_KEY: ${NOTIFICATION_CREDENTIAL_KEY:?NOTIFICATION_CREDENTIAL_KEY is required for the production Compose topology}
+      INTEGRATION_SECRET_STORE: file
+      INTEGRATION_SECRET_FILE_DIR: /run/integration-secrets
       NOTIFICATION_CREDENTIAL_KEY_VERSION: ${NOTIFICATION_CREDENTIAL_KEY_VERSION:-v1}
-      NOTIFICATION_CREDENTIAL_DECRYPT_KEYS: ${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}
       INTERNAL_JWT_PUBLIC_KEYS: ${INTERNAL_JWT_PUBLIC_KEYS:-{}}
     ports:
       - 127.0.0.1:${AGENT_SERVER_PORT:-8123}:8000
+    command:
+      - aegra
+      - serve
+      - --config
+      - ${AEGRA_CONFIG_BASENAME:-aegra.json}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     volumes:
       - type: volume
         source: internal-jwt-public
@@ -169,13 +203,19 @@ services:
         source: product-inbox-cursor-key
         target: /run/product-inbox-cursor-key
         read_only: true
+      - type: volume
+        source: integration-secret-files
+        target: /run/integration-secrets
+        read_only: true
     healthcheck:
       test:
         - CMD
         - python
-        - /api/healthcheck.py
-      interval: 60s
-      start_interval: 1s
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"
+      interval: 5s
+      timeout: 5s
+      retries: 18
       start_period: 10s
     depends_on:
       agent-postgres:
@@ -185,6 +225,8 @@ services:
       migrate:
         condition: service_completed_successfully
       internal-jwt-keys:
+        condition: service_completed_successfully
+      integration-secret-files:
         condition: service_completed_successfully
       development-bootstrap:
         condition: service_completed_successfully
@@ -197,7 +239,8 @@ services:
       APP_ENVIRONMENT: production
       AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
-      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-builtin_web_search}
+      SEARCH_PROVIDER: builtin_web_search
+      AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER: ${SEARCH_PROVIDER:-builtin_web_search}
       AGENT_READINESS_HOST: 0.0.0.0
       AGENT_READINESS_PORT: "9091"
       AGENT_READINESS_INTERVAL_SECONDS: "5"
@@ -256,10 +299,11 @@ services:
       AGENT_SERVER_INTERNAL_JWT_AUDIENCE: crypto-alert-agent-server
       INTERNAL_JWT_PRIVATE_KEY_FILE: /run/internal-jwt-private/private.pem
       INTERNAL_JWT_PUBLIC_KEY_FILE: /run/internal-jwt-public/public.pem
-      NOTIFICATION_CREDENTIAL_KEY: ${NOTIFICATION_CREDENTIAL_KEY:?NOTIFICATION_CREDENTIAL_KEY is required for the production Compose topology}
+      INTEGRATION_SECRET_STORE: file
+      INTEGRATION_SECRET_FILE_DIR: /run/integration-secrets
       NOTIFICATION_CREDENTIAL_KEY_VERSION: ${NOTIFICATION_CREDENTIAL_KEY_VERSION:-v1}
-      NOTIFICATION_CREDENTIAL_DECRYPT_KEYS: ${NOTIFICATION_CREDENTIAL_DECRYPT_KEYS:-}
       INTERNAL_JWT_PUBLIC_KEYS: ${INTERNAL_JWT_PUBLIC_KEYS:-{}}
+      MARKET_DATA_HTTP_PROXY: ${MARKET_DATA_HTTP_PROXY:-}
       WORKER_HEALTH_HOST: 0.0.0.0
       WORKER_HEALTH_PORT: "9090"
       WORKER_READINESS_FAILURE_THRESHOLD: "3"
@@ -289,10 +333,16 @@ services:
         source: internal-jwt-public
         target: /run/internal-jwt-public
         read_only: true
+      - type: volume
+        source: integration-secret-files
+        target: /run/integration-secrets
+        read_only: true
     depends_on:
       migrate:
         condition: service_completed_successfully
       internal-jwt-keys:
+        condition: service_completed_successfully
+      integration-secret-files:
         condition: service_completed_successfully
       development-bootstrap:
         condition: service_completed_successfully
@@ -356,3 +406,4 @@ volumes:
   internal-jwt-private:
   internal-jwt-public:
   product-inbox-cursor-key:
+  integration-secret-files:

@@ -18,6 +18,7 @@ from crypto_alert_v2.api.agent_server import (
     RemoteResumeIndeterminateError,
     RemoteRunHandle,
     RemoteSubmitIndeterminateError,
+    _portable_run_metadata,
 )
 from crypto_alert_v2.api.request_identity import correlation_id_for_task
 from crypto_alert_v2.api.schemas import AnalysisSubmission, DeepResearchSubmission
@@ -300,7 +301,7 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
             "review_policy": "bypass",
         },
         "durability": "sync",
-        "stream_mode": ["updates", "custom"],
+        "stream_mode": ["values", "updates", "custom"],
         "stream_resumable": True,
         "if_not_exists": "reject",
         "multitask_strategy": "reject",
@@ -315,10 +316,24 @@ async def test_runner_uses_official_thread_and_sync_durable_run() -> None:
             "thread_id": "thread-1",
             "correlation_id": correlation_id_for_task("task-1"),
             "request_id": "00000000-0000-4000-8000-000000000102",
-            "lineage": {
-                "operation": "submit",
+            "lineage_operation": "submit",
+            "lineage_product_run_id": "task-1",
+        },
+        "context": {
+            "crypto_alert_lineage": {
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "user_id": "user-1",
+                "identity_issuer": "legacy",
+                "task_id": "task-1",
+                "task_type": "market_analysis",
                 "product_run_id": "task-1",
-            },
+                "thread_id": "thread-1",
+                "correlation_id": correlation_id_for_task("task-1"),
+                "request_id": "00000000-0000-4000-8000-000000000102",
+                "lineage_operation": "submit",
+                "lineage_product_run_id": "task-1",
+            }
         },
         "headers": {
             "x-request-id": "00000000-0000-4000-8000-000000000102",
@@ -655,9 +670,18 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
         "x-request-id": "00000000-0000-4000-8000-000000000202",
     }
     assert client.runs.create_kwargs["metadata"] == {
-        **client.threads.kwargs["metadata"],
+        "tenant_id": "tenant-1",
+        "workspace_id": "workspace-1",
+        "user_id": "user-1",
+        "identity_issuer": "legacy",
+        "task_id": "task-1",
+        "task_type": "market_analysis",
+        "product_run_id": "product-run-1",
+        "correlation_id": correlation_id_for_task("task-1"),
         "thread_id": "thread-1",
         "request_id": "00000000-0000-4000-8000-000000000202",
+        "lineage_operation": "submit",
+        "lineage_product_run_id": "product-run-1",
     }
 
     state = await runner.get(handle)
@@ -694,7 +718,7 @@ async def test_runner_exposes_remote_ids_before_join_and_can_cancel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
+async def test_runner_forks_with_official_checkpoint_object() -> None:
     client = RecordingClient()
     client.threads.state_result["checkpoint"]["checkpoint_id"] = (
         "checkpoint-fork-source"
@@ -729,9 +753,14 @@ async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
     assert callable(create_kwargs.pop("on_run_created"))
     assert create_kwargs == {
         "input": None,
-        "checkpoint_id": "checkpoint-fork-source",
+        "checkpoint": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "checkpoint-fork-source",
+            "checkpoint_map": {},
+        },
         "durability": "sync",
-        "stream_mode": ["updates", "custom"],
+        "stream_mode": ["values", "updates", "custom"],
         "stream_resumable": True,
         "metadata": {
             "tenant_id": "tenant-1",
@@ -745,12 +774,29 @@ async def test_runner_forks_with_official_top_level_checkpoint_id() -> None:
             "forked_from_checkpoint_id": "checkpoint-fork-source",
             "correlation_id": correlation_id_for_task("task-1"),
             "request_id": "00000000-0000-4000-8000-000000000301",
-            "lineage": {
-                "operation": "fork",
+            "lineage_operation": "fork",
+            "lineage_product_run_id": "product-fork-run-2",
+            "lineage_parent_official_run_id": "run-1",
+            "lineage_checkpoint_id": "checkpoint-fork-source",
+        },
+        "context": {
+            "crypto_alert_lineage": {
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "user_id": "user-1",
+                "identity_issuer": "legacy",
+                "task_id": "task-1",
                 "product_run_id": "product-fork-run-2",
-                "parent_official_run_id": "run-1",
-                "checkpoint_id": "checkpoint-fork-source",
-            },
+                "thread_id": "thread-1",
+                "forked_from_official_run_id": "run-1",
+                "forked_from_checkpoint_id": "checkpoint-fork-source",
+                "correlation_id": correlation_id_for_task("task-1"),
+                "request_id": "00000000-0000-4000-8000-000000000301",
+                "lineage_operation": "fork",
+                "lineage_product_run_id": "product-fork-run-2",
+                "lineage_parent_official_run_id": "run-1",
+                "lineage_checkpoint_id": "checkpoint-fork-source",
+            }
         },
         "headers": {
             "authorization": "Bearer fork-token",
@@ -808,9 +854,12 @@ async def test_runner_never_recreates_an_indeterminate_checkpoint_fork() -> None
     assert len(client.runs.create_calls) == 1
     assert client.runs.events.count("create") == 1
     assert client.runs.create_kwargs is not None
-    assert client.runs.create_kwargs["checkpoint_id"] == (
-        "checkpoint-fork-indeterminate"
-    )
+    assert client.runs.create_kwargs["checkpoint"] == {
+        "thread_id": "thread-1",
+        "checkpoint_ns": "",
+        "checkpoint_id": "checkpoint-fork-indeterminate",
+        "checkpoint_map": {},
+    }
 
 
 @pytest.mark.asyncio
@@ -1073,7 +1122,7 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
             }
         },
         "durability": "sync",
-        "stream_mode": ["updates", "custom"],
+        "stream_mode": ["values", "updates", "custom"],
         "stream_resumable": True,
         "multitask_strategy": "reject",
         "metadata": {
@@ -1086,11 +1135,25 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
             "resume_of_official_run_id": "run-1",
             "correlation_id": correlation_id_for_task("task-1"),
             "request_id": "00000000-0000-4000-8000-000000000401",
-            "lineage": {
-                "operation": "resume",
+            "lineage_operation": "resume",
+            "lineage_product_run_id": "product-run-2",
+            "lineage_parent_official_run_id": "run-1",
+        },
+        "context": {
+            "crypto_alert_lineage": {
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "user_id": "user-1",
+                "task_id": "task-1",
                 "product_run_id": "product-run-2",
-                "parent_official_run_id": "run-1",
-            },
+                "thread_id": "thread-1",
+                "resume_of_official_run_id": "run-1",
+                "correlation_id": correlation_id_for_task("task-1"),
+                "request_id": "00000000-0000-4000-8000-000000000401",
+                "lineage_operation": "resume",
+                "lineage_product_run_id": "product-run-2",
+                "lineage_parent_official_run_id": "run-1",
+            }
         },
         "headers": {
             "authorization": "Bearer resume-token",
@@ -1105,6 +1168,22 @@ async def test_runner_resumes_with_an_official_current_head_command() -> None:
     assert resumed.authorization == "Bearer resume-token"
     assert client.runs.events == ["list", "create"]
     assert len(client.runs.create_calls) == 1
+
+
+def test_portable_run_metadata_flattens_lineage_and_rejects_objects() -> None:
+    assert _portable_run_metadata(
+        {
+            "task_id": "task-1",
+            "lineage": {"operation": "resume", "attempt": 2},
+        }
+    ) == {
+        "task_id": "task-1",
+        "lineage_operation": "resume",
+        "lineage_attempt": 2,
+    }
+
+    with pytest.raises(TypeError, match="primitive"):
+        _portable_run_metadata({"task_id": "task-1", "nested": {"value": 1}})
 
 
 @pytest.mark.asyncio

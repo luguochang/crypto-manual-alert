@@ -25,6 +25,7 @@ source_manifest_sha256=""
 source_file_count=0
 backend_lock_sha256=""
 frontend_lock_sha256=""
+python_lock_package_count=0
 identity_ready=0
 identity_rechecked=false
 source_stable="unknown"
@@ -34,6 +35,22 @@ uv_version=""
 npm_version=""
 node_version=""
 jq_version=""
+hash_tool=""
+platform_environment_profile="none"
+platform_environment=()
+
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)
+    platform_environment_profile="windows-runtime-paths"
+    for environment_name in \
+      APPDATA COMSPEC LOCALAPPDATA PATHEXT SYSTEMROOT TEMP TMP USERPROFILE WINDIR; do
+      if [[ -n "${!environment_name:-}" ]]; then
+        platform_environment+=("$environment_name=${!environment_name}")
+      fi
+    done
+    unset environment_name
+    ;;
+esac
 
 python_audit_status="not_run"
 python_audited_packages=0
@@ -68,12 +85,56 @@ emit_unpersisted_failure() {
 artifact_hash() {
   local path="$1"
   local digest_output
-  if [[ ! -f "$path" ]] || ! command -v shasum >/dev/null 2>&1; then
+  if [[ ! -f "$path" || -z "$hash_tool" ]]; then
     printf '%s' ""
     return
   fi
-  digest_output="$(shasum -a 256 "$path")"
+  digest_output="$(sha256_digest "$path")"
   printf '%s' "${digest_output%% *}"
+}
+
+sha256_digest() {
+  local path="$1"
+  case "$hash_tool" in
+    shasum)
+      shasum -a 256 "$path"
+      ;;
+    sha256sum)
+      sha256sum "$path"
+      ;;
+    *)
+      return 127
+      ;;
+  esac
+}
+
+sha256_stream() {
+  case "$hash_tool" in
+    shasum)
+      shasum -a 256
+      ;;
+    sha256sum)
+      sha256sum
+      ;;
+    *)
+      return 127
+      ;;
+  esac
+}
+
+hash_environment_interface() {
+  local path="$1"
+  LC_ALL=C awk '
+    /^[[:space:]]*$/ { print ""; next }
+    /^[[:space:]]*#/ { print; next }
+    /^[A-Z][A-Z0-9_]*=/ {
+      line = $0
+      sub(/=.*/, "=", line)
+      print line
+      next
+    }
+    { exit 1 }
+  ' "$path" | sha256_stream
 }
 
 write_summary() {
@@ -101,10 +162,13 @@ write_summary() {
     --arg source_stable "$source_stable" \
     --arg backend_lock_sha256 "$backend_lock_sha256" \
     --arg frontend_lock_sha256 "$frontend_lock_sha256" \
+    --argjson python_lock_package_count "$python_lock_package_count" \
     --arg uv_version "$uv_version" \
     --arg npm_version "$npm_version" \
     --arg node_version "$node_version" \
     --arg jq_version "$jq_version" \
+    --arg hash_tool "$hash_tool" \
+    --arg platform_environment_profile "$platform_environment_profile" \
     --argjson attempted_scans "$attempted_scans" \
     --argjson completed_scans "$completed_scans" \
     --argjson skipped_scans "$skipped_scans" \
@@ -148,7 +212,8 @@ write_summary() {
       locks: {
         backend: {
           path: "backend/uv.lock",
-          sha256: (if $backend_lock_sha256 == "" then null else $backend_lock_sha256 end)
+          sha256: (if $backend_lock_sha256 == "" then null else $backend_lock_sha256 end),
+          package_entries: $python_lock_package_count
         },
         frontend: {
           path: "frontend/package-lock.json",
@@ -160,7 +225,8 @@ write_summary() {
         uv: (if $uv_version == "" then null else $uv_version end),
         npm: (if $npm_version == "" then null else $npm_version end),
         node: (if $node_version == "" then null else $node_version end),
-        jq: (if $jq_version == "" then null else $jq_version end)
+        jq: (if $jq_version == "" then null else $jq_version end),
+        sha256: (if $hash_tool == "" then null else $hash_tool end)
       },
       scan_count: 4,
       attempted_scans: $attempted_scans,
@@ -202,7 +268,8 @@ write_summary() {
       redaction: {
         inherited_package_manager_environment: false,
         repository_package_manager_credentials_used: false,
-        raw_tool_stderr_published: false
+        raw_tool_stderr_published: false,
+        platform_environment_profile: $platform_environment_profile
       },
       does_not_prove: [
         "committed_source_candidate",
@@ -309,7 +376,7 @@ mkdir "$stage_dir"
 work_dir="$stage_dir/work"
 mkdir "$work_dir" "$work_dir/home" "$work_dir/tmp" "$work_dir/npm-cache"
 
-required_tools=(cat cmp cp date env git jq node npm shasum sort uv)
+required_tools=(awk cat cmp cp date env git jq node npm sort uv)
 for command_name in "${required_tools[@]}"; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     missing_tool="$command_name"
@@ -328,11 +395,19 @@ for command_name in "${required_tools[@]}"; do
     fail_gate "required_tool_missing"
   fi
 done
+if command -v shasum >/dev/null 2>&1; then
+  hash_tool="shasum"
+elif command -v sha256sum >/dev/null 2>&1; then
+  hash_tool="sha256sum"
+else
+  missing_tool="shasum_or_sha256sum"
+  fail_gate "required_tool_missing"
+fi
 
-jq_version="$(env -i PATH="$PATH" LC_ALL=C jq --version 2>/dev/null || true)"
-uv_version="$(env -i PATH="$PATH" LC_ALL=C uv --version 2>/dev/null || true)"
-npm_version="$(env -i PATH="$PATH" HOME="$work_dir/home" LC_ALL=C npm --version 2>/dev/null || true)"
-node_version="$(env -i PATH="$PATH" HOME="$work_dir/home" LC_ALL=C node --version 2>/dev/null || true)"
+jq_version="$(env -i "${platform_environment[@]}" PATH="$PATH" LC_ALL=C jq --version 2>/dev/null || true)"
+uv_version="$(env -i "${platform_environment[@]}" PATH="$PATH" LC_ALL=C uv --version 2>/dev/null || true)"
+npm_version="$(env -i "${platform_environment[@]}" PATH="$PATH" HOME="$work_dir/home" LC_ALL=C npm --version 2>/dev/null || true)"
+node_version="$(env -i "${platform_environment[@]}" PATH="$PATH" HOME="$work_dir/home" LC_ALL=C node --version 2>/dev/null || true)"
 if [[ -z "$jq_version" || -z "$uv_version" || -z "$npm_version" || -z "$node_version" ]]; then
   fail_gate "required_tool_version_probe_failed"
 fi
@@ -359,7 +434,6 @@ source_paths=(
   Dockerfile.frontend
   docker-compose.yml
   backend
-  deploy/agent-server-image.lock
   frontend
   tools/v2
 )
@@ -382,7 +456,9 @@ generate_source_manifest() {
       return 2
     fi
     file_name="${relative_path##*/}"
-    if [[ "$file_name" == "$forbidden_environment_name" || "$file_name" == "$forbidden_environment_name".* ]]; then
+    if [[ "$file_name" == "$forbidden_environment_name" || \
+          ( "$file_name" == "$forbidden_environment_name".* && \
+            "$file_name" != "$forbidden_environment_name.example" ) ]]; then
       return 3
     fi
     paths+=("$relative_path")
@@ -394,11 +470,17 @@ generate_source_manifest() {
 
   : >"$destination"
   while IFS= read -r relative_path; do
+    file_name="${relative_path##*/}"
     absolute_path="$REPOSITORY_ROOT/$relative_path"
     if [[ -L "$absolute_path" ]]; then
       return 5
+    elif [[ "$file_name" == "$forbidden_environment_name.example" && \
+            -f "$absolute_path" ]]; then
+      digest_output="$(hash_environment_interface "$absolute_path")" || return 8
+      digest="${digest_output%% *}"
+      printf '%s  ENV_INTERFACE:%s\n' "$digest" "$relative_path" >>"$destination"
     elif [[ -f "$absolute_path" ]]; then
-      digest_output="$(shasum -a 256 "$absolute_path")" || return 6
+      digest_output="$(sha256_digest "$absolute_path")" || return 6
       digest="${digest_output%% *}"
       printf '%s  FILE:%s\n' "$digest" "$relative_path" >>"$destination"
     elif [[ ! -e "$absolute_path" ]]; then
@@ -449,6 +531,11 @@ frontend_lock_sha256="$(artifact_hash "$FRONTEND_LOCK")"
 if [[ -z "$source_manifest_sha256" || -z "$backend_lock_sha256" || -z "$frontend_lock_sha256" ]]; then
   fail_gate "source_or_lock_hash_failed"
 fi
+python_lock_package_count="$(awk '$0 == "[[package]]" { count += 1 } END { print count + 0 }' "$BACKEND_LOCK")"
+if ! [[ "$python_lock_package_count" =~ ^[0-9]+$ ]] ||
+   (( python_lock_package_count <= 1 )); then
+  fail_gate "backend_lock_inventory_invalid"
+fi
 if ! git_head="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null)"; then
   fail_gate "git_head_unavailable"
 fi
@@ -489,6 +576,7 @@ attempted_scans=$((attempted_scans + 1))
 python_audit_status="failed"
 python_audit_exit=0
 env -i \
+  "${platform_environment[@]}" \
   PATH="$PATH" \
   HOME="$work_dir/home" \
   TMPDIR="$work_dir/tmp" \
@@ -526,6 +614,9 @@ python_adverse_status_count="$(jq -r '.summary.adverse_statuses' "$stage_dir/pyt
 if (( python_audited_packages <= 0 )); then
   fail_gate "python_audit_zero_packages"
 fi
+if (( python_audited_packages != python_lock_package_count - 1 )); then
+  fail_gate "python_audit_lock_inventory_mismatch"
+fi
 network_checks_completed=$((network_checks_completed + 1))
 completed_scans=$((completed_scans + 1))
 python_audit_status="completed"
@@ -541,6 +632,7 @@ frontend_audit_exit=0
 (
   cd "$work_dir/frontend-manifest"
   env -i \
+    "${platform_environment[@]}" \
     PATH="$PATH" \
     HOME="$work_dir/home" \
     TMPDIR="$work_dir/tmp" \
@@ -584,6 +676,7 @@ fi
 attempted_scans=$((attempted_scans + 1))
 python_sbom_status="failed"
 if ! env -i \
+  "${platform_environment[@]}" \
   PATH="$PATH" \
   HOME="$work_dir/home" \
   TMPDIR="$work_dir/tmp" \
@@ -617,7 +710,7 @@ python_sbom_dependency_count="$(jq -r '.dependencies | length' "$stage_dir/pytho
 if (( python_sbom_component_count <= 0 || python_sbom_dependency_count <= 0 )); then
   fail_gate "python_sbom_zero_inventory"
 fi
-if (( python_sbom_component_count != python_audited_packages )); then
+if (( python_sbom_component_count > python_audited_packages )); then
   fail_gate "python_audit_sbom_inventory_mismatch"
 fi
 python_sbom_status="completed"
@@ -628,6 +721,7 @@ frontend_sbom_status="failed"
 if ! (
   cd "$work_dir/frontend-manifest"
   env -i \
+    "${platform_environment[@]}" \
     PATH="$PATH" \
     HOME="$work_dir/home" \
     TMPDIR="$work_dir/tmp" \

@@ -14,7 +14,7 @@
 
 - Task 0 生成的 `normative-baseline.json` 是文件/区域分类的机器可读唯一来源。Approved normative 集合包含 `01`、`02`、`03`、`06`、`08`、`11`、`12`、本规格、`14` 与 Accepted ADR；`09` 只有明确锚定的 D01-D15 属于 Approved normative regions；`04`/README/ADR index 是 Informative，`05`/`07` 是 Verified evidence index，`10` 的执行语义已由 `14` 取代。
 - 本规格和 `14-v2-final-implementation-plan.md` 是实施入口，但不缩减 manifest 中其余 Approved normative 来源的更严格要求。
-- ADR 0008 在部署 Profile preflight（许可、区域、网络、Auth、Persistence、HA/SLO、成本、退出）和完整 Task 0 串行复审通过前保持 Proposed；复审和新 manifest 将其提升为 Accepted 后，才能执行 hosted runtime proof。Accepted 不等于 hosted release gate 已通过，本地 Compose 也不能替代真实 hosted 证据。
+- ADR 0011 已按用户明确的非商业授权要求选择 Aegra 自托管开源 Agent Server，并 supersede ADR 0008 的 hosted 商业推荐。ADR 0008 的区域、网络、Auth、Persistence、HA/SLO、成本和退出项目继续作为生产证据门禁；本地 Compose/Aegra 证据不能替代 hosted/正式环境证明。
 - 如早期文档与本规格存在状态枚举或职责表达冲突，以本规格的标准 Run 状态、`recovery_status/failure_code`、Checkpoint/Product DB/live projection 三分权威为准；其余更严格要求继续有效。
 - requirement registry 和最终 requirement-to-evidence verifier 必须从 manifest 读取完整 Approved normative 集合；不得静默省略来源、把 Informative/Verified/Superseded 文档当作新规范，或只检查本文件。
 

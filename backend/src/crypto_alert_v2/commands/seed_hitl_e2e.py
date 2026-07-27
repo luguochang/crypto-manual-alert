@@ -321,7 +321,8 @@ async def _seed_one(
         headers=headers,
     )
     try:
-        initial_input: dict[str, Any] | None
+        initial_input: dict[str, Any] | None = None
+        initial_command: dict[str, Any] | None = None
         if fixture == "canonical":
             await client.threads.update_state(
                 str(thread_id),
@@ -329,7 +330,7 @@ async def _seed_one(
                 as_node="build_artifact",
                 headers=headers,
             )
-            initial_input = None
+            initial_command = {"goto": "review_policy"}
         elif fixture == "deep_research":
             await client.threads.update_state(
                 str(thread_id),
@@ -337,13 +338,14 @@ async def _seed_one(
                 as_node="run_deep_research",
                 headers=headers,
             )
-            initial_input = None
+            initial_command = {"goto": "review_policy"}
         else:
             initial_input = {"completion_count": 0}
         raw_run = await client.runs.create(
             str(thread_id),
             assistant_id,
             input=initial_input,
+            command=initial_command,
             durability="sync",
             metadata=metadata,
             headers=headers,
@@ -495,6 +497,15 @@ async def _seed_one(
             "member_count": len(interrupt_set),
             "task_id": str(task_id),
             "product_run_id": str(product_run_id),
+            "official_thread_id": str(thread_id),
+            "official_run_id": handle.run_id,
+            "pause_id": str(pause_id),
+            "pause_version": 1,
+            "checkpoint_id": root_checkpoint.checkpoint_id,
+            "interrupt_ids": sorted(
+                item.interrupt_id for item in interrupt_set.interrupts
+            ),
+            "review_iteration": 1,
             "official_raw_status": raw_status,
             "normalized_status": normalized_status,
             "product_status": "waiting_human",

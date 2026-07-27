@@ -13,8 +13,9 @@ import os
 from pathlib import Path
 import re
 import sys
-import tempfile
 from uuid import UUID
+
+from crypto_alert_v2.atomic_io import atomic_write_text
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
@@ -706,23 +707,8 @@ def write_report(path: Path, report: dict[str, object]) -> None:
     if path.is_symlink():
         raise ValueError("observation output path must not be a symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(report, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    payload = json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+    atomic_write_text(path, payload, mode=0o600)
 
 
 def _timestamp(value: str) -> datetime:

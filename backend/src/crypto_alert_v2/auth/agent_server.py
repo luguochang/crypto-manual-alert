@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from hashlib import sha256
 import hmac
 import ipaddress
@@ -55,20 +56,27 @@ _CRON_CREATE_PAYLOAD_FIELDS = frozenset(
         "interrupt_after",
         "on_run_completed",
         "multitask_strategy",
+        "context",
+        "webhook",
     }
 )
 _CRON_UPDATE_PAYLOAD_FIELDS = _CRON_CREATE_PAYLOAD_FIELDS - {"assistant_id"}
+_CRON_CALLBACK_ENVELOPE_FIELDS = frozenset({"cron_id", "user_id"})
+_CRON_EMPTY_CHANNEL_FIELDS = frozenset({"context", "webhook"})
 
 
 @auth.authenticate
 async def authenticate(
-    request: Any, authorization: str | None
+    request: Any,
+    authorization: str | None = None,
 ) -> Auth.types.MinimalUserDict:
+    if isinstance(request, Mapping) and not hasattr(request, "client"):
+        authorization = request.get("authorization") or request.get("Authorization")
     settings = get_settings()
     mode = settings.app_environment.strip().lower()
     if mode in {"local", "test", "development"}:
-        peer = getattr(getattr(request, "client", None), "host", "")
-        if not _is_loopback(peer):
+        peer = getattr(getattr(request, "client", None), "host", None)
+        if peer is not None and not _is_loopback(peer):
             raise Auth.exceptions.HTTPException(status_code=401, detail="Unauthorized")
         local_token = settings.agent_server_local_token
         if local_token is None:
@@ -201,6 +209,24 @@ async def scope_thread_access(
     }
 
 
+@auth.on(resources="runs", actions=["read", "search", "delete"])
+async def scope_run_access(
+    ctx: Auth.types.AuthContext,
+    value: dict[str, Any],
+) -> bool:
+    del value
+    permissions = await _authorized_permissions(ctx)
+    action = str(getattr(ctx, "action", ""))
+    if action in {"read", "search"}:
+        _require_permission(permissions, "analysis:read")
+    elif action == "delete":
+        _require_permission(permissions, "analysis:write")
+    else:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+    _scope_from_permissions(permissions)
+    return True
+
+
 @auth.on.assistants.read
 async def allow_assistant_read(
     ctx: Auth.types.AuthContext,
@@ -227,11 +253,14 @@ async def scope_cron_create(
     permissions = await _authorized_permissions(ctx)
     _require_permission(permissions, "analysis:write")
     authority = _cron_authority(ctx, permissions)
-    payload = value.get("payload")
-    if not isinstance(payload, dict):
-        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
-    _require_cron_payload_fields(payload, allowed=_CRON_CREATE_PAYLOAD_FIELDS)
+    payload = _cron_callback_payload(
+        value,
+        allowed=_CRON_CREATE_PAYLOAD_FIELDS,
+        required=True,
+    )
+    assert payload is not None
     _require_server_cron_config(payload, cron_id=value.get("cron_id"))
+    _require_empty_cron_channels(payload)
     _scope_monitor_cron_payload(payload, authority)
     _bind_cron_run_permissions(payload, permissions)
     value["user_id"] = ctx.user.identity
@@ -263,12 +292,14 @@ async def scope_cron_update(
     permissions = await _authorized_permissions(ctx)
     _require_permission(permissions, "analysis:write")
     authority = _cron_authority(ctx, permissions)
-    payload = value.get("payload")
+    payload = _cron_callback_payload(
+        value,
+        allowed=_CRON_UPDATE_PAYLOAD_FIELDS,
+        required=False,
+    )
     if payload is not None:
-        if not isinstance(payload, dict):
-            raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
-        _require_cron_payload_fields(payload, allowed=_CRON_UPDATE_PAYLOAD_FIELDS)
         _require_server_cron_config(payload, cron_id=value.get("cron_id"))
+        _require_empty_cron_channels(payload)
         has_input = "input" in payload
         has_metadata = "metadata" in payload
         if has_input != has_metadata:
@@ -407,6 +438,33 @@ def _require_cron_payload_fields(
     allowed: frozenset[str],
 ) -> None:
     if set(payload) - allowed:
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+
+
+def _cron_callback_payload(
+    value: dict[str, Any],
+    *,
+    allowed: frozenset[str],
+    required: bool,
+) -> dict[str, Any] | None:
+    if "payload" in value:
+        payload = value.get("payload")
+        if payload is None and not required:
+            return None
+        if not isinstance(payload, dict):
+            raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
+        _require_cron_payload_fields(payload, allowed=allowed)
+        return payload
+
+    _require_cron_payload_fields(
+        value,
+        allowed=allowed | _CRON_CALLBACK_ENVELOPE_FIELDS,
+    )
+    return value
+
+
+def _require_empty_cron_channels(payload: dict[str, Any]) -> None:
+    if any(payload.get(field) not in (None, {}) for field in _CRON_EMPTY_CHANNEL_FIELDS):
         raise Auth.exceptions.HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -559,6 +617,7 @@ __all__ = [
     "scope_cron_read",
     "scope_cron_search",
     "scope_cron_update",
+    "scope_run_access",
     "scope_store",
     "scope_thread_access",
     "scope_thread_create",

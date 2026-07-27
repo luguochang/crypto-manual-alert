@@ -4,15 +4,18 @@ import {
   cancelRun,
   cancelTask,
   createAnalysis,
+  createDecisionRequest,
   createDeepResearch,
   forkTask,
   getHome,
+  getUsageGovernance,
   getRun,
   getTask,
   listArtifacts,
   listNotifications,
   listRuns,
   requestNotificationResend,
+  reconcileUsage,
   respondAllInterrupts,
   respondInboxReview,
   retryTask,
@@ -114,6 +117,81 @@ describe("Product API client", () => {
       horizon: "7d",
       query_text: "研究 BTC 机构采用趋势和主要反证。",
     });
+  });
+
+  it("submits a typed decision envelope through the unified Product admission", async () => {
+    const fetcher = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      void input;
+      void init;
+      return Response.json({
+      request: {
+        schema_version: "1.0",
+        entry_kind: "manual",
+        actor_id: "server-user",
+        workspace_id: "server-workspace",
+        session_id: "session-1",
+        intent: "market_analysis",
+        intent_confidence: 1,
+        complexity: "standard",
+        symbol: "BTC-USDT-SWAP",
+        horizon: "4h",
+        query_text: "Assess BTC risk.",
+        requested_action: null,
+        position: null,
+        risk: { mode: "balanced" },
+        side_effects: {
+          live_market_data: true,
+          live_web_research: true,
+          product_writes: true,
+          external_notifications: false,
+          trade_execution: false,
+        },
+        source_reference_id: null,
+      },
+      route: {
+        status: "admitted",
+        complexity: "standard",
+        task_type: "market_analysis",
+        missing_slots: [],
+        reason: "request admitted to existing Product execution",
+      },
+        task: taskProjection("queued"),
+      });
+    });
+
+    const admission = await createDecisionRequest({
+      entry_kind: "manual",
+      session_id: "session-1",
+      intent: "market_analysis",
+      intent_confidence: 1,
+      complexity: "standard",
+      symbol: "BTC-USDT-SWAP",
+      horizon: "4h",
+      query_text: "Assess BTC risk.",
+      requested_action: null,
+      position: null,
+      risk: { mode: "balanced" },
+      side_effects: {
+        live_market_data: true,
+        live_web_research: true,
+        product_writes: true,
+        external_notifications: false,
+        trade_execution: false,
+      },
+      source_reference_id: null,
+    }, fetcher, "decision-request-1");
+
+    expect(admission.route.status).toBe("admitted");
+    expect(admission.task?.status).toBe("queued");
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/product/api/v2/decision-requests",
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).not.toHaveProperty(
+      "actor_id",
+    );
   });
 
   it("encodes task IDs and exposes readable HTTP failures", async () => {
@@ -603,6 +681,61 @@ describe("Product API client", () => {
       "/api/product/api/v2/watchlist/BTC-USDT-SWAP",
     );
     expect(fetcher.mock.calls[1]?.[1]?.method).toBe("DELETE");
+  });
+
+  it("loads typed usage limits and requests an immutable reconciliation", async () => {
+    const totals = {
+      agent_admission: 2,
+      trigger: 1,
+      model_token: 300,
+      search_request: 4,
+      runtime_millisecond: 5000,
+      storage_byte: 6000,
+    };
+    const reconciliation = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      period_start: "2026-07-01T00:00:00Z",
+      status: "reconciled" as const,
+      source_totals: totals,
+      ledger_totals: totals,
+      discrepancies: {},
+      source_hash: "a".repeat(64),
+      ledger_hash: "b".repeat(64),
+      repair_applied: true,
+      created_at: "2026-07-23T15:00:00Z",
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      if (String(input).endsWith("/reconciliations")) {
+        return Response.json(reconciliation, { status: 201 });
+      }
+      return Response.json({
+        period_start: "2026-07-01T00:00:00Z",
+        entitlement: {
+          allowed_task_types: ["market_analysis", "deep_research", "candidate_review"],
+          active_monitor_limit: 20,
+          min_interval_seconds: 300,
+          max_concurrent_tasks: 5,
+          max_retention_days: 3650,
+          limits: totals,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: null,
+        },
+        totals,
+        latest_reconciliation: reconciliation,
+      });
+    });
+
+    const usage = await getUsageGovernance(fetcher);
+    const receipt = await reconcileUsage(fetcher);
+
+    expect(usage.totals.model_token).toBe(300);
+    expect(receipt.status).toBe("reconciled");
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/product/api/v2/usage");
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
+      "/api/product/api/v2/usage/reconciliations",
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({ repair: true });
   });
 });
 

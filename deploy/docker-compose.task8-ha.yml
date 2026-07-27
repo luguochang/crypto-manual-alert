@@ -1,0 +1,35 @@
+services:
+  langgraph-api:
+    env_file: !reset []
+    ports: !reset []
+  command-worker:
+    env_file: !reset []
+  ha-gateway:
+    image: public.ecr.aws/docker/library/haproxy:3.0-alpine@sha256:dee54db8b27cd6c21519ea4f0ba0604f3742e8e7369bc16fb5b69133dec3f47f
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      AEGRA_REPLICA_A: "${COMPOSE_PROJECT_NAME}-langgraph-api-1"
+      AEGRA_REPLICA_B: "${COMPOSE_PROJECT_NAME}-langgraph-api-2"
+    volumes:
+      - type: bind
+        source: ./deploy/task8-ha-haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -T 2 -O /dev/null http://127.0.0.1:8080/health || exit 1
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+    depends_on:
+      langgraph-api:
+        condition: service_healthy

@@ -11,6 +11,10 @@ from pydantic import (
 )
 
 from crypto_alert_v2.domain.models import Action, Artifact, Symbol
+from crypto_alert_v2.domain.decision_request import (
+    DecisionRequest,
+    route_decision_request,
+)
 from crypto_alert_v2.domain.deep_research import (
     DeepResearchArtifact,
     DeepResearchReport,
@@ -102,6 +106,30 @@ class DeepResearchRequest(BaseModel):
     @classmethod
     def redact_sensitive_query(cls, value: str) -> str:
         return redact_text(value)
+
+
+def graph_request_for_decision(
+    request: DecisionRequest,
+) -> AnalysisRequest | DeepResearchRequest:
+    """Adapt an admitted Product request to the existing canonical Graph DTOs."""
+
+    route = route_decision_request(request)
+    if route.status != "admitted" or route.task_type is None:
+        raise ValueError(f"decision request is not executable: {route.reason}")
+    assert request.symbol is not None
+    assert request.horizon is not None
+    if route.task_type == "deep_research":
+        return DeepResearchRequest(
+            symbol=request.symbol,
+            horizon=request.horizon,
+            query_text=request.query_text,
+        )
+    return AnalysisRequest(
+        symbol=request.symbol,
+        horizon=request.horizon,
+        query_text=request.query_text,
+        notify=False,
+    )
 
 
 class ArtifactEdit(BaseModel):

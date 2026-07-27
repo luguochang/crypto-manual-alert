@@ -203,7 +203,67 @@ DATA_LIFECYCLE_DELETION_STATUSES = (
     "failed",
 )
 
+DATA_LIFECYCLE_RECEIPT_SYSTEMS = (
+    "product_db",
+    "checkpoint",
+    "store",
+    "object_storage",
+    "search",
+    "langsmith",
+    "langfuse",
+    "logs",
+    "backups",
+)
+
+DATA_LIFECYCLE_RECEIPT_PHASES = (
+    "delete",
+    "survivor_scan",
+    "retention_queue",
+)
+
+DATA_LIFECYCLE_RECEIPT_OUTCOMES = (
+    "succeeded",
+    "not_applicable",
+    "pending_external",
+    "pending_expiry",
+    "failed",
+)
+
 DATA_LIFECYCLE_SCOPE = "user_data"
+
+MEMORY_PURPOSES = (
+    "session_clarification",
+    "profile",
+    "strategy_config",
+    "process_lesson",
+    "event",
+    "badcase",
+)
+MEMORY_SCOPES = ("session", "workspace")
+MEMORY_DELETION_STATUSES = ("queued", "running", "succeeded", "failed")
+OUTCOME_STATUSES = ("scheduled", "pending", "matured", "insufficient", "failed")
+OUTCOME_BASELINES = ("decision", "hold", "no_trade")
+POSTMORTEM_CATEGORIES = (
+    "negative_feedback",
+    "operator_postmortem",
+    "evaluation_badcase",
+)
+POSTMORTEM_STATUSES = ("open", "frozen", "closed")
+IMPROVEMENT_DATASET_STATUSES = ("draft", "frozen")
+IMPROVEMENT_EXPERIMENT_STATUSES = ("succeeded", "failed")
+IMPROVEMENT_CANDIDATE_STATUSES = (
+    "draft",
+    "evaluated",
+    "pending_review",
+    "approved",
+    "rejected",
+    "shadow",
+    "active",
+    "rolled_back",
+)
+IMPROVEMENT_REVIEW_STATUSES = ("pending", "approved", "rejected")
+IMPROVEMENT_SHADOW_STATUSES = ("running", "passed", "failed")
+IMPROVEMENT_RELEASE_ACTIONS = ("promoted", "rolled_back")
 
 
 def _sql_values(values: tuple[str, ...]) -> str:
@@ -2115,6 +2175,30 @@ class WorkspaceEntitlement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_workspace_entitlements_monthly_trigger_limit",
         ),
         CheckConstraint(
+            "monthly_agent_admission_limit >= 0",
+            name="ck_workspace_entitlements_monthly_agent_admission_limit",
+        ),
+        CheckConstraint(
+            "monthly_model_token_limit >= 0",
+            name="ck_workspace_entitlements_monthly_model_token_limit",
+        ),
+        CheckConstraint(
+            "monthly_search_request_limit >= 0",
+            name="ck_workspace_entitlements_monthly_search_request_limit",
+        ),
+        CheckConstraint(
+            "monthly_runtime_millisecond_limit >= 0",
+            name="ck_workspace_entitlements_monthly_runtime_millisecond_limit",
+        ),
+        CheckConstraint(
+            "storage_byte_limit >= 0",
+            name="ck_workspace_entitlements_storage_byte_limit",
+        ),
+        CheckConstraint(
+            "max_retention_days >= 1",
+            name="ck_workspace_entitlements_max_retention_days",
+        ),
+        CheckConstraint(
             "valid_until IS NULL OR valid_until > valid_from",
             name="ck_workspace_entitlements_valid_window",
         ),
@@ -2149,6 +2233,35 @@ class WorkspaceEntitlement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     min_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False)
     monthly_trigger_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    allowed_task_types: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: ["market_analysis", "deep_research", "candidate_review"],
+        server_default=text(
+            "'[\"market_analysis\",\"deep_research\",\"candidate_review\"]'::jsonb"
+        ),
+    )
+    monthly_agent_admission_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10_000, server_default=text("10000")
+    )
+    monthly_model_token_limit: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=50_000_000, server_default=text("50000000")
+    )
+    monthly_search_request_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100_000, server_default=text("100000")
+    )
+    monthly_runtime_millisecond_limit: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=3_600_000_000,
+        server_default=text("3600000000"),
+    )
+    storage_byte_limit: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=10_737_418_240, server_default=text("10737418240")
+    )
+    max_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3650, server_default=text("3650")
+    )
     valid_from: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2156,7 +2269,7 @@ class WorkspaceEntitlement(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class UsageLedgerEntry(UUIDPrimaryKeyMixin, Base):
-    """Immutable Product usage accounting; one row represents one admitted trigger."""
+    """Immutable Product usage accounting for admissions and measured resources."""
 
     __tablename__ = "usage_ledger_entries"
     __table_args__ = (
@@ -2183,6 +2296,10 @@ class UsageLedgerEntry(UUIDPrimaryKeyMixin, Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint("quantity >= 1", name="ck_usage_ledger_entries_quantity"),
+        CheckConstraint(
+            "source_receipt_hash IS NULL OR length(source_receipt_hash) = 64",
+            name="ck_usage_ledger_entries_source_receipt_hash",
+        ),
         UniqueConstraint(
             "tenant_id",
             "workspace_id",
@@ -2200,6 +2317,13 @@ class UsageLedgerEntry(UUIDPrimaryKeyMixin, Base):
             "tenant_id",
             "workspace_id",
             "monitor_id",
+        ),
+        Index(
+            "ix_usage_ledger_entries_tenant_workspace_resource",
+            "tenant_id",
+            "workspace_id",
+            "resource_type",
+            "resource_id",
         ),
     )
 
@@ -2234,6 +2358,20 @@ class UsageLedgerEntry(UUIDPrimaryKeyMixin, Base):
     unit: Mapped[str] = mapped_column(
         String(32), nullable=False, default="trigger", server_default=text("'trigger'")
     )
+    operation_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="monitor_trigger",
+        server_default=text("'monitor_trigger'"),
+    )
+    resource_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="monitor_trigger",
+        server_default=text("'monitor_trigger'"),
+    )
+    resource_id: Mapped[str | None] = mapped_column(String(255))
+    source_receipt_hash: Mapped[str | None] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     ledger_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
@@ -2982,17 +3120,1166 @@ class DataDeletionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_error: Mapped[str | None] = mapped_column(String(500))
 
 
+class DataDeletionReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Append-only evidence for one deletion or survivor-scan step."""
+
+    __tablename__ = "data_deletion_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            f"system IN ({_sql_values(DATA_LIFECYCLE_RECEIPT_SYSTEMS)})",
+            name="ck_data_deletion_receipts_system",
+        ),
+        CheckConstraint(
+            f"phase IN ({_sql_values(DATA_LIFECYCLE_RECEIPT_PHASES)})",
+            name="ck_data_deletion_receipts_phase",
+        ),
+        CheckConstraint(
+            f"outcome IN ({_sql_values(DATA_LIFECYCLE_RECEIPT_OUTCOMES)})",
+            name="ck_data_deletion_receipts_outcome",
+        ),
+        CheckConstraint(
+            "attempt >= 1 AND affected_count >= 0 AND survivor_count >= 0",
+            name="ck_data_deletion_receipts_counts",
+        ),
+        UniqueConstraint(
+            "deletion_job_id",
+            "system",
+            "phase",
+            "attempt",
+            name="uq_data_deletion_receipts_job_system_phase_attempt",
+        ),
+        Index(
+            "ix_data_deletion_receipts_job_created",
+            "deletion_job_id",
+            "created_at",
+        ),
+        Index(
+            "ix_data_deletion_receipts_actor_system",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "system",
+            "phase",
+        ),
+    )
+
+    deletion_job_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    system: Mapped[str] = mapped_column(String(32), nullable=False)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    affected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    survivor_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    reference: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    receipt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MemoryEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "memory_entries"
+    __table_args__ = (
+        CheckConstraint(
+            f"scope IN ({_sql_values(MEMORY_SCOPES)})",
+            name="ck_memory_entries_scope",
+        ),
+        CheckConstraint(
+            f"purpose IN ({_sql_values(MEMORY_PURPOSES)})",
+            name="ck_memory_entries_purpose",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "session_id",
+            "purpose",
+            "memory_key",
+            name="uq_memory_entries_actor_session_purpose_key",
+        ),
+        Index(
+            "ix_memory_entries_actor_enabled_expiry",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "enabled",
+            "expires_at",
+        ),
+        Index(
+            "ix_memory_entries_workspace_purpose",
+            "tenant_id",
+            "workspace_id",
+            "purpose",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_id: Mapped[str | None] = mapped_column(String(255))
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(64), nullable=False)
+    memory_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    content: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_artifact_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.artifacts.id", ondelete="SET NULL"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryDeletionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "memory_deletion_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(MEMORY_DELETION_STATUSES)})",
+            name="ck_memory_deletion_jobs_status",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_memory_deletion_jobs_actor_idempotency",
+        ),
+        Index(
+            "ix_memory_deletion_jobs_dispatch",
+            "status",
+            "requested_at",
+        ),
+        Index(
+            "ix_memory_deletion_jobs_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    memory_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.memory_entries.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="queued", server_default=text("'queued'")
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+
+
+class OutcomeObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "outcome_observations"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(OUTCOME_STATUSES)})",
+            name="ck_outcome_observations_status",
+        ),
+        CheckConstraint(
+            f"baseline IN ({_sql_values(OUTCOME_BASELINES)})",
+            name="ck_outcome_observations_baseline",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "artifact_version_id",
+            "horizon",
+            name="uq_outcome_observations_artifact_horizon",
+        ),
+        Index(
+            "ix_outcome_observations_maturation",
+            "status",
+            "maturation_at",
+        ),
+        Index(
+            "ix_outcome_observations_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    artifact_version_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.artifact_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="scheduled", server_default=text("'scheduled'")
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    baseline: Mapped[str] = mapped_column(String(32), nullable=False)
+    predicted_probability: Mapped[Decimal | None] = mapped_column(Numeric(12, 10))
+    realized_label: Mapped[Decimal | None] = mapped_column(Numeric(12, 10))
+    horizon: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="exchange_native", server_default=text("'exchange_native'")
+    )
+    maturation_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(255))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    high_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    low_price: Mapped[Decimal | None] = mapped_column(Numeric(30, 12))
+    fees: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False, default=Decimal("0"), server_default=text("0"))
+    slippage: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False, default=Decimal("0"), server_default=text("0"))
+    funding: Mapped[Decimal] = mapped_column(Numeric(30, 12), nullable=False, default=Decimal("0"), server_default=text("0"))
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    source_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class PostmortemCase(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "postmortem_cases"
+    __table_args__ = (
+        CheckConstraint(
+            f"category IN ({_sql_values(POSTMORTEM_CATEGORIES)})",
+            name="ck_postmortem_cases_category",
+        ),
+        CheckConstraint(
+            f"status IN ({_sql_values(POSTMORTEM_STATUSES)})",
+            name="ck_postmortem_cases_status",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_postmortem_cases_source_hash",
+        ),
+        UniqueConstraint("feedback_id", name="uq_postmortem_cases_feedback"),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_postmortem_cases_owner_idempotency",
+        ),
+        Index(
+            "ix_postmortem_cases_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    feedback_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.feedback.id", ondelete="SET NULL"),
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    artifact_version_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.artifact_versions.id", ondelete="SET NULL"),
+    )
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="open", server_default=text("'open'")
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    root_cause: Mapped[str | None] = mapped_column(Text)
+    expected_behavior: Mapped[str | None] = mapped_column(Text)
+    actual_behavior: Mapped[str | None] = mapped_column(Text)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class FrozenReplayRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "frozen_replay_records"
+    __table_args__ = (
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_frozen_replay_records_source_hash",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(packet) = 'object' AND "
+            "packet->>'allow_live_fetch' = 'false' AND "
+            "packet->>'allow_live_side_effects' = 'false'",
+            name="ck_frozen_replay_records_no_live_effects",
+        ),
+        UniqueConstraint(
+            "postmortem_id",
+            name="uq_frozen_replay_records_postmortem",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "source_hash",
+            name="uq_frozen_replay_records_actor_hash",
+        ),
+        Index(
+            "ix_frozen_replay_records_actor_created",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    postmortem_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.postmortem_cases.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    artifact_version_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.artifact_versions.id", ondelete="SET NULL"),
+    )
+    schema_version: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="frozen-replay-v1"
+    )
+    packet: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rule_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class ImprovementDataset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "improvement_datasets"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(IMPROVEMENT_DATASET_STATUSES)})",
+            name="ck_improvement_datasets_status",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_improvement_datasets_source_hash",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_improvement_datasets_actor_idempotency",
+        ),
+        Index(
+            "ix_improvement_datasets_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ImprovementDatasetMember(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "improvement_dataset_members"
+    __table_args__ = (
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_improvement_dataset_members_source_hash",
+        ),
+        UniqueConstraint(
+            "dataset_id",
+            "replay_id",
+            name="uq_improvement_dataset_members_replay",
+        ),
+        UniqueConstraint(
+            "dataset_id",
+            "case_name",
+            name="uq_improvement_dataset_members_case",
+        ),
+        UniqueConstraint(
+            "dataset_id",
+            "ordinal",
+            name="uq_improvement_dataset_members_ordinal",
+        ),
+        Index(
+            "ix_improvement_dataset_members_actor_dataset",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "dataset_id",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    dataset_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_datasets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    replay_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.frozen_replay_records.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    case_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class UsageReconciliation(UUIDPrimaryKeyMixin, Base):
+    """Append-only comparison between Product source facts and the usage ledger."""
+
+    __tablename__ = "usage_reconciliations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('reconciled', 'discrepant')",
+            name="ck_usage_reconciliations_status",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64 AND length(ledger_hash) = 64",
+            name="ck_usage_reconciliations_hashes",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "period_start",
+            "source_hash",
+            "ledger_hash",
+            name="uq_usage_reconciliations_snapshot",
+        ),
+        Index(
+            "ix_usage_reconciliations_tenant_workspace_period",
+            "tenant_id",
+            "workspace_id",
+            "period_start",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_totals: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    ledger_totals: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    discrepancies: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ledger_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    repair_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebhookIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "webhook_integrations"
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(accepted_key_ids) = 'array'",
+            name="ck_webhook_integrations_key_ids_array",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "name",
+            name="uq_webhook_integrations_actor_name",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "id",
+            name="uq_webhook_integrations_actor_id",
+        ),
+        Index(
+            "ix_webhook_integrations_tenant_workspace_active",
+            "tenant_id",
+            "workspace_id",
+            "active",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    active_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    accepted_key_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+
+
+class WebhookReplayNonce(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "webhook_replay_nonces"
+    __table_args__ = (
+        UniqueConstraint(
+            "integration_id",
+            "nonce_hash",
+            name="uq_webhook_replay_nonces_integration_nonce",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "workspace_id", "owner_user_id", "integration_id"],
+            [
+                f"{PRODUCT_SCHEMA}.webhook_integrations.tenant_id",
+                f"{PRODUCT_SCHEMA}.webhook_integrations.workspace_id",
+                f"{PRODUCT_SCHEMA}.webhook_integrations.owner_user_id",
+                f"{PRODUCT_SCHEMA}.webhook_integrations.id",
+            ],
+            name="fk_webhook_replay_nonces_integration_scope",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_webhook_replay_nonces_actor_expiry",
+            "tenant_id",
+            "workspace_id",
+            "expires_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    integration_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        nullable=False,
+    )
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WebhookDeliveryAudit(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "webhook_delivery_audits"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('accepted', 'rejected', 'replayed')",
+            name="ck_webhook_delivery_audits_status",
+        ),
+        CheckConstraint(
+            "length(nonce_hash) = 64 AND length(payload_hash) = 64",
+            name="ck_webhook_delivery_audits_hashes",
+        ),
+        Index(
+            "ix_webhook_delivery_audits_integration_received",
+            "integration_id",
+            "received_at",
+        ),
+        Index(
+            "ix_webhook_delivery_audits_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    integration_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.webhook_integrations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(128))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ImprovementCandidate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "improvement_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(IMPROVEMENT_CANDIDATE_STATUSES)})",
+            name="ck_improvement_candidates_status",
+        ),
+        CheckConstraint(
+            "length(version_hash) = 64",
+            name="ck_improvement_candidates_version_hash",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "version_hash",
+            name="uq_improvement_candidates_actor_hash",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_improvement_candidates_actor_idempotency",
+        ),
+        Index(
+            "ix_improvement_candidates_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    candidate_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    rollback_target_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    diff: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    version_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ImprovementExperiment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "improvement_experiments"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(IMPROVEMENT_EXPERIMENT_STATUSES)})",
+            name="ck_improvement_experiments_status",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_improvement_experiments_source_hash",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_improvement_experiments_actor_idempotency",
+        ),
+        Index(
+            "ix_improvement_experiments_actor_candidate",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "candidate_id",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    dataset_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_datasets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    git_revision: Mapped[str] = mapped_column(String(255), nullable=False)
+    case_results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    gate_report: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ImprovementReview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "improvement_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(IMPROVEMENT_REVIEW_STATUSES)})",
+            name="ck_improvement_reviews_status",
+        ),
+        UniqueConstraint(
+            "candidate_id",
+            name="uq_improvement_reviews_candidate",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_improvement_reviews_actor_idempotency",
+        ),
+        UniqueConstraint(
+            "official_thread_id",
+            name="uq_improvement_reviews_official_thread",
+        ),
+        Index(
+            "ix_improvement_reviews_actor_status",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tasks.id", ondelete="RESTRICT"),
+    )
+    run_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.runs.id", ondelete="RESTRICT"),
+    )
+    interrupt_pause_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.interrupt_pauses.id", ondelete="RESTRICT"),
+    )
+    reviewer_user_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="SET NULL"),
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    official_assistant_id: Mapped[str | None] = mapped_column(String(255))
+    official_thread_id: Mapped[str | None] = mapped_column(String(255))
+    official_run_id: Mapped[str | None] = mapped_column(String(255))
+    official_interrupt_id: Mapped[str | None] = mapped_column(String(255))
+    interrupt_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    checkpoint: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    response: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ImprovementShadowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "improvement_shadow_runs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_sql_values(IMPROVEMENT_SHADOW_STATUSES)})",
+            name="ck_improvement_shadow_runs_status",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_improvement_shadow_runs_source_hash",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "idempotency_key",
+            name="uq_improvement_shadow_runs_actor_idempotency",
+        ),
+        Index(
+            "ix_improvement_shadow_runs_actor_candidate",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "candidate_id",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    baseline_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    minimum_runs: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_runs: Mapped[int] = mapped_column(Integer, nullable=False)
+    comparison: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ImprovementReleaseEvent(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "improvement_release_events"
+    __table_args__ = (
+        CheckConstraint(
+            f"action IN ({_sql_values(IMPROVEMENT_RELEASE_ACTIONS)})",
+            name="ck_improvement_release_events_action",
+        ),
+        CheckConstraint(
+            "length(source_hash) = 64",
+            name="ck_improvement_release_events_source_hash",
+        ),
+        UniqueConstraint(
+            "candidate_id",
+            "action",
+            name="uq_improvement_release_events_candidate_action",
+        ),
+        Index(
+            "ix_improvement_release_events_actor_created",
+            "tenant_id",
+            "workspace_id",
+            "owner_user_id",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.tenants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    review_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_reviews.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    shadow_run_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(f"{PRODUCT_SCHEMA}.improvement_shadow_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    to_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    rollback_target_version: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 __all__ = [
     "Artifact",
     "ArtifactVersion",
     "Decision",
     "DATA_LIFECYCLE_DELETION_STATUSES",
     "DATA_LIFECYCLE_EXPORT_STATUSES",
+    "DATA_LIFECYCLE_RECEIPT_OUTCOMES",
+    "DATA_LIFECYCLE_RECEIPT_PHASES",
+    "DATA_LIFECYCLE_RECEIPT_SYSTEMS",
     "DATA_LIFECYCLE_SCOPE",
     "DataDeletionJob",
+    "DataDeletionReceipt",
     "DataExportJob",
     "DataLifecyclePolicy",
+    "MEMORY_DELETION_STATUSES",
+    "MEMORY_PURPOSES",
+    "MEMORY_SCOPES",
+    "MemoryDeletionJob",
+    "MemoryEntry",
     "Feedback",
+    "FrozenReplayRecord",
+    "IMPROVEMENT_CANDIDATE_STATUSES",
+    "IMPROVEMENT_DATASET_STATUSES",
+    "IMPROVEMENT_EXPERIMENT_STATUSES",
+    "IMPROVEMENT_RELEASE_ACTIONS",
+    "IMPROVEMENT_REVIEW_STATUSES",
+    "IMPROVEMENT_SHADOW_STATUSES",
+    "ImprovementCandidate",
+    "ImprovementDataset",
+    "ImprovementDatasetMember",
+    "ImprovementExperiment",
+    "ImprovementReleaseEvent",
+    "ImprovementReview",
+    "ImprovementShadowRun",
     "INTERRUPT_PAUSE_STATUSES",
     "INTERRUPT_STATUSES",
     "InterruptPause",
@@ -3010,6 +4297,12 @@ __all__ = [
     "MonitorDestination",
     "MonitorTrigger",
     "OBSERVED_TERMINAL_STATUSES",
+    "OUTCOME_BASELINES",
+    "OUTCOME_STATUSES",
+    "OutcomeObservation",
+    "POSTMORTEM_CATEGORIES",
+    "POSTMORTEM_STATUSES",
+    "PostmortemCase",
     "REVIEW_POLICIES",
     "RUN_STATUSES",
     "Run",
@@ -3021,6 +4314,10 @@ __all__ = [
     "Thread",
     "User",
     "UsageLedgerEntry",
+    "UsageReconciliation",
+    "WebhookDeliveryAudit",
+    "WebhookIntegration",
+    "WebhookReplayNonce",
     "WatchlistItem",
     "WebEvidence",
     "Workspace",

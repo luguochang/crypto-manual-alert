@@ -1,12 +1,149 @@
 # V2 Implementation Status Ledger
 
+## 2026-07-23 Agent product-mainline completion update
+
+The six user-approved product-mainline groups, excluding external notification
+delivery, now have current-source local acceptance evidence:
+
+- unified typed request semantics and fail-closed intent/complexity/slot policy;
+- Scheduled Monitor through official Aegra Cron, Product admission, canonical
+  LangGraph HITL, committed Artifact, exchange-native matured Outcome and process
+  restart;
+- Product Memory controls and Outcome maturation/scoring with explicit sample/window
+  limits;
+- Postmortem, Frozen Replay, Dataset, Experiment, candidate review through an official
+  LangGraph interrupt, frozen Shadow, promotion and rollback with append-only events;
+- entitlement/quota, immutable usage/reconciliation, signed replay-protected Webhook,
+  file Secret Store and per-system lifecycle receipts/survivor scans;
+- current-image local Aegra durability/HA, PostgreSQL backup/restore, local SLO
+  observation, CycloneDX SBOM, offline Cosign proof and fail-closed Trivy audit.
+
+The current reproducible local stack uses backend image
+`sha256:a8e5a0cf5516625445817dc762925086cf2727b375af613426ed1fe380e636c4`
+and frontend image
+`sha256:203d5c92ab238e4d75404f8e1880c641c3616d1da2dd54ebf12c12fb3f889d7b`.
+API, readiness, worker, frontend, both PostgreSQL services and Redis are healthy.
+Desktop and Pixel 7 real-provider Product runs passed; the latest browser-inspected
+Run `e3a47596-18a2-4bcd-ab80-de0062b7f12c` shows a committed BTC 4h result with real
+OKX data, four Web citations, evidence/risk gates and model-call audit. Current broad
+regression is backend unit `240 passed`, backend contract `834 passed, 1 skipped`,
+frontend `472 passed` plus typecheck/lint/build, and repository deployment/tool checks
+green. The single skip remains an unproved live Agent Protocol capability.
+
+This closes the repository/local product work at its stated proof level, not the
+production release. Public trusted HTTPS, hosted OIDC identities, hosted telemetry and
+formal SLOs, production PITR/cross-region DR, registry digest, protected signer,
+Rekor/timestamp, signed OCI attestation, immutable candidate and independent review
+remain outside the evidence available on this workstation. The current image also
+retains 4 Critical and 19 High Trivy findings with no available fixes, so its release
+gate is RED. Overall status remains `V2: PARTIAL`; `Production Ready: NO`.
+
+## 2026-07-22 Delivery-gate audit
+
+The current evidence-backed delivery inventory is maintained in
+`docs/v2/21-current-delivery-gap-report.md`. The real local Product Agent mainline and
+all currently executable local source, database, frontend, backup, load and
+supply-chain gates are green at their stated proof levels. Hosted identity,
+production infrastructure, formal SLO/security, protected signing and immutable
+release governance remain open. The overall verdict remains `V2: PARTIAL`;
+`Production Ready: NO`.
+
+## 2026-07-22 Redis-enabled Product mainline update
+
+Fresh evidence at
+`E:\project\study\codex\crypto\real-agent-mainflow-20260722-04` now proves the local
+Desktop and Pixel 7 real-provider Deep Research Product path on Aegra `0.9.24` with
+`REDIS_BROKER_ENABLED=true`. Both cases pass admission, real Tavily/model research,
+first HITL, an actual Aegra process replacement, same Task/Thread/Run/checkpoint
+recovery, edit, second HITL, approval and committed Artifact. The database contains two
+successful Tasks, six Commands, six Runs, four resolved Pauses, 48 Evidence rows and two
+committed ArtifactVersions. Aegra logs prove Redis broker initialization, BLPOP worker
+enqueue/pickup/completion and lease-reaper startup; all 69 retained artifacts pass an
+independent SHA-256 audit and owned containers are removed.
+
+This closes the previously open local real-Provider Product Graph + Redis broker +
+checkpoint restart mainline. It does not prove active Provider Run worker-kill lease
+expiry/reaping, Product retry/cancel/fork across that failure, hosted OIDC/HTTPS,
+multi-instance ingress/rolling upgrade, PITR/DR, load/SLO or immutable release
+attestation. The separate QA worker-kill proof cannot be merged into the Product claim.
+Current verdict remains `V2: PARTIAL`; `Production Ready: NO`.
+
 > authority_class: informative
 >
-> 当前交接校正：2026-07-20（Asia/Shanghai）；规范实现分支为 `codex/v2-production-completion`，稳定的完整代码 checkpoint 为 `6739f817c648c233944c86c99ae1d9cfa9fb0b37`。当前远程 HEAD 必须通过 `git fetch --all --prune`、`git switch codex/v2-production-completion`、`git pull --ff-only origin codex/v2-production-completion` 后现场确认。本文后续较早日期的段落保留当时的审计上下文，其中出现的“未提交”“旧 HEAD”或“未 push”只表示对应历史时点，不代表当前 Git 状态。
+> 当前交接校正：2026-07-21（Asia/Shanghai）；规范实现分支为 `codex/v2-production-completion`，稳定的完整代码 checkpoint 为 `6739f817c648c233944c86c99ae1d9cfa9fb0b37`。当前远程 HEAD 必须通过 `git fetch --all --prune`、`git switch codex/v2-production-completion`、`git pull --ff-only origin codex/v2-production-completion` 后现场确认。本文后续较早日期的段落保留当时的审计上下文，其中出现的“未提交”“旧 HEAD”或“未 push”只表示对应历史时点，不代表当前 Git 状态。
 >
 > 本文只记录当前工作树的实施状态和证据边界，不修改、替代或追认 `13-v2-final-rebuild-spec.md` 与 `14-v2-final-implementation-plan.md` 的 normative 要求。
 
 ## 0. 当前证据更正
+
+### 2026-07-21 Aegra 开源 Agent Server 选型与本地耐久证据
+
+用户明确拒绝商业 Agent Server 授权后，ADR 0011 已选择 Apache-2.0 的 Aegra
+`0.9.24` 作为自托管 Agent Protocol Server，取代 ADR 0008 的 LangSmith Deployment
+Cloud 推荐目标。生产依赖通过互斥 `aegra` extra 固定
+`aegra-api/aegra-cli==0.9.24`，镜像不包含商业 `langgraph-api`、in-memory runtime、
+pytest、测试目录或 `.env`；`backend/aegra.json` 仍只注册唯一 canonical Graph、Auth
+和 Product custom app。LangChain、LangGraph、Deep Agents、checkpointer、Python/JS SDK
+和 React ownership 没有被替换。
+
+正式兼容改动已覆盖 Aegra primitive metadata、Run read/delete Auth、
+`values/updates/custom` stream mode 和独立无 `.env` 的 Aegra 配置。真实 Tavily/模型
+Deep Research Product 主链在 Aegra local executor 下为 Desktop/Pixel 7
+`2 passed`、`0 skipped`，包含 2 个成功 Task、6 个 Runs、4 次 HITL、48 条真实
+Evidence 和 2 个 committed ArtifactVersion；57 个 evidence manifest hash 与 secret
+scan 均通过。该结果仍是本地 real-provider evidence，不是 Redis/hosted 证据。
+
+随后使用 QA-only `aegra_durability_fixture`、独立 PostgreSQL、Valkey-compatible Redis
+和生产 backend 镜像完成真实 worker kill/restart：Run 在首个 LangGraph checkpoint
+可见后被强杀；Aegra lease reaper 记录 1 个 crashed Run、递增 retry、重新入队并由
+worker 继续同一 Thread/Run。最终原 checkpoint 仍在 5 条 public history 中，
+`prepared_count=1`、`completion_count=1`、terminal `succeeded`。同一恢复 Run 再通过
+官方 `ProtocolSseTransportAdapter` 做 `since` replay，事件数 `4 -> 3`，
+`seq/event_id/method` 完全一致。实验临时容器、卷、网络、数据库和角色均已清理。
+
+可复用探针现拆为 `probe_aegra_durability.sh`、`probe_aegra_ha.sh`、官方 SDK Python
+client、官方 Protocol transport Node client 和仅采样 `/health` 的独立可用性 client；
+静态 Task 8 contracts 为 `17 passed`。锁定 Compose 已在
+`aegra-task8-evidence-20260721-resume-18` 完成 cancel、独立 checkpoint-object fork、
+Product PostgreSQL provisioned `token_use=user` 主体矩阵（owner `200`、同 workspace peer
+`404`、cross-tenant `404`、subject/context mismatch 经 Aegra auth 归一化为 `401`）、
+server authority metadata overwrite、single interrupt、同 superstep root + depth-1 子图
+batch interrupt、worker kill/reaper 和 `since` replay。该证据还以 official
+`Command.goto("review_policy")` 从受控 post-provider state 建立 canonical `crypto_analysis`
+checkpoint，并证明真实 server restart 后 checkpoint/interrupt identity 不变、官方 approve
+resume 产生 distinct Run 且达到 `succeeded + committed`；
+`aegra-task8-ha-evidence-20260721-08` 使用固定摘要 HAProxy 与稳定双副本 DNS 身份完成
+两次顺序 stop/start、跨实例 checkpoint 读取、一次恢复提交和 600/600 健康请求。
+两套证据的日志、manifest 和结构化回执均在 cleanup 后通过 SHA256 校验，且资源已清理。
+这些结果仍是 QA-only local self-hosted evidence。
+
+Aegra `0.9.24` 不执行 Runs 请求中的 `durability`、`stream_resumable` 和
+`if_not_exists` 字段，不能宣称 server-effective `sync/exit`。真实 Provider Product
+Graph 跨重启绑定、Product retry/cancel/fork 跨重启、hosted OIDC-backed same/cross-tenant
+多主体矩阵、canonical 并行/嵌套 provider interrupt、Protocol checkpoint envelope、生产入口与
+rolling upgrade、hosted OIDC/HTTPS、PITR/DR、SLO、安全和 release attestation 仍开放。
+当前总状态继续是 `V2: PARTIAL`，`Production Ready: NO`。
+
+### 2026-07-21 容器镜像 SBOM 与本地 Cosign 边界
+
+新增 `run_local_image_supply_chain_gate.py` 使用 Docker Scout `local://<exact image
+ID>` 对当前工作树重新构建的 backend image 生成 CycloneDX 1.5。fresh `-06` 证据绑定
+`sha256:c2935db338c1f4ccaaf66e06ffe5639ddbc0a1f9801813cff8192413555b779e`，
+包含 773 个组件、2668 个依赖和 773 个 purl；source/image identity 在扫描前后稳定，
+所有 `.env*` 在读取源码字节前排除，秘密模式为零，6 个受管制工件 cleanup 后哈希通过。
+当前证据位于 `E:\project\study\codex\crypto\container-image-sbom-20260721-06`。
+
+新增 `run_local_cosign_bundle_gate.py` 使用固定官方 Cosign `v2.4.3` GHCR digest，在
+`--network none` 下签署上述完整哈希清单；正向 verify 通过，tampered subject 被拒绝，
+随机私钥在发布证据前删除，5 个受管制工件哈希通过。证据位于
+`E:\project\study\codex\crypto\container-image-signature-20260721-03`。该 proof 明确
+跳过 tlog，Cosign 自身警告缺少透明度和可审计性。
+
+以上只关闭 local dirty-worktree image SBOM 与 ephemeral-key blob-signature rehearsal。
+镜像没有 registry repo digest；Docker Scout CVE 命令因缺 Docker 登录保持 RED；没有
+KMS/keyless OIDC、Rekor/RFC3161、registry image signature、signed OCI attestation、
+release candidate 或 production release。当前仍为 `V2: PARTIAL`、`Production Ready:
+NO`。
 
 ### 2026-07-20 本地真实主流程与相关性边界校正
 
@@ -178,7 +315,7 @@ Provider 全链、licensed durability、hosted acceptance 或 release attestatio
 - `blocked`：已有实质实现，但当前外部能力或环境使关键验收链无法继续成立。
 - `not_started`：没有足以构成该 Task 交付切片的实现与测试证据。
 
-当前 16 个计划项（Task 0、0B、1-14）的裁决为：`done=0`、`partial=16`、`blocked=0`、`not_started=0`。**V2 仍不是 production ready。** G0.1 canonical audit、G0.2 本地 zero-mock 主流程和 G0.3 canonical framework convergence 已形成 fresh 本地证据；唯一生产 Graph、官方 `create_agent`/structured output/HITL/Agent Server/`@langchain/react` 边界已经锁定，孤儿手写 runtime 已删除。Task 13 依据 ADR 0010 锁定受限 `deepagents==0.6.12`，当前已推进到 canonical Graph、Product background lifecycle、Scheduled Monitor/Cron、本地 retention/export/deletion、独立 report Artifact、typed frontend 和本地断开重连 Playwright；真实外部 deletion receipts、licensed durability 以及 Task 13 的 Outcome、memory、完整 entitlement/usage/webhook 范围仍未完成。当前源码在显式本地 HTTP proxy 与 `SEARCH_PROVIDER=ddgs_metasearch` 条件下，production-auth local-proof Desktop/Pixel 7 真实 Product 主流程为 `2 passed (2.5m)`，真实 Library/Artifact detail 为 `2 passed (12.7s)`；approved `builtin_web_search` 在用户 endpoint 上仍为 `RED / EXTERNAL DEPENDENCY`。M1-M5 已有真实产品切片，但 Task 0-14 的正式 review/attestation 均未闭合。Hosted OIDC/HTTPS、多主体浏览器状态、licensed persistent Agent Server restart、真实 LangSmith/Langfuse 双端 trace、真实通知回执、load/SLO、安全供应链和 release attestation 仍未证明；本地、fixture 或 skip 证据不能替代这些门禁。
+当前 16 个计划项（Task 0、0B、1-14）的裁决为：`done=0`、`partial=16`、`blocked=0`、`not_started=0`。**V2 仍不是 production ready。** G0.1 canonical audit、G0.2 本地 zero-mock 主流程和 G0.3 canonical framework convergence 已形成 fresh 本地证据；唯一生产 Graph、官方 `create_agent`/structured output/HITL/SDK/`@langchain/react` 边界已经锁定，孤儿手写 runtime 已删除。ADR 0011 现固定 Aegra `0.9.24` 自托管开源 Server，本地真实 Provider 主链、Redis worker kill/reaper/`since` replay 和 QA 双实例 HA 已分别形成证据。Task 13 依据 ADR 0010 锁定受限 `deepagents==0.6.12`，当前已推进到 canonical Graph、Product background lifecycle、Scheduled Monitor/Cron、本地 retention/export/deletion、独立 report Artifact、typed frontend 和本地断开重连 Playwright；真实外部 deletion receipts、完整 Product Graph 跨重启 durability 以及 Task 13 的 Outcome、memory、完整 entitlement/usage/webhook 范围仍未完成。Hosted OIDC/HTTPS、多主体浏览器状态、生产入口/rolling upgrade、真实 LangSmith/Langfuse 双端 trace、真实通知回执、load/SLO、安全供应链和 release attestation 仍未证明；本地、fixture 或 skip 证据不能替代这些门禁。
 
 ## 2. Task 0-14 状态矩阵
 
@@ -186,20 +323,20 @@ Provider 全链、licensed durability、hosted acceptance 或 release attestatio
 |---|---|---|---|
 | 0 Immutable Normative Baseline | `partial` | 13/14 及 V2 ADR 已在历史提交中形成；本 recovery candidate 的父提交为 `9ac296f`。 | `docs/v2/normative-baseline.json`、三段有序 review/attestation、release candidate 干净树证明均不存在；recovery checkpoint 不能替代 Task 0 完成条件。 |
 | 0B Requirement Registry | `partial` | `build_requirement_registry.py`、`verify_requirements.py`、`transition_normative_baseline.py` 及 16 项 synthetic/temporary-Git contract tests 已存在；工具严格要求显式映射、immutable candidate、owner 与 pre-RED receipt。 | `normative-baseline.json`、`requirements-registry.yaml`、正式 implementation note、reviewed immutable candidate 和 pre-RED receipts 不存在；当前 dirty 未提交工作树不能生成或回填这些治理证据。 |
-| 1 Dependency/Agent Server Bootstrap | `partial` | 精确依赖锁、uv source 模式的唯一 `graph_factory`、authenticated `probe_agent_server.sh`、Agent Server base image digest lock 与隔离的 Agent PostgreSQL/Redis Compose 已存在。Probe 已真实通过 401/403/200 resource authorization 和 assistant registration；官方 `langgraph build` 产物已验证不包含 CLI/inmem/pytest 和 `.env`/tests/cache。当前 development matrix 为 `langgraph-api 0.11.1` / `langgraph 1.2.9` / Protocol `0.0.18`；checkpoint GET 与 Product-owned fork 已在 Desktop/Pixel 7 fresh 通过，Graph factory ambient-runtime 防泄漏契约也已通过。 | Licensed image verifier 仍固定 `langgraph-api 0.11.0`，且 licensed Runtime 未形成 readiness/restart 证据。Development checkpoint GET 只是 official state read；root `checkpoints` Protocol envelope 仍为 RED，不能由 `getState` fallback 或 Product fork 替代。`versions.json`、完整实施说明和最终 attestation 仍缺失；生产持久化、`durability="exit"`、HA 均未证明。 |
+| 1 Dependency/Agent Server Bootstrap | `partial` | ADR 0011 选择 Apache-2.0 Aegra `0.9.24`。生产 `aegra` extra 与 dev `langgraph-api` group 互斥；Docker 使用 `uv sync --frozen --no-dev --extra aegra`。镜像 verifier 证明固定 Aegra/LangGraph/SDK 版本、唯一 canonical production Graph，且不存在商业 runtime、in-memory runtime、pytest、tests、cache 或 `.env`。Compose 已接入隔离 Agent PostgreSQL、Redis worker、lease/reaper 参数和 Aegra readiness。锁定 Compose 的 `resume-11` 单实例恢复/QA nested-interrupt 矩阵与 `-08` 双实例 HA/600 请求可用性均通过 cleanup 后哈希审计。 | 当前通过项仍是本地 QA fixture 与本地 HAProxy，不是 Provider Product、生产入口或 hosted 证据。Aegra 不执行 `durability/stream_resumable/if_not_exists` 字段；rolling upgrade、PITR、正式 SLO、`versions.json` 和 release attestation 未完成。 |
 | 2 Actor/Auth/Tenant Isolation | `partial` | M4 将用户身份固定为规范化 OIDC `issuer + subject`；Auth.js 忽略 profile 中的 tenant/workspace/role/permission authority，并在 `iss` 与配置 issuer 不一致时 fail closed。浏览器只提交 opaque `context_id`，scoped JWT 不携带租户、workspace、角色或权限 authority；Product API 与 Agent Server 每次用户请求都从 Product PostgreSQL 解析 active membership，撤权后旧 token 立即失效。provisioning 持久化精确 `(tenant, identity_issuer, external_subject)`，worker/health-check 使用独立 service-token purpose。Agent Store namespace 被重写到 tenant/workspace/private-purpose 边界，principal 由 issuer+subject 不可逆派生，防止不同 issuer 的同 subject 碰撞且不暴露原始 subject；真实 PostgreSQL 已通过双用户/双租户 list/detail/respond/cancel/fork/revoke 与同 workspace 两用户 Store 隔离矩阵。原有 environment、loopback bootstrap、liveness/readiness fail-closed contracts 继续存在。 | **真实 hosted OIDC provider、trusted HTTPS、由真实登录生成的 owner/peer/cross-tenant/revoked browser storage states 均未证明**；`cross-tenant-security.spec.ts` 因缺 hosted credentials 仍是 skip-gated executable requirement，不是通过证据。hosted context-switch late-response、零 mock 浏览器矩阵、operator audit、实施说明与 review/attestation 仍缺失。 |
 | 3 Domain/Evidence/Risk | `partial` | typed domain、evidence/risk policy、golden cases 及对应单元/contract coverage 均存在，并包含在通过的 backend 全量 suite 中。 | 缺 Task 0B registry/receipt、可核验 RED、实施说明和双 review/attestation；按 Task 14 协议不能判 `done`。 |
 | 4 OKX/Web Search Providers | `partial` | OKX/search/provider typed code、parser/contracts 与 async readiness 已存在。OKX 现逐行验证 `instId` 并拒绝负 candle volume；provider retry 配置在构造期拒绝零/负预算。当前用户 endpoint 的普通模型能力可用，但 built-in Web Search 没有可验证 server-tool citation。保留该 RED 后，显式本地 proxy + `SEARCH_PROVIDER=ddgs_metasearch` 的当前源码真实主流程 Desktop/Pixel 7 为 `2 passed (2.5m)`；临时 caller-injected Tavily runner 已分别完成 Deep Research `2 passed (6.3m)` 和真实 OKX/Tavily Market Analysis `2 passed (1.4m)`。后者每个任务有 1 个 OKX snapshot、8 条唯一 Tavily Evidence、1 个 committed ArtifactVersion 和 1 个 Decision。 | Tavily 仅以一次性进程注入 credential 证明本地 real-provider slices，未写入配置；approved built-in provider、默认 Compose provider 切换、hosted egress、完整 failure matrix 和 hosted attestation 仍未关闭。 |
 | 5 Agent Factories/Structured Output | `partial` | ADR 0009 继续固定现有 market/research 为两个轻量 LangChain `create_agent` factory；ADR 0010 只为 Task 13 增加唯一受限 `create_deep_agent` selector。三条官方 factory 路径均使用 `ToolStrategy` typed structured output，且每次 Deep Research 配置只能在 Deep Agents 与 LangChain fallback 中二选一；唯一 production Graph 仍为 `graph_factory`。孤儿 `graph/nodes` 手写 runtime 已删除。Deep Agents 的 filesystem deny-all、默认 subagent 禁用、唯一 verified-source subagent、模型/工具/委派调用预算、typed citation index 和禁止 raw URL/provider payload 合约已通过；受控模型还真实执行了官方 Deep Agent `task -> verified-source-researcher -> verified_web_search` 委派。 | 委派证明使用受控 fake chat model/search tool，不是外部模型/Search provider 成功；完整 hosted wire permission、licensed restart 及 Protocol/Trace/log/browser canary 仍缺失。本地 factory/runtime contract 不能替代生产运行时验收。 |
 | 6 Canonical Graph/HITL | `partial` | canonical graph 使用官方 `interrupt()` 和 `Command(resume=...)`，root artifact review 支持 approve/reject/edit；edit 会重新执行 evidence/risk/review，reject 产生严格 `blocked` terminal output。server-owned `required` policy 不能被客户端降级，interrupt 前没有非幂等副作用。M3 adapter 使用官方 current ThreadState 收集同一 superstep 的 root/nested active interrupts，只恢复未消费成员，并在 current head 上一次提交 response map。独立 `multi_interrupt_fixture` 在 official Agent Server 中真实生成两个成员，Desktop/Pixel 7 均完成 resume。Canonical Graph 还通过官方 `get_stream_writer()` 生成六类 strict custom event，本地 `stream_mode=custom` 与 `astream_events(version="v3")` contract 通过。Task 13 以 `task_type` 在同一 `StateGraph` 内路由到受限异步 `run_deep_research` 节点，并复用 canonical review node。Deep Research executor 只产出 draft；required review 支持 approve、reject、完整 typed report edit 和强制二次审核，来源、harness、model audit 与 artifact status 保持不可编辑。 | Controlled 浏览器只证明注入 draft 后的 Product respond/Worker/official resume/terminal 半链；没有真实 Provider/Deep Agent 前半链、pending reload、双设备 first-writer、stale checkpoint 或 licensed restart/replay 证明。M3 multi graph 仍是 QA fixture，不证明真实 nested subagent review 已进入主图。 |
 | 7 Product PostgreSQL/Outbox | `partial` | Alembic 0001-0022、SQLAlchemy models/repository/UoW、task projection、command/notification/monitor/lifecycle workers 及真实 PostgreSQL integration tests 已存在。0019 可逆修正 DDGS provenance；0022 增加 actor-scoped lifecycle policy/export/deletion。fresh isolated PostgreSQL 完整 integration 现为 `220 passed, 7 skipped`；它聚合覆盖 PostgreSQL interrupt pause/response projection、Deep Research report、通知、Scheduled Monitor、生命周期 export/deletion、投影和真实 Worker SIGKILL recovery。测试 actor cleanup 已按所有 RESTRICT 依赖显式排序，未关闭外键或使用 `TRUNCATE CASCADE`。Command Dispatcher 的 submit/resume/fork reconcile、resume create 和 Run get 均有统一远端 deadline，超时保持 typed indeterminate/reconciliation，不增加第二套 retry loop。 | 7 个 licensed durability 用例仍明确 skip/未证明；本地官方 development Runtime 和 controlled SIGKILL 不能证明 licensed persistent Agent Server 进程/数据库重启后的 stream history、checkpoint durability、生产 DB role isolation、HA 或 hosted SLO。 |
-| 8 Product APIs/Agent Integration | `partial` | Product API 已提供 create/list/get/cancel_task/cancel_run/retry、single respond、aggregate `respond-all`、owner-scoped Inbox、Run detail、Artifact library、owner-scoped Artifact detail/version lineage、owner-scoped Feedback 和 checkpoint fork。`TaskView` 还针对 selected/latest Run 返回 payload-free、scope-bound 的 durable stage history 与 paired Product/official cursor；刷新、SSE 断线、终态和历史 Run 的前端持久化基线已实现，official `useStream` 保持 live enhancement。`cancel_run` 通过 Product durable command 只取消选定 Run，并允许后续 Retry；Feedback 通过 `0013` 持久化、同 key 重放并拒绝同一 Run 的第二次冲突写入。真实 PostgreSQL 已证明跨 owner 拒绝、Run terminal projection、stage-history scope、feedback Artifact Version linkage 和 `retry_of_run_id` 新 Run。官方 SDK submit 的缺失 Run 幂等语义已明确记录，Product 只宣称 at-most-once reconciliation。Fresh official-stream Desktop/Pixel 7 已证明 active stage、同一 Task/Run 绑定、reload、official Agent reads 和进入真实 HITL pause。Task 8 已有 version-locked route/Protocol/SDK contracts、官方 JS probe 和 skip-gated licensed `prepare -> restart -> verify` harness；QA image 只显式增加 multi-interrupt fixture，生产 image verifier 仍要求唯一 canonical Graph。 | Task 8 不是 GREEN。Development root `checkpoints` channel 未交付轻量 envelope，official `getState` fallback 仅诊断；`state.fork` 返回 `unknown_command`，Product Runs API fork 不构成 Protocol 通过。两项 exception 均未 accepted。默认 licensed skip 不是 fail-closed acceptance，且未完成 zero-skip outer harness；licensed `0.11.0` restart、同一 Thread/Checkpoint/Interrupt/history/`since` replay 与 server-effective `durability="exit"` 均为 **RED / UNPROVED**。Hosted OIDC/HTTPS 与 Task 8 review/attestation 也未闭合。 |
+| 8 Product APIs/Agent Integration | `partial` | Product API 已提供 create/list/get/cancel_task/cancel_run/retry、single respond、aggregate `respond-all`、owner-scoped Inbox、Run detail、Artifact library/detail/version lineage、Feedback 和 checkpoint fork；官方 SDK/Protocol/React 边界保持不变。Aegra local executor 的真实 Tavily/模型 Deep Research Product 主链为 Desktop/Pixel 7 `2 passed`。QA `resume-18` 证明 cancel、distinct checkpoint fork、provisioned user isolation、single interrupt、root + depth-1 subgraph batch interrupt、worker kill/reaper、`since` replay，以及受控 post-provider canonical checkpoint 跨 server restart 后 official resume；`-08` 证明双实例 rolling stop/start、跨实例 checkpoint 与一次恢复提交。Task 8 Aegra 静态 contracts 为 `17 passed`，生产 image 仍只允许 canonical Graph。 | Task 8 仍不是 GREEN。Aegra `0.9.24` 不执行 `durability/stream_resumable/if_not_exists` 字段；root `checkpoints` envelope 和 `state.fork` 兼容例外仍未关闭。真实 Provider Product Graph 跨 worker/server restart、跨重启 Product Task 绑定、Product retry/cancel/fork serialization、hosted OIDC-backed 多主体租户矩阵、canonical 并行/嵌套 provider interrupt、生产 ingress/rolling upgrade、hosted OIDC/HTTPS 与最终 review/attestation 均未完成。Post-provider seed、QA fixture 和 local executor 证据不能合并成生产通过。 |
 | 9 Observability | `partial` | 官方 LangSmith `Client`/`LangChainTracer` 与 Langfuse `Langfuse`/`CallbackHandler` 根级装配、tenant sampling、PII/secret redaction、provider attempt correlation 和结构化 delivery-failure event 已存在。Provider-isolated bootstrap fail-open 后，又以随机 loopback HTTP 实际证明 LangSmith `/runs/batch` 503->204 与 Langfuse OTLP protobuf 503->200：业务 Runnable 结果不变、真实官方 trace 出口可见、恢复后新 trace 可投递。Langfuse RED 发现并修复 OTEL exporter 响应日志 secret 泄漏与 4.14 `mask(data=...)` 签名不兼容；官方 transport 文件连续三轮均 `4 passed`，combined observability/security 为 `43 passed`。Canonical `graph_factory` 只把新建的 root callbacks 与规范化 metadata/tags 放入 Graph 默认配置；调用期 `configurable`、checkpoint/run/thread 坐标、checkpointer 和私有 Runtime 均不得进入 compiled Pregel defaults，ambient regression 已覆盖。Product Run delivery intent、PostgreSQL 状态、Worker hosted read-back verifier 和前端 completion scope 已接入。 | 当前只有本地官方 SDK transport/root assembly 与 completion-state contract，不是 fresh hosted LangSmith/Langfuse 双端 trace。SDK background error 仍只能记录 `correlation_id=unknown`；缺同一真实 Product Run 的双端 hosted query/recovery、贯穿 BFF/Task/official Run/provider/artifact 的 full correlation、bounded Agent process flush/shutdown、真实 hosted retention/query、生产告警和 attestation。 |
 | 10 Frontend Runtime/BFF/View Models | `partial` | Next.js/Auth.js、same-origin agent/product BFF、`@langchain/react` thread attachment、typed schemas/view models 与 production environment fail-closed guard 已存在。Root `useStream` 通过官方 `useChannel` 订阅六个 named custom channels；strict Zod、event ID 去重、Product Run scope 和 bounded human projection 拒绝 raw/unknown payload。Deep Research 新增 strict submission/task/report/source/citation schemas、typed review interrupt union 和同源 BFF route，Run/Artifact detail 按 `task_type/artifact_type` 选择 typed projection；official stream 只发现受限 `verified-source-researcher`。 | 本轮研究执行证明包含 fixture report projection 和 controlled post-draft Product chain，不是 live external model/Search stream。真实 production/hosted OIDC、trusted HTTPS、多主体 storage states、完整 Protocol v2 replay 与 Task 10 attestation 未闭合。 |
 | 11 Product UI | `partial` | `/work`、`/home`、`/runs`、真实 Run detail、真实 Library、owner-scoped Artifact version detail、真实 Run Detail Feedback、`/inbox` 和 Settings 产品面、响应式样式及 Playwright 已存在。Work 现在以 segmented control 提交市场分析或 Deep Research；研究报告以章节、finding citation、风险提示、证据缺口和可验证来源渲染，Runs/Library/Artifact Detail 均可识别研究任务。Work/Inbox 现在还提供专用 Deep Research approve/reject/full-report edit UI。Desktop edit/re-review/approve 和 Pixel 7 reject 的 controlled 后半链通过 axe、overflow、duplicate ID、accessible-name、raw JSON 和 full-page screenshot 门禁。 | Seeder 注入预构造 draft，因此没有证明真实外部 Provider、初始 admission/dispatch 或每个动作的双视口矩阵；也没有 hosted visual baseline、VoiceOver 人工 artifact 或真实 OIDC 多主体状态。通知真实 Outbox 延迟/回执 E2E 与 canonical nested provider review 仍缺失。 |
 | 12 Real E2E/Failure Injection | `partial` | M1-M4 既有 success/cancel/HITL/Inbox/fork 真实本地切片继续有效。历史 failure-injection Product matrix 在 Desktop/Pixel 7 为 `14 passed`；新增 controlled partial-state body 在 Desktop/Pixel 7 为 `2 passed`，临时 Tavily Deep Research full-chain 为 `2 passed (6.3m)`，真实 OKX/Tavily Market Analysis full-chain 为 `2 passed (1.4m)`。后者覆盖 admission、真实行情/Search、双模型 structured output、Evidence/risk gates、ArtifactVersion/Decision、数据库谱系及双视口 DOM/axe/visual/network 门禁。当前 discovery 为 20 个 failure-injection project-test instances，但没有当前全量执行结果，不能合并写成 `16 passed`。Dispatcher 已有 pre/post remote-create fencing、取消竞态、reconcile-only 与 compensating cancel 的真实 PostgreSQL contracts；Notification Worker 已有 expired `sending` lease -> `unknown` 恢复 contract。 | 现存 Playwright report 的 20 个 failure-injection 实例全部是 skip/discovery 产物，不是通过证据。Tavily 成功只证明本地临时 provider slices，不是完整外部 OKX/Search/model outage matrix；真实进程 kill、真实通知回执、licensed restart、hosted OIDC/HTTPS 与完整发布矩阵仍缺失。 |
 | 13 Deep Research/Lifecycle | `partial` | ADR 0010、`deepagents==0.6.12`、受限官方 Deep Agents/显式 LangChain fallback、typed citation ledger/report 已存在。`POST /api/v2/deep-research` 使用既有 Product admission、TaskCommand、Worker、同一 Assistant/Thread/Graph；executor draft 进入 canonical report HITL，approve 才提交独立 `deep_research_report` ArtifactVersion。Scheduled Monitor/Cron 已进入同一 Graph/Worker 边界。Task 13 的 Product-owned retention/export/deletion vertical slice 已增加可逆 `0022`、严格 API/BFF、统一 Lifecycle Worker、Settings UI、owner-scoped reload/rejoin 和隔离 PostgreSQL Desktop/Pixel 7 零拦截 Playwright `4 passed (10.0s)`；真实导出 manifest/bundle hash 与 deletion `pending_external` 数据库状态均已核验。 | Deep Research Tavily full-chain 仍是一次性本地 credential + development Agent Server 证据；默认 built-in Search 仍 RED。Data lifecycle 只完成 local Product slice，外部 deletion adapters/receipts、checkpoint/Store/object storage/search/LangSmith/Langfuse/log/backup 删除仍未交付。Outcome、memory、完整 entitlement/usage、webhook、licensed restart、hosted OIDC/HTTPS 及 candidate/review/attestation 仍不存在，因此不能判 `done`。 |
-| 14 Production Gates/Legacy Removal | `partial` | Dockerfile/Compose 已固定 Python、Node、PostgreSQL、pgvector、Redis 和 Agent Server digest；官方 Agent image 使用 uv.lock、排除 dev/inmem 与敏感构建上下文，API 只发布到 loopback。独立 Product/Agent PostgreSQL、Redis、migrate/bootstrap、custom app/auth 均已执行到 licensed Runtime 校验阶段。G0.3 已删除孤儿手写 Agent runtime；ADR 0010 只为 Task 13 重新引入受限 Deep Agents 稳定依赖并增加防回归契约。Task 14 的 protocol secret test 与 local backup/restore、key rotation、migration rollback、health-load/SLO foundation 均存在。 | 有效 LangSmith/license credential、licensed durable restart、production packaging/HTTPS、完整 hosted security/release gate、真实 Product-flow SLO、PITR/failover、签名 SBOM、requirement evidence、独立 attestation 均不存在；V1 parity/removal 均不存在。所有 local-only 结果均不能解释为 release 或 production-ready 证明。 |
+| 14 Production Gates/Legacy Removal | `partial` | Dockerfile/Compose 已固定 Python、Node、PostgreSQL、pgvector、Redis 和 Agent Server digest；官方 Agent image 使用 uv.lock、排除 dev/inmem 与敏感构建上下文，API 只发布到 loopback。独立 Product/Agent PostgreSQL、Redis、migrate/bootstrap、custom app/auth 均已执行到 licensed Runtime 校验阶段。G0.3 已删除孤儿手写 Agent runtime；ADR 0010 只为 Task 13 重新引入受限 Deep Agents 稳定依赖并增加防回归契约。Task 14 的 protocol secret test 与 local backup/restore、key rotation、migration rollback、health-load/SLO foundation 均存在。当前本地 backend image 已生成绑定 exact image ID 的 773-component CycloneDX，并以固定官方 Cosign 完成离线 ephemeral-key blob signature、正向 verify、tamper-negative 与私钥删除。 | 有效 LangSmith/license credential、licensed durable restart、production packaging/HTTPS、完整 hosted security/release gate、真实 Product-flow SLO、PITR/failover、镜像 CVE audit、registry repo digest/KMS 或 keyless identity 签名、tlog/timestamp、signed OCI attestation、requirement evidence 和独立 release attestation 均不存在；V1 parity/removal 均不存在。所有 local-only 结果均不能解释为 release 或 production-ready 证明。 |
 
 ## 3. Fresh 测试与运行证据
 
@@ -220,19 +357,19 @@ Provider 全链、licensed durability、hosted acceptance 或 release attestatio
 | Current-source Run Detail read proof | local development `8124 -> 3002`; Desktop/Pixel 7 DOM green；fixture Playwright `6 passed` | 真实 persisted old waiting Run 通过 real BFF 渲染并进入 latest succeeded Task，显示 8 条 Evidence、数据溯源和 2 条模型审计；无 overflow、clipping、duplicate ID、unnamed control、raw JSON 或 current-page console error。该 proof 使用占位模型且没有新建 Run，只证明 Product read/render，不是 provider、licensed、hosted 或 production acceptance。 |
 | Playwright profile discovery | contract `32 passed`；fixture `38 tests / 4 files` discovered | 当前默认 profile 只发现 route fixtures；failure-injection 当前 discovery 为 `20 / 2 files`；`controlled-deep-research-hitl` 被精确收集、npm command 和缺失环境门禁覆盖。该结果只来自 `--list`，不能代替浏览器 body 通过。 |
 | Strict/controlled real Playwright | 当前源码真实 provider mainline Desktop/Pixel `2 passed (2.5m)`；真实 Library/Artifact detail Desktop/Pixel `2 passed (12.7s)`；此前 durable cancel、Inbox、HITL、Fork 和 official-stream 独立切片保持各自历史证据 | 最新四个测试使用 production-auth Product/Agent、真实 Product API/PostgreSQL/统一 Worker/canonical Graph/official local Agent Server、OKX/DDGS/model，未注入 Product route。页面与截图通过 raw JSON、overflow、clipped/unnamed control、axe、console/page/network error 门禁。Agent Server 仍是 in-memory development Runtime，不是 licensed durability 或 hosted acceptance。 |
-| Task 8 Protocol/persistence harness | 历史 focused `26 passed, 5 skipped`；历史 adjacent Product/Agent/Protocol/HITL `193 passed, 5 skipped`；development Server OpenAPI coexistence `1 passed`；当前 root checkpoint live probe `RED` | 历史计数保留为 harness/contract 证据，不是 Task 8 GREEN。Development `0.11.1` + LangGraph `1.2.9` + Protocol `0.0.18` 未产出轻量 root checkpoint envelope，`getState` fallback 只允许诊断；`state.fork` 为 `unknown_command` 且 exception 未 accepted。Licensed verifier `0.11.0` 未完成 zero-skip restart；4 个 licensed tests、持久 replay 和 `durability="exit"` 均未证明。 |
+| Task 8 Protocol/persistence harness | Aegra 静态 contracts `16 passed`；`resume-11` cancel/fork/tenant rejection/root+nested QA interrupt/worker recovery/replay GREEN；`-08` 双实例 rolling recovery 与 600/600 gateway availability GREEN；root checkpoint channel/state fork 仍 RED | 当前本地 proof 使用 QA-only Graph、锁定 Compose PostgreSQL/Redis 和本地 HAProxy，证明同一 Thread/Run/checkpoint recovery、官方 checkpoint-object fork、root + depth-1 subgraph aggregate resume、replay identity 与双实例故障切换，不是完整 Provider Product/hosted/production ingress 证据。Aegra 不执行 `durability/stream_resumable/if_not_exists`；`state.fork`、Product retry/cancel/fork 跨重启、有效 tenant actor matrix、canonical parallel/nested provider interrupt 和 rolling upgrade 仍未证明。 |
 | Hosted OIDC/HTTPS security browser gate | 未通过；credential-gated skip | 缺真实 hosted OIDC login storage states 与 trusted HTTPS deployment；owner、same-tenant peer、cross-tenant、revoked-user 的 zero-mock respond/cancel/fork 以及 late old-context response 均保持 RED/未证明。 |
 
 ## 4. 真实外部证据限制
 
-- 开发 probe 与 M4 fork proof 仍使用 official development Agent Server。该 in-memory Server 在 backend hot reload 后曾丢失旧 Thread，最终 fork proof 使用 fresh stable server；这正是**licensed persistent Agent Server restart/recovery 尚未证明**的边界。部署镜像虽由官方 `langgraph build` 从固定 digest 和 uv.lock 构建并连接独立 Agent PostgreSQL/Redis，但因缺有效 LangSmith/license credential 未形成通过 readiness、restart persistence 或生产 HA 的证据。
+- 历史开发 probe 与 M4 fork proof 使用 in-memory development Agent Server，不能用于生产结论。当前 Aegra 镜像和 local Redis worker kill/reaper 已证明一个隔离 QA Graph 的 checkpoint/recovery，但还没有用完整 Product Graph、锁定 Compose 数据库镜像、多实例或 hosted topology 重跑；因此不能外推为生产 HA。
 - Task 8 development Protocol probe 还保留独立 RED：root `checkpoints` 事件没有形成 Protocol `id/parent_id/step/source` envelope。通过 official `getState` 取得 checkpoint ID 仅支持下游诊断，不证明 channel/replay。`state.fork -> unknown_command` 和 Product-owned checkpoint create 也不能互相替代；两份 compatibility record 均未被接受。
-- Product task GET 可以用 `run_id` 选择历史 Product Run；M4 fork 只接受 owner-scoped `source_run_id`，由 Product 端绑定 checkpoint 并通过 durable command 创建 official fork。该本地闭环证明 lineage/admission/worker contracts 可运行，但不证明 Agent Server 重启后 checkpoint 仍可恢复，也不构成完整 Protocol v2 replay/ordering contract。
+- Product task GET 可以用 `run_id` 选择历史 Product Run；M4 fork 只接受 owner-scoped `source_run_id`，由 Product 端绑定 checkpoint 并通过 durable command 创建 official fork。Aegra QA proof 已证明普通 checkpoint history 和 `since` replay 跨 worker kill 保留，但尚未证明 Product fork lineage 与 command serialization 跨同类重启。
 - 真实 OKX、built-in Web Search RED、DDGS metasearch 诊断和 strict browser 链依赖显式本地 HTTP proxy；未通过该 proxy 的 direct/hosted 网络路径没有成功证明。Tavily 没有有效 key，仍为 unverified。当前用户 endpoint 的 built-in Search 没有形成可接受的 server-tool citation；模型生成但不在 provider citation 集内的 URL 仍不被接受为证据。
-- strict real Playwright 已在开发 Runtime 下通过 M1 success chain，证明 Product task、official Thread/Run、真实 provider 和 Artifact 可以成功串联；M2.3 另有 live official Run cancel proof。M2.4/M3 local proof 使用独立 development Product API、同一 PostgreSQL、真实 worker 和官方 dev Agent Server，分别证明 root HITL 与 aggregate root+nested fixture 后半链；M4 又在同类本地拓扑证明 Product-owned historical checkpoint fork、durable command、worker dispatch 与 UI 回到新 `waiting_human` Run。它们都不是目标 hosted OIDC/HTTPS 拓扑、canonical nested provider、provider success 重跑或 licensed restart proof。lease/replay/orphan 与 M4 fork recovery 虽有真实 PostgreSQL contracts，仍没有 licensed Agent Server 重启、真实进程 kill、真实 join 断线或 hosted recovery 证明。
+- strict real Playwright 与最新 Aegra local executor 主链已证明 Product Task、official Thread/Run、真实 Tavily/模型、HITL 和 Artifact 可以成功串联；另有独立 Aegra QA cancel/fork/tenant rejection/worker recovery/replay 与双实例 HA proof。两类证据使用不同本地拓扑，不能合并声称完整真实 Provider Product Graph 跨重启；hosted OIDC/HTTPS、有效多主体 tenant、Product fork/cancel/retry 跨重启、生产 ingress 和 rolling upgrade 仍未证明。
 - Backend 与 production frontend 的 environment/auth/readiness 路径均 fail closed。M4 已实现 OIDC issuer/subject、Product DB membership authority、opaque context 与 revoke enforcement；Agent authenticated readiness 继续使用独立 service probe principal并与 socket liveness 分离。但这些本地 contracts 和 PostgreSQL matrix 不是**真实 hosted OIDC、trusted HTTPS、多主体 browser storage state**、secret canary、full correlation 或 release security gate 的替代证据。
 - 根目录与 `backend/.dockerignore` 已分别保护 helper 和官方 Agent 构建上下文，Agent context 对任意深度的 `.env*` 递归排除；启动脚本会验证最终镜像的锁定基础层前缀、官方 auth/http/graph 映射、生产依赖与排除项，并在 180 秒启动超时或信号失败后按同一 Compose project 自动清理且保留数据卷。实测 Agent image 不含 `.env`、tests、coverage、cache、CLI 或 inmem Runtime。Compose 使用固定 digest 的 Redis 7，只部署一个官方 Agent HTTP 服务，Product app 挂载在 `/app`；当前缺口是 license 后的完整启动和 restart durability，而不是旧 dual-service/dev-runtime 偏差。
-- 当前已有 local-only key rotation、upgrade/rollback、backup/restore、supply-chain/SBOM rehearsal 和 SLO evaluator foundation；仍没有 hosted HTTPS、真实生产数据库角色/PITR/HA、独立生产 projection recovery、真实通知回执、LangSmith/Langfuse 双写、端到端 correlation、生产告警、正式负载/SLO、签名 SBOM 或 release attestation 的 fresh 证据。
+- 当前已有 local-only key rotation、upgrade/rollback、backup/restore、source/lock supply-chain、exact-ID image SBOM、offline ephemeral-key Cosign blob signature 和 SLO evaluator foundation；仍没有 hosted HTTPS、真实生产数据库角色/PITR/HA、独立生产 projection recovery、真实通知回执、LangSmith/Langfuse 双写、端到端 correlation、生产告警、正式负载/SLO、镜像 CVE audit、registry/KMS/keyless 签名、signed OCI attestation 或 release attestation 的 fresh 证据。
 
 ## 5. 未完成项与下一条关键路径
 
@@ -1263,6 +1400,76 @@ plain text block，0 completed Search、0 tool call、0 provider citation；forc
 Task 13 remains `partial`; Task 8 remains `RED / PARTIAL`; all 16 planned Tasks
 remain `partial`. V2 remains `PARTIAL`; `Production Ready: NO`. No code was staged,
 committed or pushed.
+
+## 38. 2026-07-22 Current-source Product Market Analysis mainline
+
+The current Windows local source was self-tested from the Product UI after restoring
+the existing installed Clash for Windows client on `127.0.0.1:7890`. The Docker Aegra
+container received only process-scoped `http://host.docker.internal:7890` market/search
+proxy settings; `backend/.env` was not read, printed, modified or persisted.
+
+The fresh run exposed and closed three local blockers: direct OKX/Tavily egress was
+unavailable after reboot, the custom Tavily wrapper did not proxy synchronous
+`raw_results`, and research queries beginning with generic user text returned irrelevant
+dictionary results. The fixes preserve official Tavily/LangChain boundaries, route both
+sync and async calls through the configured proxy, use basic search only for the bounded
+market fallback, and lead research queries with asset/crypto/horizon context.
+
+Focused regression is `109 passed, 1 warning`. Fresh Product Task
+`2bb1f283-bffc-4530-812f-021b3b459d35` completed in the real UI with one succeeded Run,
+an OKX market snapshot, 8 Tavily Web Evidence rows from 8 distinct HTTPS sources,
+official structured research/analysis Agents, evidence gate, risk gate and completed
+report. This closes the immediate local Product Market Analysis mainline failure; it
+does not prove proxy persistence across reboot, Aegra restart durability for this mode,
+hosted identity, or any production gate. The authoritative command/result/limitation
+record is at the EOF of `docs/v2/18-v2-execution-ledger.md`.
+
+V2 remains `PARTIAL`; `Production Ready: NO`. No code was staged, committed or pushed.
+
+## 40. 2026-07-23 Task 14 repository packaging closure
+
+The repository-owned production packaging slice now includes pinned CI actions,
+separate non-root backend/frontend Dockerfiles, immutable-image production Compose,
+fail-closed environment-name templates, alert and four-role Sigstore policies,
+loopback ingress profiles, hosted production/security Playwright profiles and a
+production runbook. The production image runner reuses free/open Syft and Trivy plus
+the existing fail-closed CVE summarizer; the stack runner reuses Docker Compose and
+the Aegra/Product OpenAPI boundaries and always tears down its unique probe project.
+
+Focused Task 14/container/Playwright discovery verification is `70 passed`; Bash
+syntax, pinned isolated Ruff and CI YAML parsing pass. Exact local production images
+run non-root with a read-only root and writable `/tmp`. Both release runners reject the
+current dirty source at exit `65` and create no output. The latest secret-safe blocker
+audit is retained outside the repository at
+`E:\project\study\codex\crypto\production-readiness-blockers-current-20260723-04.json`.
+It reports six missing critical reviewed/final artifacts, ten external-authority
+blocker categories and zero secret findings.
+
+This closes repository packaging, not production acceptance. The current image CVE
+gate remains RED, and reviewed baseline/registry, public HTTPS/OIDC, hosted Aegra,
+telemetry/SLO, PITR/DR, registry/protected signing, immutable candidate and independent
+review evidence remain absent. External notification delivery is excluded. V2 remains
+`PARTIAL`; `Production Ready: NO`. No code was staged, committed or pushed.
+
+## 37. 2026-07-21 Fresh Windows local supply-chain gate
+
+Fresh evidence at
+`E:\project\study\codex\crypto\local-supply-chain-20260721-08` records a complete
+local dirty-working-tree supply-chain run. All four scans completed with zero skips:
+official uv audit covered 154 external packages from 155 lock entries and found zero
+vulnerabilities/adverse statuses; npm audit covered 582 dependencies and found zero
+vulnerabilities. Python and frontend CycloneDX output contains 131 and 574 components,
+respectively. All five published artifact hashes were independently recomputed and
+matched, the 435-file source identity remained stable, and the `backend/.env.example`
+record hashes only its variable-name/comment interface. The real `backend/.env` was not
+read or included.
+
+The supporting contract matrix is `13 passed`; Bash syntax, Ruff and repository diff
+whitespace checks pass. This proof level remains
+`local-working-tree-supply-chain`, with `git_dirty=true`. It does not prove a committed
+release candidate, hosted dependency audit, container-image SBOM, artifact signature,
+release attestation or production release. V2 remains `PARTIAL`; `Production Ready:
+NO`.
 
 ## 36. 2026-07-20 Task 13 data-lifecycle local vertical slice
 

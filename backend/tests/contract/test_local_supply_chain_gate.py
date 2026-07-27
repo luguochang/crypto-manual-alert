@@ -16,6 +16,59 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "tools" / "v2" / "run_local_supply_chain_gate.sh"
 SECRET_SENTINEL = "local-supply-chain-secret-sentinel"
 RAW_ERROR_SENTINEL = "raw-tool-error-must-not-be-published"
+ENV_EXAMPLE_VALUE_SENTINEL = "example-value-must-not-be-published"
+
+
+def _bash_executable() -> str:
+    if os.name == "nt":
+        candidates = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "bin"
+            / "bash.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "Git"
+            / "usr"
+            / "bin"
+            / "bash.exe",
+        )
+        match = next((candidate for candidate in candidates if candidate.is_file()), None)
+        assert match is not None, "Git Bash is required for supply-chain contracts"
+        return str(match)
+    match = shutil.which("bash")
+    assert match is not None, "bash is required for supply-chain contracts"
+    return match
+
+
+def _bash_path(path: Path) -> str:
+    absolute = path.resolve()
+    if os.name != "nt":
+        return str(absolute)
+    rendered = absolute.as_posix()
+    return f"/{rendered[0].lower()}{rendered[2:]}"
+
+
+def _bash_environment_path(environment: dict[str, str]) -> str:
+    completed = subprocess.run(
+        [_bash_executable(), "-lc", 'printf "%s" "$PATH"'],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def _bash_command_path(command: str) -> str:
+    completed = subprocess.run(
+        [_bash_executable(), "-lc", f"command -v -- {shlex.quote(command)}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, command
+    return completed.stdout.strip()
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -191,8 +244,19 @@ def gate_fixture(tmp_path: Path) -> GateFixture:
     (repository / "backend" / "pyproject.toml").write_text(
         '[project]\nname = "fixture"\nversion = "1.0.0"\n', encoding="utf-8"
     )
+    (repository / "backend" / ".env.example").write_text(
+        "# Public fixture setting\n"
+        f"FIXTURE_SETTING={ENV_EXAMPLE_VALUE_SENTINEL}\n",
+        encoding="utf-8",
+    )
     (repository / "backend" / "uv.lock").write_text(
-        'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n', encoding="utf-8"
+        'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n\n'
+        '[[package]]\nname = "fixture"\nversion = "1.0.0"\n'
+        'source = { editable = "." }\n\n'
+        '[[package]]\nname = "a"\nversion = "1.0.0"\n\n'
+        '[[package]]\nname = "b"\nversion = "1.0.0"\n\n'
+        '[[package]]\nname = "c"\nversion = "1.0.0"\n',
+        encoding="utf-8",
     )
     (repository / "frontend" / "src" / "app.ts").write_text(
         "export const app = 'fixture';\n", encoding="utf-8"
@@ -259,10 +323,17 @@ def _run_gate(
         output_dir = fixture.output_parent / "run"
         output_dir.mkdir()
     environment = os.environ.copy()
+    if path is not None:
+        gate_path = _bash_path(Path(path)) if os.name == "nt" else path
+    elif os.name == "nt":
+        gate_path = f"{_bash_path(fixture.fake_bin)}:{_bash_environment_path(environment)}"
+    else:
+        gate_path = f"{fixture.fake_bin}{os.pathsep}{environment['PATH']}"
     environment.update(
         {
-            "PATH": path or f"{fixture.fake_bin}{os.pathsep}{environment['PATH']}",
-            "SUPPLY_CHAIN_OUTPUT_DIR": str(output_dir),
+            "PATH": gate_path,
+            "SUPPLY_CHAIN_OUTPUT_DIR": _bash_path(output_dir),
+            "TMPDIR": _bash_path(fixture.output_parent),
             "NPM_TOKEN": SECRET_SENTINEL,
             "NODE_AUTH_TOKEN": SECRET_SENTINEL,
             "UV_INDEX_URL": f"https://user:{SECRET_SENTINEL}@packages.invalid/simple",
@@ -270,7 +341,7 @@ def _run_gate(
         }
     )
     result = subprocess.run(
-        ["/bin/bash", str(fixture.script)],
+        [_bash_executable(), _bash_path(fixture.script)],
         cwd=fixture.repository,
         env=environment,
         capture_output=True,
@@ -297,7 +368,7 @@ def _all_evidence_text(output_dir: Path) -> str:
 
 def test_script_has_valid_syntax_and_fail_closed_static_contract() -> None:
     result = subprocess.run(
-        ["bash", "-n", str(SCRIPT)],
+        [_bash_executable(), "-n", _bash_path(SCRIPT)],
         capture_output=True,
         text=True,
         check=False,
@@ -321,6 +392,15 @@ def test_script_has_valid_syntax_and_fail_closed_static_contract() -> None:
     assert "artifact_signature" in source
     assert "release_attestation" in source
     assert "production_release" in source
+    assert "sha256sum" in source
+    assert "sha256_digest" in source
+    assert "hash_environment_interface" in source
+    assert '"$forbidden_environment_name.example"' in source
+    assert 'platform_environment_profile="windows-runtime-paths"' in source
+    assert "HTTP_PROXY" not in source
+    assert "HTTPS_PROXY" not in source
+    assert "NPM_TOKEN" not in source
+    assert "NODE_AUTH_TOKEN" not in source
     assert ".env" not in source
     assert "--no-dev" not in source
     assert "--omit" not in source
@@ -356,7 +436,13 @@ def test_success_runs_all_scans_and_binds_redacted_artifacts(
     assert summary["completed_scans"] == 4
     assert summary["skipped_scans"] == 0
     assert summary["network_checks_completed"] == 2
+    assert summary["tools"]["sha256"] in {"shasum", "sha256sum"}
+    expected_platform_profile = "windows-runtime-paths" if os.name == "nt" else "none"
+    assert summary["redaction"]["platform_environment_profile"] == (
+        expected_platform_profile
+    )
     assert summary["scans"]["python_audit"]["audited_packages"] == 3
+    assert summary["locks"]["backend"]["package_entries"] == 4
     assert summary["scans"]["frontend_audit"]["audited_dependencies"] == 4
     assert summary["source"]["git_dirty"] is False
     assert summary["source"]["file_count"] > 0
@@ -371,8 +457,11 @@ def test_success_runs_all_scans_and_binds_redacted_artifacts(
         "production_release",
     ]
 
-    for name in expected_names:
-        assert stat.S_IMODE((output_dir / name).stat().st_mode) == 0o600
+    if os.name == "nt":
+        assert "chmod 600" in SCRIPT.read_text(encoding="utf-8")
+    else:
+        for name in expected_names:
+            assert stat.S_IMODE((output_dir / name).stat().st_mode) == 0o600
     for name, expected_digest in summary["artifact_sha256"].items():
         assert (
             expected_digest
@@ -399,6 +488,10 @@ def test_success_runs_all_scans_and_binds_redacted_artifacts(
     if gate_fixture.call_log.exists():
         combined += gate_fixture.call_log.read_text(encoding="utf-8")
     assert SECRET_SENTINEL not in combined
+    assert ENV_EXAMPLE_VALUE_SENTINEL not in combined
+    assert "ENV_INTERFACE:backend/.env.example" in (
+        output_dir / "source-manifest.sha256"
+    ).read_text(encoding="utf-8")
     calls = gate_fixture.call_log.read_text(encoding="utf-8")
     assert "uv audit" in calls
     assert "uv export" in calls
@@ -426,14 +519,16 @@ def test_missing_tool_fails_before_scans_with_machine_readable_summary(
         "npm",
         "rm",
         "rmdir",
-        "shasum",
+        "sha256sum",
         "sort",
     )
     for command in commands:
         source = gate_fixture.fake_bin / command
-        executable = source if source.exists() else Path(shutil.which(command) or "")
-        assert executable.is_file(), command
-        (hermetic_bin / command).symlink_to(executable)
+        executable = _bash_path(source) if source.exists() else _bash_command_path(command)
+        _write_executable(
+            hermetic_bin / command,
+            f'#!/bin/bash\nexec {shlex.quote(executable)} "$@"\n',
+        )
 
     result, output_dir = _run_gate(gate_fixture, path=str(hermetic_bin))
 

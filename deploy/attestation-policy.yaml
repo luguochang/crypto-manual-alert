@@ -1,0 +1,39 @@
+schema_version: 2026-07-23.sigstore-identity-policy.v1
+status: unconfigured
+self_declared_signature_fields_accepted: false
+verification:
+  command: cosign verify-blob
+  require_bundle: true
+  require_certificate_identity: true
+  require_certificate_oidc_issuer: true
+  require_transparency_log: true
+roles:
+  release_signer:
+    status: unconfigured
+    issuer: ""
+    identity_regexp: "(?!)"
+    independent_from: [release_reviewer, data_custodian, platform_custodian]
+  release_reviewer:
+    status: unconfigured
+    issuer: ""
+    identity_regexp: "(?!)"
+    independent_from: [release_signer, implementer]
+  data_custodian:
+    status: unconfigured
+    issuer: ""
+    identity_regexp: "(?!)"
+    independent_from: [release_signer, migration_process, platform_custodian]
+  platform_custodian:
+    status: unconfigured
+    issuer: ""
+    identity_regexp: "(?!)"
+    independent_from: [release_signer, migration_process, data_custodian]
+required_bindings:
+  - baseline_sha
+  - packaging_candidate_sha
+  - source_sha
+  - image_registry_digest
+  - migration_checksum_manifest_sha256
+  - database_checksum_manifest_sha256
+  - hosted_environment_id
+  - generated_at

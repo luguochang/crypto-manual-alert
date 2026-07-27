@@ -28,7 +28,9 @@ from crypto_alert_v2.domain.models import (
     MarketAnalysis,
     RiskVerdict,
 )
+from crypto_alert_v2.domain.decision_request import route_decision_request
 from crypto_alert_v2.graph.request import ArtifactReviewPayload
+from crypto_alert_v2.persistence.usage_governance import UsageQuotaExceeded
 from tests.fixtures.golden_cases import valid_market_analysis
 
 
@@ -89,6 +91,9 @@ class FakeProductService:
         self.selected_run_id: UUID | None = None
         self.feedback_run_id: str | None = None
         self.feedback_submission: Any = None
+        self.postmortem_run_id: str | None = None
+        self.postmortem_submission: Any = None
+        self.postmortem_id: str | None = None
         self.cancelled_task_id: str | None = None
         self.cancelled_run_id: str | None = None
         self.cancel_idempotency_key: str | None = None
@@ -113,6 +118,98 @@ class FakeProductService:
         self.notification_settings_submission: Any = None
         self.watchlist_symbol: tuple[str, bool] | None = None
         self.dispatch_calls = 0
+
+    @staticmethod
+    def _usage_totals() -> dict[str, int]:
+        return {
+            "agent_admission": 2,
+            "trigger": 1,
+            "model_token": 300,
+            "search_request": 4,
+            "runtime_millisecond": 5000,
+            "storage_byte": 6000,
+        }
+
+    async def get_usage_governance(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+    ) -> dict[str, Any]:
+        self.actor = actor
+        period = period_start or datetime(2026, 7, 1, tzinfo=UTC)
+        return {
+            "period_start": period,
+            "entitlement": {
+                "allowed_task_types": [
+                    "market_analysis",
+                    "deep_research",
+                    "candidate_review",
+                ],
+                "active_monitor_limit": 20,
+                "min_interval_seconds": 300,
+                "max_concurrent_tasks": 5,
+                "max_retention_days": 3650,
+                "limits": self._usage_totals(),
+                "valid_from": period,
+                "valid_until": None,
+            },
+            "totals": self._usage_totals(),
+            "latest_reconciliation": None,
+        }
+
+    async def reconcile_usage(
+        self,
+        actor: ActorContext,
+        *,
+        period_start: datetime | None = None,
+        repair: bool = True,
+    ) -> dict[str, Any]:
+        self.actor = actor
+        period = period_start or datetime(2026, 7, 1, tzinfo=UTC)
+        totals = self._usage_totals()
+        return {
+            "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "period_start": period,
+            "status": "reconciled",
+            "source_totals": totals,
+            "ledger_totals": totals,
+            "discrepancies": {},
+            "source_hash": "a" * 64,
+            "ledger_hash": "b" * 64,
+            "repair_applied": repair,
+            "created_at": datetime(2026, 7, 23, tzinfo=UTC),
+        }
+
+    async def create_decision_request(
+        self,
+        actor: ActorContext,
+        submission: Any,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        self.actor = actor
+        self.submission = submission
+        self.idempotency_key = idempotency_key
+        decision = submission.to_domain_request(
+            actor_id=actor.user_id,
+            workspace_id=actor.workspace_id,
+        )
+        route = route_decision_request(decision)
+        task = None
+        if route.status == "admitted":
+            task = {
+                "task_id": "task-decision-1",
+                "task_type": route.task_type,
+                "status": "queued",
+                "symbol": decision.symbol,
+                "horizon": decision.horizon,
+                "query_text": decision.query_text,
+                "created_at": datetime(2026, 7, 22, tzinfo=UTC),
+                "artifact": None,
+                "deep_research_artifact": None,
+                "errors": [],
+            }
+        return {"request": decision, "route": route, "task": task}
 
     async def create_analysis(
         self,
@@ -273,6 +370,85 @@ class FakeProductService:
             "comment": submission.comment,
             "created_at": datetime(2026, 7, 13, 0, 6, tzinfo=UTC),
             "updated_at": datetime(2026, 7, 13, 0, 6, tzinfo=UTC),
+        }
+
+    async def create_postmortem(
+        self,
+        actor: ActorContext,
+        run_id: str,
+        submission: Any,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.postmortem_run_id = run_id
+        self.postmortem_submission = submission
+        self.idempotency_key = idempotency_key
+        if run_id != "11111111-1111-4111-8111-111111111111":
+            return None
+        return self._postmortem_view(frozen=False)
+
+    async def list_postmortems(
+        self,
+        actor: ActorContext,
+        *,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.actor = actor
+        return {"items": [self._postmortem_view(frozen=False)], "limit": limit}
+
+    async def freeze_postmortem(
+        self,
+        actor: ActorContext,
+        postmortem_id: str,
+    ) -> dict[str, Any] | None:
+        self.actor = actor
+        self.postmortem_id = postmortem_id
+        if postmortem_id != "88888888-8888-4888-8888-888888888888":
+            return None
+        return self._postmortem_view(frozen=True)
+
+    @staticmethod
+    def _postmortem_view(*, frozen: bool) -> dict[str, Any]:
+        replay = (
+            {
+                "id": "99999999-9999-4999-8999-999999999999",
+                "postmortem_id": "88888888-8888-4888-8888-888888888888",
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "run_id": "11111111-1111-4111-8111-111111111111",
+                "artifact_version_id": "55555555-5555-4555-8555-555555555555",
+                "schema_version": "frozen-replay-v1",
+                "source_hash": "b" * 64,
+                "allow_live_fetch": False,
+                "allow_live_side_effects": False,
+                "rule_metrics": {
+                    "structure": 1.0,
+                    "evidence": 1.0,
+                    "risk": 1.0,
+                    "product_output": 1.0,
+                    "reasons": [],
+                },
+                "created_at": datetime(2026, 7, 13, 0, 7, tzinfo=UTC),
+            }
+            if frozen
+            else None
+        )
+        return {
+            "id": "88888888-8888-4888-8888-888888888888",
+            "feedback_id": None,
+            "task_id": "22222222-2222-4222-8222-222222222222",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_version_id": "55555555-5555-4555-8555-555555555555",
+            "category": "operator_postmortem",
+            "status": "frozen" if frozen else "open",
+            "title": "Review BTC no-trade decision",
+            "summary": "Compare the persisted evidence and decision.",
+            "root_cause": None,
+            "expected_behavior": "Remain fail closed.",
+            "actual_behavior": "No trade was emitted.",
+            "source_hash": "a" * 64,
+            "frozen_replay": replay,
+            "created_at": datetime(2026, 7, 13, 0, 6, tzinfo=UTC),
+            "updated_at": datetime(2026, 7, 13, 0, 7, tzinfo=UTC),
         }
 
     async def list_artifacts(
@@ -803,6 +979,17 @@ class ConflictingProductService(FakeProductService):
         )
 
 
+class QuotaExceededProductService(FakeProductService):
+    async def create_analysis(
+        self,
+        actor: ActorContext,
+        submission: Any,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        del actor, submission, idempotency_key
+        raise UsageQuotaExceeded(unit="agent_admission", current=10, limit=10)
+
+
 class UnprovisionedProductService(FakeProductService):
     async def create_analysis(
         self,
@@ -1211,6 +1398,139 @@ async def test_create_analysis_uses_server_owned_actor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_governance_routes_return_typed_receipts() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        usage = await client.get(
+            "/api/v2/usage?period_start=2026-07-01T00:00:00Z",
+            headers={"origin": "http://127.0.0.1:3001"},
+        )
+        reconciliation = await client.post(
+            "/api/v2/usage/reconciliations",
+            headers={"origin": "http://127.0.0.1:3001"},
+            json={"period_start": "2026-07-01T00:00:00Z", "repair": True},
+        )
+
+    assert usage.status_code == 200
+    assert usage.json()["totals"]["model_token"] == 300
+    assert reconciliation.status_code == 201
+    assert reconciliation.json()["status"] == "reconciled"
+    assert reconciliation.json()["repair_applied"] is True
+    assert service.actor is not None
+    assert service.actor.workspace_id == "compose-workspace"
+
+
+@pytest.mark.asyncio
+async def test_agent_admission_quota_failure_is_stable_and_auditable() -> None:
+    transport = httpx.ASGITransport(
+        app=_development_app(QuotaExceededProductService())
+    )
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/analysis",
+            headers={
+                "origin": "http://127.0.0.1:3001",
+                "idempotency-key": "quota-denied-1",
+            },
+            json={
+                "symbol": "BTC-USDT-SWAP",
+                "horizon": "4h",
+                "query_text": "Assess current BTC risk.",
+                "notify": False,
+            },
+        )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "detail": {
+            "code": "quota_exceeded",
+            "message": "agent_admission quota exceeded (10/10)",
+            "unit": "agent_admission",
+            "current": 10,
+            "limit": 10,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_decision_request_api_injects_identity_and_returns_typed_route() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/decision-requests",
+            headers={
+                "origin": "http://127.0.0.1:3001",
+                "idempotency-key": "decision-admission-1",
+            },
+            json={
+                "entry_kind": "manual",
+                "session_id": "session-1",
+                "intent": "market_analysis",
+                "intent_confidence": 1,
+                "complexity": "standard",
+                "symbol": "BTC-USDT-SWAP",
+                "horizon": "4h",
+                "query_text": "Assess current BTC risk.",
+                "side_effects": {
+                    "live_market_data": True,
+                    "live_web_research": True,
+                    "product_writes": True,
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["request"]["actor_id"] == "compose-user"
+    assert payload["request"]["workspace_id"] == "compose-workspace"
+    assert payload["route"] == {
+        "status": "admitted",
+        "complexity": "standard",
+        "task_type": "market_analysis",
+        "missing_slots": [],
+        "reason": "request admitted to existing Product execution",
+    }
+    assert payload["task"]["task_id"] == "task-decision-1"
+    assert service.idempotency_key == "decision-admission-1"
+
+
+@pytest.mark.asyncio
+async def test_decision_request_api_fails_closed_without_creating_a_task() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        response = await client.post(
+            "/api/v2/decision-requests",
+            headers={
+                "origin": "http://127.0.0.1:3001",
+                "idempotency-key": "decision-clarify-1",  # gitleaks:allow
+            },
+            json={
+                "entry_kind": "manual",
+                "intent": "unknown",
+                "intent_confidence": 0,
+                "complexity": "blocked_clarify",
+                "query_text": "What should I do?",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["route"]["status"] == "blocked_clarify"
+    assert response.json()["route"]["missing_slots"] == ["intent"]
+    assert response.json()["task"] is None
+
+
+@pytest.mark.asyncio
 async def test_create_deep_research_uses_the_same_product_admission_boundary() -> None:
     service = FakeProductService()
     transport = httpx.ASGITransport(app=_development_app(service))
@@ -1367,6 +1687,49 @@ async def test_run_detail_and_artifact_library_use_server_owned_actor() -> None:
     assert feedback_response.status_code == 201
     assert feedback_response.json()["rating"] == "positive"
     assert service.feedback_run_id == "11111111-1111-4111-8111-111111111111"
+    assert service.actor is not None
+    assert service.actor.tenant_id == "compose-tenant"
+    assert service.actor.workspace_id == "compose-workspace"
+    assert service.actor.user_id == "compose-user"
+
+
+@pytest.mark.asyncio
+async def test_postmortem_create_list_and_freeze_use_server_owned_actor() -> None:
+    service = FakeProductService()
+    transport = httpx.ASGITransport(app=_development_app(service))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:8011"
+    ) as client:
+        created = await client.post(
+            "/api/v2/runs/11111111-1111-4111-8111-111111111111/postmortems",
+            headers={"Idempotency-Key": "postmortem-contract"},
+            json={
+                "category": "operator_postmortem",
+                "title": "Review BTC no-trade decision",
+                "summary": "Compare the persisted evidence and decision.",
+                "expected_behavior": "Remain fail closed.",
+                "actual_behavior": "No trade was emitted.",
+            },
+        )
+        listed = await client.get(
+            "/api/v2/improvement/postmortems",
+            params={"limit": 25},
+        )
+        frozen = await client.post(
+            "/api/v2/improvement/postmortems/88888888-8888-4888-8888-888888888888/freeze",
+            headers={"Idempotency-Key": "freeze-contract"},
+        )
+
+    assert created.status_code == 201
+    assert created.json()["status"] == "open"
+    assert listed.status_code == 200
+    assert listed.json()["limit"] == 25
+    assert frozen.status_code == 200
+    assert frozen.json()["status"] == "frozen"
+    assert frozen.json()["frozen_replay"]["allow_live_fetch"] is False
+    assert frozen.json()["frozen_replay"]["allow_live_side_effects"] is False
+    assert service.postmortem_run_id == "11111111-1111-4111-8111-111111111111"
+    assert service.postmortem_id == "88888888-8888-4888-8888-888888888888"
     assert service.actor is not None
     assert service.actor.tenant_id == "compose-tenant"
     assert service.actor.workspace_id == "compose-workspace"

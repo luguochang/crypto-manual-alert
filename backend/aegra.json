@@ -1,0 +1,14 @@
+{
+  "graphs": {
+    "crypto_analysis": "./src/crypto_alert_v2/graph/__init__.py:graph_factory",
+    "candidate_review": "./src/crypto_alert_v2/evaluation/review_graph.py:graph_factory"
+  },
+  "auth": {
+    "path": "./src/crypto_alert_v2/auth/agent_server.py:auth",
+    "disable_studio_auth": true
+  },
+  "http": {
+    "app": "./src/crypto_alert_v2/http/app.py:app",
+    "enable_custom_route_auth": true
+  }
+}

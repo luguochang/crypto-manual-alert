@@ -20,6 +20,7 @@ from crypto_alert_v2.auth.context import ActorContext
 from crypto_alert_v2.lifecycle.worker import LifecycleWorker
 from crypto_alert_v2.persistence.base import Base, PRODUCT_SCHEMA
 from crypto_alert_v2.persistence.models import (
+    DataDeletionReceipt,
     DataExportJob,
     Membership,
     Task,
@@ -146,9 +147,34 @@ async def test_deletion_is_owner_scoped_and_stops_at_pending_external(lifecycle_
     assert result["status"] == "pending_external"
     assert result["system_status"]["product_db"] == "succeeded"
     assert result["system_status"]["langsmith"] == "pending_external"
-    assert result["external_deletion_reference"]["langfuse"] is None
+    assert result["system_status"]["logs"] == "pending_expiry"
+    assert result["system_status"]["backups"] == "pending_expiry"
+    assert len(
+        result["external_deletion_reference"]["langfuse"]["delete_receipt_hash"]
+    ) == 64
     async with session_factory() as session:
         assert await session.scalar(select(Task).where(Task.id == task_id)) is None
+        receipts = list(
+            await session.scalars(
+                select(DataDeletionReceipt)
+                .where(DataDeletionReceipt.deletion_job_id == job["id"])
+                .order_by(DataDeletionReceipt.system, DataDeletionReceipt.phase)
+            )
+        )
+        assert len(receipts) == 18
+        assert {receipt.system for receipt in receipts} == {
+            "product_db",
+            "checkpoint",
+            "store",
+            "object_storage",
+            "search",
+            "langsmith",
+            "langfuse",
+            "logs",
+            "backups",
+        }
+        assert sum(receipt.phase == "survivor_scan" for receipt in receipts) == 9
+        assert all(len(receipt.receipt_hash) == 64 for receipt in receipts)
 
 
 @pytest.mark.asyncio

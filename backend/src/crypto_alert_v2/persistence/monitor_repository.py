@@ -233,6 +233,10 @@ class UsageLedgerRepository(ActorScopedRepository[UsageLedgerEntry]):
         idempotency_key: str,
         quantity: int = 1,
         unit: str = "trigger",
+        operation_type: str = "monitor_trigger",
+        resource_type: str = "monitor_trigger",
+        resource_id: str | None = None,
+        source_receipt_hash: str | None = None,
         monitor_id: UUID | None = None,
         trigger_id: UUID | None = None,
         ledger_metadata: Mapping[str, Any] | None = None,
@@ -254,8 +258,16 @@ class UsageLedgerRepository(ActorScopedRepository[UsageLedgerEntry]):
                 period_start=_as_utc(period_start),
                 quantity=quantity,
                 unit=_require_text(unit, field="unit", limit=32),
+                operation_type=_require_text(
+                    operation_type, field="operation_type", limit=64
+                ),
+                resource_type=_require_text(
+                    resource_type, field="resource_type", limit=64
+                ),
+                resource_id=resource_id,
+                source_receipt_hash=source_receipt_hash,
                 idempotency_key=key,
-                metadata=dict(ledger_metadata or {}),
+                ledger_metadata=dict(ledger_metadata or {}),
             )
             .on_conflict_do_nothing(
                 index_elements=[
@@ -1217,6 +1229,10 @@ class MonitorRepository(ActorScopedRepository[MonitorDefinition]):
             period_start=_month_start(current_time),
             quantity=1,
             unit="trigger",
+            operation_type="monitor_trigger",
+            resource_type="monitor_trigger",
+            resource_id=str(trigger.id),
+            source_receipt_hash=_identity_digest(kind, identity),
             idempotency_key=f"monitor-trigger-usage:{monitor.id}:{_identity_digest(kind, identity)}",
             ledger_metadata={
                 "kind": kind,

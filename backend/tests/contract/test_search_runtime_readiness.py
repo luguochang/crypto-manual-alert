@@ -144,7 +144,11 @@ def test_runtime_passes_configured_okx_endpoint_to_provider(
             _readiness(),
             "test-tavily-key",
             "TavilySearchProvider",
-            {"api_key": "test-tavily-key"},
+            {
+                "api_key": "test-tavily-key",
+                "proxy": "http://proxy.example:8080",
+                "search_depth": "basic",
+            },
         ),
     ],
 )
@@ -518,7 +522,9 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
         openai_api_key=SecretStr("test-only-model-key"),
         tavily_api_key=SecretStr("test-only-tavily-key"),
     )
-    readiness = _builtin_readiness()
+    readiness = _builtin_readiness().model_copy(
+        update={"tavily_configured": True, "tavily_connected": True}
+    )
     probe_calls = 0
     collector_options = {}
 
@@ -556,6 +562,7 @@ def test_production_runtime_probes_once_and_caches_immutable_selection(
     assert first.search_readiness is readiness
     assert probe_calls == 1
     assert collector_options["provider"] is SearchProvider.BUILTIN
+    assert collector_options["tavily_fallback_ready"] is True
 
 
 @pytest.mark.asyncio
@@ -611,6 +618,7 @@ async def test_strict_runtime_requests_configured_search_provider(
     assert runtime.search_readiness is readiness
     assert probe_options["requested_provider"] is SearchProvider(configured_provider)
     assert collector_options["provider"] is SearchProvider(configured_provider)
+    assert collector_options["tavily_fallback_ready"] is False
 
 
 def test_production_runtime_cannot_start_when_search_readiness_fails(

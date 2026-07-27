@@ -201,12 +201,19 @@ def _start_worker(
         "AGENT_SERVER_LOCAL_TOKEN": local_token,
         "AGENT_SERVER_URL": agent_server_url,
         "APP_ENVIRONMENT": "test",
+        "CRYPTO_ALERT_DISABLE_DOTENV": "1",
         "PRODUCT_DATABASE_URL": database_url,
         "PYTHONPATH": str(BACKEND_ROOT / "src"),
+        "PYTHONIOENCODING": "utf-8",
         "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1",
         "WORKER_HEALTH_HOST": "127.0.0.1",
         "WORKER_HEALTH_PORT": str(health_port),
     }
+    # Keep the child isolated from credentials while preserving Windows runtime needs.
+    for name in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+        if value := os.environ.get(name):
+            environment[name] = value
     return subprocess.Popen(
         [
             sys.executable,
@@ -275,6 +282,13 @@ async def _stop_worker(process: subprocess.Popen[bytes]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         await asyncio.to_thread(process.wait, 5)
+
+
+def _assert_force_killed(returncode: int) -> None:
+    if os.name == "nt":
+        assert returncode != 0
+        return
+    assert returncode == -signal.SIGKILL
 
 
 async def _expire_command_lease(
@@ -364,7 +378,7 @@ async def test_sigkill_after_remote_accept_recovers_without_duplicate_create(
 
         first.kill()
         first_returncode = await asyncio.to_thread(first.wait, 5)
-        assert first_returncode == -signal.SIGKILL
+        _assert_force_killed(first_returncode)
         fake.release_run_response.set()
 
         await _expire_command_lease(session_factory, seeded.command_id)
@@ -480,7 +494,7 @@ async def test_sigkill_after_product_registration_reuses_persisted_remote_handle
 
         first.kill()
         first_returncode = await asyncio.to_thread(first.wait, 5)
-        assert first_returncode == -signal.SIGKILL
+        _assert_force_killed(first_returncode)
         fake.release_run_status.set()
         await _expire_command_lease(session_factory, seeded.command_id)
 

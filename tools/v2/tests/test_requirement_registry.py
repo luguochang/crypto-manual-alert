@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -441,15 +442,21 @@ class RequirementRegistryTests(unittest.TestCase):
 
         registry_path.unlink()
         (self.root / "alternate-registry.json").write_text("{}\n", encoding="utf-8")
-        registry_path.symlink_to("../../alternate-registry.json")
-        verify_candidate_index(
-            registry_path=registry_path,
-            manifest_path=manifest_path,
-            receipt_path=receipt_path,
-            task=1,
-            expected_red_command=TASK_RED_COMMAND,
-            repo_root=self.root,
-        )
+        try:
+            registry_path.symlink_to("../../alternate-registry.json")
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+                raise
+            registry_path.write_text("{}\n", encoding="utf-8")
+        else:
+            verify_candidate_index(
+                registry_path=registry_path,
+                manifest_path=manifest_path,
+                receipt_path=receipt_path,
+                task=1,
+                expected_red_command=TASK_RED_COMMAND,
+                repo_root=self.root,
+            )
 
         self._write(
             str(note_path),
@@ -642,7 +649,8 @@ class RequirementRegistryTests(unittest.TestCase):
         candidate_sha = self._git_output("rev-parse", "HEAD")
         review_note_path = self.root / "docs/review-evidence.md"
         review_note = "# Ordered review evidence\n\nAll reviews approved.\n"
-        review_note_path.write_text(review_note, encoding="utf-8")
+        with review_note_path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(review_note)
         review_note_sha = sha256(review_note.encode("utf-8")).hexdigest()
         review_chain = [
             self._review(
@@ -825,14 +833,15 @@ class RequirementRegistryTests(unittest.TestCase):
     def _write(self, path: str, content: str) -> None:
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        with target.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
 
     def _write_json(self, path: Path, value: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        with path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(
+                json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+            )
 
     def _git(self, *args: str) -> None:
         subprocess.run(
@@ -856,7 +865,7 @@ class RequirementRegistryTests(unittest.TestCase):
         requirement_ids = [
             str(item["id"])
             for item in registry["requirements"]
-            if item["implementation_note_path"] == str(note_path)
+            if item["implementation_note_path"] == note_path.as_posix()
         ]
         metadata = {
             "schema_version": "1.0",

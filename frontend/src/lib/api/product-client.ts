@@ -1,5 +1,7 @@
 import {
   analysisSubmissionSchema,
+  decisionAdmissionSchema,
+  decisionRequestSubmissionSchema,
   deepResearchSubmissionSchema,
   artifactDetailSchema,
   artifactLibrarySchema,
@@ -25,9 +27,21 @@ import {
   dataLifecyclePolicyUpdateSchema,
   productRunListSchema,
   productTaskSchema,
+  memoryDeleteSchema,
+  memoryListSchema,
+  memorySchema,
+  memoryUpdateSchema,
+  outcomeListSchema,
+  improvementCandidateListSchema,
+  improvementCandidateSchema,
+  improvementDatasetListSchema,
+  usageGovernanceSchema,
+  usageReconciliationSchema,
   runDetailSchema,
   respondAllInterruptsSchema,
   type AnalysisSubmission,
+  type DecisionAdmission,
+  type DecisionRequestSubmission,
   type DeepResearchSubmission,
   type ArtifactDetail,
   type ArtifactLibrary,
@@ -52,6 +66,16 @@ import {
   type DataLifecyclePolicyUpdate,
   type ProductRunList,
   type ProductTask,
+  type Memory,
+  type MemoryDelete,
+  type MemoryList,
+  type MemoryUpdate,
+  type OutcomeList,
+  type ImprovementCandidate,
+  type ImprovementCandidateList,
+  type ImprovementDatasetList,
+  type UsageGovernance,
+  type UsageReconciliation,
   type RunDetail,
   type RespondAllInterrupts,
 } from "@/lib/schemas/product-api";
@@ -114,6 +138,38 @@ export async function createDeepResearch(
     },
     fetcher,
   );
+}
+
+export async function createDecisionRequest(
+  input: DecisionRequestSubmission,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<DecisionAdmission> {
+  const submission = decisionRequestSubmissionSchema.parse(input);
+  const response = await fetcher(
+    "/api/product/api/v2/decision-requests",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify(submission),
+    },
+  );
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw new ProductApiError(readableDetail(body, response.status), response.status);
+  }
+  const parsed = decisionAdmissionSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ProductApiError(
+      "Product API returned an invalid decision admission.",
+      502,
+    );
+  }
+  return parsed.data;
 }
 
 export async function getTask(
@@ -660,6 +716,189 @@ export async function getDataDeletion(
     { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
   );
   return parseLifecycleResponse(response, dataDeletionSchema, "data deletion");
+}
+
+export async function listMemory(
+  includeDisabled = false,
+  fetcher: Fetcher = fetch,
+): Promise<MemoryList> {
+  const response = await fetcher(
+    `/api/product/api/v2/memory?include_disabled=${includeDisabled ? "true" : "false"}`,
+    { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  return parseLifecycleResponse(response, memoryListSchema, "Memory list");
+}
+
+export async function updateMemory(
+  memoryId: string,
+  input: MemoryUpdate,
+  fetcher: Fetcher = fetch,
+): Promise<Memory> {
+  const submission = memoryUpdateSchema.parse(input);
+  const response = await fetcher(
+    `/api/product/api/v2/memory/${encodeURIComponent(memoryId)}`,
+    {
+      method: "PATCH",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify(submission),
+    },
+  );
+  return parseLifecycleResponse(response, memorySchema, "Memory");
+}
+
+export async function deleteMemory(
+  memoryId: string,
+  fetcher: Fetcher = fetch,
+  idempotencyKey: string = crypto.randomUUID(),
+): Promise<MemoryDelete> {
+  const response = await fetcher(
+    `/api/product/api/v2/memory/${encodeURIComponent(memoryId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "idempotency-key": idempotencyKey,
+      },
+      body: JSON.stringify({ confirmation: "DELETE_MEMORY" }),
+    },
+  );
+  return parseLifecycleResponse(response, memoryDeleteSchema, "Memory deletion");
+}
+
+export async function listOutcomes(fetcher: Fetcher = fetch): Promise<OutcomeList> {
+  const response = await fetcher(
+    "/api/product/api/v2/outcomes",
+    { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  return parseLifecycleResponse(response, outcomeListSchema, "Outcome list");
+}
+
+export async function listImprovementDatasets(
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementDatasetList> {
+  const response = await fetcher(
+    "/api/product/api/v2/improvement/datasets",
+    { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  return parseLifecycleResponse(response, improvementDatasetListSchema, "improvement Dataset list");
+}
+
+export async function listImprovementCandidates(
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidateList> {
+  const response = await fetcher(
+    "/api/product/api/v2/improvement/candidates",
+    { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  return parseLifecycleResponse(response, improvementCandidateListSchema, "improvement Candidate list");
+}
+
+export async function getUsageGovernance(
+  fetcher: Fetcher = fetch,
+): Promise<UsageGovernance> {
+  const response = await fetcher(
+    "/api/product/api/v2/usage",
+    { method: "GET", headers: { accept: "application/json" }, cache: "no-store" },
+  );
+  return parseLifecycleResponse(response, usageGovernanceSchema, "usage governance");
+}
+
+export async function reconcileUsage(
+  fetcher: Fetcher = fetch,
+): Promise<UsageReconciliation> {
+  const response = await fetcher(
+    "/api/product/api/v2/usage/reconciliations",
+    {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({ repair: true }),
+    },
+  );
+  return parseLifecycleResponse(
+    response,
+    usageReconciliationSchema,
+    "usage reconciliation",
+  );
+}
+
+export function requestImprovementReview(
+  candidateId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidate> {
+  return mutateImprovementCandidate(candidateId, "review", {}, fetcher, true);
+}
+
+export function decideImprovementReview(
+  candidateId: string,
+  action: "approve" | "reject",
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidate> {
+  return mutateImprovementCandidate(
+    candidateId,
+    "review/decision",
+    { action },
+    fetcher,
+    false,
+  );
+}
+
+export function runImprovementShadow(
+  candidateId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidate> {
+  return mutateImprovementCandidate(
+    candidateId,
+    "shadow",
+    { minimum_runs: 1 },
+    fetcher,
+    true,
+  );
+}
+
+export function promoteImprovementCandidate(
+  candidateId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidate> {
+  return mutateImprovementCandidate(
+    candidateId,
+    "promote",
+    { reason: "Operator promotion after approved frozen shadow." },
+    fetcher,
+    false,
+  );
+}
+
+export function rollbackImprovementCandidate(
+  candidateId: string,
+  fetcher: Fetcher = fetch,
+): Promise<ImprovementCandidate> {
+  return mutateImprovementCandidate(
+    candidateId,
+    "rollback",
+    { reason: "Operator rollback to the declared target." },
+    fetcher,
+    false,
+  );
+}
+
+async function mutateImprovementCandidate(
+  candidateId: string,
+  action: string,
+  body: Record<string, unknown>,
+  fetcher: Fetcher,
+  idempotent: boolean,
+): Promise<ImprovementCandidate> {
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json",
+  };
+  if (idempotent) headers["idempotency-key"] = crypto.randomUUID();
+  const response = await fetcher(
+    `/api/product/api/v2/improvement/candidates/${encodeURIComponent(candidateId)}/${action}`,
+    { method: "POST", headers, body: JSON.stringify(body) },
+  );
+  return parseLifecycleResponse(response, improvementCandidateSchema, "improvement Candidate");
 }
 
 async function parseLifecycleResponse<T>(

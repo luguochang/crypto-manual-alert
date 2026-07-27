@@ -136,7 +136,10 @@ async def check_agent_server(
     )
     validate_search_readiness_payload(
         readiness_payload,
-        expected_provider=SearchProvider(settings.search_provider),
+        expected_provider=SearchProvider(
+            settings.agent_healthcheck_expected_search_provider
+            or settings.search_provider
+        ),
     )
     product_health_payload = await readiness_fetcher(
         url=settings.agent_server_url.rstrip("/") + "/app/api/v2/health",

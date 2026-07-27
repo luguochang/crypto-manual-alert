@@ -12,7 +12,12 @@ from langgraph_api.state import state_snapshot_to_thread_state
 from crypto_alert_v2.api.agent_server import _collect_remote_interrupts
 from crypto_alert_v2.domain.models import Artifact
 from crypto_alert_v2.graph.request import ArtifactReviewPayload, ReviewResponse
-from crypto_alert_v2.testing.multi_interrupt_fixture import create_graph, graph
+from crypto_alert_v2.testing.multi_interrupt_fixture import (
+    create_graph,
+    create_single_graph,
+    graph,
+    single_graph,
+)
 
 
 def _checkpoint_namespace(task_state: StateSnapshot | None) -> str:
@@ -109,6 +114,33 @@ def test_official_runtime_resumes_root_and_nested_interrupts_together() -> None:
     completed = fixture.get_state(config, subgraphs=True)
     assert completed.next == ()
     assert completed.interrupts == ()
+
+
+def test_single_protocol_fixture_has_one_root_interrupt_and_one_commit() -> None:
+    assert single_graph.checkpointer is None
+    fixture = create_single_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": f"single-interrupt-{uuid4()}"}}
+
+    paused = fixture.invoke({"completion_count": 0}, config=config)
+    snapshot = fixture.get_state(config, subgraphs=True)
+
+    assert len(paused["__interrupt__"]) == 1
+    assert len(snapshot.interrupts) == 1
+    assert snapshot.next == ("root_interrupt",)
+    interrupt_id = snapshot.interrupts[0].id
+
+    result = fixture.invoke(
+        Command(
+            resume={
+                interrupt_id: ReviewResponse(action="approve").model_dump(mode="json")
+            }
+        ),
+        config=config,
+    )
+
+    assert result["completion_count"] == 1
+    assert result["terminal_status"] == "succeeded"
+    assert Artifact.model_validate(result["artifact"]).status == "committed"
 
 
 def test_official_state_shape_excludes_a_partially_resumed_task() -> None:

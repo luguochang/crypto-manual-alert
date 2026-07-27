@@ -1,6 +1,8 @@
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 
 ARG UV_VERSION=0.11.28
+ARG PIP_VERSION=26.1.2
+ARG LIBLZMA_VERSION=5.8.1-1+deb13u1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -13,14 +15,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app/backend
 
-RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes "liblzma5=${LIBLZMA_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade \
+    "pip==${PIP_VERSION}" \
+    "uv==${UV_VERSION}"
 
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --extra aegra --no-install-project
 
 COPY backend ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --extra aegra
 
 CMD ["python", "-m", "crypto_alert_v2.workers", "--worker-id", "container-worker"]

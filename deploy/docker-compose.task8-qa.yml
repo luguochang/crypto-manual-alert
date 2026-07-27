@@ -1,0 +1,5 @@
+services:
+  langgraph-api:
+    env_file: !reset []
+  command-worker:
+    env_file: !reset []

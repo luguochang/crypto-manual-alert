@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.stream import CheckpointsTransformer
 from langgraph.types import interrupt
 
 from crypto_alert_v2.domain.models import (
@@ -103,6 +102,24 @@ def _finish(state: MultiInterruptFixtureState) -> MultiInterruptFixtureState:
     }
 
 
+def _single_finish(state: MultiInterruptFixtureState) -> MultiInterruptFixtureState:
+    decision = ReviewResponse.model_validate(state["root_review"])
+    if decision.action != "approve":
+        raise ValueError("the single-interrupt fixture commits only approved reviews")
+    artifact = Artifact.model_validate(
+        {
+            **_draft_artifact().model_dump(mode="json"),
+            "status": "committed",
+        }
+    )
+    return {
+        "artifact": artifact.model_dump(mode="json"),
+        "completion_count": state.get("completion_count", 0) + 1,
+        "terminal_status": "succeeded",
+        "errors": [],
+    }
+
+
 _nested_builder = StateGraph(MultiInterruptFixtureState)
 _nested_builder.add_node("nested_interrupt", _nested_interrupt)
 _nested_builder.add_edge(START, "nested_interrupt")
@@ -121,13 +138,24 @@ builder.add_edge("finish", END)
 
 
 def create_graph(*, checkpointer: Any = None) -> Any:
-    return builder.compile(
-        checkpointer=checkpointer,
-        transformers=[CheckpointsTransformer],
-    )
+    return builder.compile(checkpointer=checkpointer)
 
 
 graph = create_graph()
 
+single_builder = StateGraph(MultiInterruptFixtureState)
+single_builder.add_node("root_interrupt", _root_interrupt)
+single_builder.add_node("finish", _single_finish)
+single_builder.add_edge(START, "root_interrupt")
+single_builder.add_edge("root_interrupt", "finish")
+single_builder.add_edge("finish", END)
 
-__all__ = ["create_graph", "graph"]
+
+def create_single_graph(*, checkpointer: Any = None) -> Any:
+    return single_builder.compile(checkpointer=checkpointer)
+
+
+single_graph = create_single_graph()
+
+
+__all__ = ["create_graph", "create_single_graph", "graph", "single_graph"]

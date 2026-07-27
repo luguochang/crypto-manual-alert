@@ -103,6 +103,7 @@ class SearchRetryPolicy:
     max_attempts: int = 3
     total_budget_seconds: float = 30.0
     backoff_seconds: tuple[float, ...] = (1.0, 2.0)
+    first_attempt_budget_share: float = 0.5
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -120,6 +121,8 @@ class SearchRetryPolicy:
             )
         if not self.backoff_seconds or any(delay < 0 for delay in self.backoff_seconds):
             raise ValueError("search retry backoff must contain non-negative delays")
+        if not 0 < self.first_attempt_budget_share <= 1:
+            raise ValueError("search first-attempt budget share must be in (0, 1]")
 
     def execute(
         self,
@@ -210,11 +213,10 @@ class SearchRetryPolicy:
             future_backoff,
             remaining_budget_seconds / 2,
         )
-        # Built-in model-backed search can spend its first turn negotiating the
-        # provider tool shape. Give that turn half of the usable budget while a
-        # shared deadline still bounds all retries and backoff to 30 seconds.
-        timeout_slices = 2 if attempts_remaining == 3 else attempts_remaining
-        return (remaining_budget_seconds - reserved_backoff) / timeout_slices
+        usable_budget = remaining_budget_seconds - reserved_backoff
+        if attempts_remaining == 3:
+            return usable_budget * self.first_attempt_budget_share
+        return usable_budget / attempts_remaining
 
     async def execute_async(
         self,

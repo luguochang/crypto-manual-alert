@@ -32,16 +32,27 @@ from crypto_alert_v2.persistence.models import (
     Artifact,
     ArtifactVersion,
     DataDeletionJob,
+    DataDeletionReceipt,
     DataExportJob,
     DataLifecyclePolicy,
     Decision,
     DomainEvent,
     Feedback,
+    FrozenReplayRecord,
+    ImprovementCandidate,
+    ImprovementDataset,
+    ImprovementDatasetMember,
+    ImprovementExperiment,
+    ImprovementReleaseEvent,
+    ImprovementReview,
+    ImprovementShadowRun,
     INTERRUPT_PAUSE_STATUSES,
     INTERRUPT_STATUSES,
     InterruptPause,
     InterruptProjection,
     MarketSnapshot,
+    MemoryDeletionJob,
+    MemoryEntry,
     Membership,
     MonitorCronCommand,
     MonitorDefinition,
@@ -57,6 +68,8 @@ from crypto_alert_v2.persistence.models import (
     OBSERVABILITY_DELIVERY_STATUSES,
     ObservabilityDelivery,
     OBSERVED_TERMINAL_STATUSES,
+    OutcomeObservation,
+    PostmortemCase,
     REVIEW_POLICIES,
     Run,
     Task,
@@ -68,7 +81,11 @@ from crypto_alert_v2.persistence.models import (
     WebEvidence,
     Workspace,
     WorkspaceEntitlement,
+    WebhookDeliveryAudit,
+    WebhookIntegration,
+    WebhookReplayNonce,
     UsageLedgerEntry,
+    UsageReconciliation,
 )
 from crypto_alert_v2.api.schemas import (
     AnalysisSubmission,
@@ -122,6 +139,10 @@ EXPECTED_TABLES = INITIAL_TABLES | {
     "domain_events",
     "workspace_entitlements",
     "usage_ledger_entries",
+    "usage_reconciliations",
+    "webhook_integrations",
+    "webhook_replay_nonces",
+    "webhook_delivery_audits",
     "monitor_definitions",
     "monitor_destinations",
     "monitor_cron_commands",
@@ -129,6 +150,19 @@ EXPECTED_TABLES = INITIAL_TABLES | {
     "data_lifecycle_policies",
     "data_export_jobs",
     "data_deletion_jobs",
+    "data_deletion_receipts",
+    "memory_entries",
+    "memory_deletion_jobs",
+    "outcome_observations",
+    "postmortem_cases",
+    "frozen_replay_records",
+    "improvement_datasets",
+    "improvement_dataset_members",
+    "improvement_candidates",
+    "improvement_experiments",
+    "improvement_reviews",
+    "improvement_shadow_runs",
+    "improvement_release_events",
 }
 
 TABLE_MODELS = (
@@ -156,6 +190,10 @@ TABLE_MODELS = (
     DomainEvent,
     WorkspaceEntitlement,
     UsageLedgerEntry,
+    UsageReconciliation,
+    WebhookIntegration,
+    WebhookReplayNonce,
+    WebhookDeliveryAudit,
     MonitorDefinition,
     MonitorDestination,
     MonitorCronCommand,
@@ -163,6 +201,19 @@ TABLE_MODELS = (
     DataLifecyclePolicy,
     DataExportJob,
     DataDeletionJob,
+    DataDeletionReceipt,
+    MemoryEntry,
+    MemoryDeletionJob,
+    OutcomeObservation,
+    PostmortemCase,
+    FrozenReplayRecord,
+    ImprovementDataset,
+    ImprovementDatasetMember,
+    ImprovementCandidate,
+    ImprovementExperiment,
+    ImprovementReview,
+    ImprovementShadowRun,
+    ImprovementReleaseEvent,
 )
 
 WORKSPACE_SCOPED_TABLES = EXPECTED_TABLES - {"tenants", "users", "workspaces"}
@@ -186,6 +237,11 @@ EXPECTED_JSONB_COLUMNS = {
     ("notification_outbox", "payload"),
     ("domain_events", "payload"),
     ("usage_ledger_entries", "metadata"),
+    ("usage_reconciliations", "source_totals"),
+    ("usage_reconciliations", "ledger_totals"),
+    ("usage_reconciliations", "discrepancies"),
+    ("workspace_entitlements", "allowed_task_types"),
+    ("webhook_integrations", "accepted_key_ids"),
     ("monitor_definitions", "condition"),
     ("monitor_definitions", "task_template"),
     ("monitor_definitions", "quiet_hours"),
@@ -194,6 +250,21 @@ EXPECTED_JSONB_COLUMNS = {
     ("data_export_jobs", "bundle"),
     ("data_deletion_jobs", "system_status"),
     ("data_deletion_jobs", "external_deletion_reference"),
+    ("data_deletion_receipts", "reference"),
+    ("data_deletion_receipts", "evidence"),
+    ("memory_entries", "content"),
+    ("outcome_observations", "metrics"),
+    ("frozen_replay_records", "packet"),
+    ("frozen_replay_records", "rule_metrics"),
+    ("improvement_candidates", "diff"),
+    ("improvement_experiments", "case_results"),
+    ("improvement_experiments", "metrics"),
+    ("improvement_experiments", "gate_report"),
+    ("improvement_reviews", "response"),
+    ("improvement_reviews", "checkpoint"),
+    ("improvement_reviews", "interrupt_payload"),
+    ("improvement_shadow_runs", "comparison"),
+    ("improvement_release_events", "evidence"),
 }
 
 RUN_STATUSES = {
@@ -249,6 +320,12 @@ def test_tenant_and_workspace_ownership_is_backed_by_foreign_keys() -> None:
             foreign_key.target_fullname
             for foreign_key in table.c.tenant_id.foreign_keys
         }
+        if table.name == "data_deletion_receipts":
+            assert tenant_targets == set()
+            assert table.c.workspace_id.foreign_keys == set()
+            assert table.c.owner_user_id.foreign_keys == set()
+            assert table.c.deletion_job_id.foreign_keys == set()
+            continue
         assert f"{PRODUCT_SCHEMA}.tenants.id" in tenant_targets
 
         if table.name not in WORKSPACE_SCOPED_TABLES:

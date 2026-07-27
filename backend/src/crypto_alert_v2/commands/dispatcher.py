@@ -33,9 +33,12 @@ from crypto_alert_v2.api.schemas import (
     TerminalGraphOutput,
 )
 from crypto_alert_v2.auth.context import ActorContext
+from crypto_alert_v2.domain.decision_request import DecisionRequest
+from crypto_alert_v2.domain.outcome import maturation_at
 from crypto_alert_v2.graph.request import (
     DeepResearchReviewPayload,
     ReviewResponse,
+    graph_request_for_decision,
     parse_review_interrupt_payload,
     validate_review_payload_for_task,
 )
@@ -47,6 +50,7 @@ from crypto_alert_v2.persistence.models import (
     MarketSnapshot,
     Membership,
     NotificationDestination,
+    OutcomeObservation,
     Run,
     Task,
     TaskCommand,
@@ -65,6 +69,31 @@ from crypto_alert_v2.projections.domain_events import (
     append_domain_events,
     append_progressive_events,
 )
+from crypto_alert_v2.persistence.usage_governance import append_run_usage_receipts
+
+
+def _product_submission_from_payload(
+    task_type: Literal["market_analysis", "deep_research"],
+    payload: Mapping[str, Any],
+) -> ProductSubmission:
+    if payload.get("schema_version") == "1.0" and "entry_kind" in payload:
+        graph_request = graph_request_for_decision(
+            DecisionRequest.model_validate(payload)
+        )
+        if task_type == "deep_research":
+            if graph_request.task_type != "deep_research":
+                raise ValueError("decision request task type does not match persisted Task")
+            return DeepResearchSubmission.model_validate(
+                graph_request.model_dump(mode="json")
+            )
+        if graph_request.task_type != "market_analysis":
+            raise ValueError("decision request task type does not match persisted Task")
+        return AnalysisSubmission.model_validate(
+            graph_request.model_dump(mode="json", exclude={"task_type"})
+        )
+    if task_type == "deep_research":
+        return DeepResearchSubmission.model_validate(payload)
+    return AnalysisSubmission.model_validate(payload)
 
 
 class RemoteRunner(Protocol):
@@ -379,6 +408,7 @@ class CommandDispatcher:
         product_run.finished_at = now
         product_run.projection_fence = projection_fence
         product_run.terminal_output_hash = output_hash
+        await append_run_usage_receipts(session, task=task, run=product_run)
         if terminal.errors:
             product_run.failure_code = terminal.errors[0].code
             product_run.failure_message = failure_message
@@ -1152,10 +1182,12 @@ class CommandDispatcher:
                     task.task_type,
                 ),
                 submission=(
-                    (
-                        DeepResearchSubmission.model_validate(task.request_payload)
-                        if task.task_type == "deep_research"
-                        else AnalysisSubmission.model_validate(task.request_payload)
+                    _product_submission_from_payload(
+                        cast(
+                            Literal["market_analysis", "deep_research"],
+                            task.task_type,
+                        ),
+                        task.request_payload,
                     )
                     if command.command_type in {"submit", "retry"}
                     else None
@@ -2235,7 +2267,7 @@ class CommandDispatcher:
         lease: CommandLease,
         exc: Exception,
     ) -> bool:
-        if lease.fence_token >= self._max_attempts:
+        if await self._run_deadline_exceeded(lease):
             return await self._finalize_with_database_recovery(
                 lease,
                 TerminalGraphOutput(
@@ -3030,6 +3062,7 @@ class CommandDispatcher:
             product_run.finished_at = now
             task.status = terminal.terminal_status
             task.completed_at = now
+            await append_run_usage_receipts(session, task=task, run=product_run)
             command.status = "dispatched"
             command.lease_owner = None
             command.lease_expires_at = None
@@ -3102,8 +3135,37 @@ class CommandDispatcher:
                     schema_version=terminal.artifact.schema_version,
                 )
                 decision = commit.decision
+                analysis = artifact_payload["analysis"]
+                outcome_horizon = str(analysis.get("horizon") or task.request_payload.get("horizon") or "1h")
+                existing_outcome = await session.scalar(
+                    select(OutcomeObservation).where(
+                        OutcomeObservation.tenant_id == task.tenant_id,
+                        OutcomeObservation.workspace_id == task.workspace_id,
+                        OutcomeObservation.owner_user_id == task.owner_user_id,
+                        OutcomeObservation.artifact_version_id == commit.artifact_version.id,
+                        OutcomeObservation.horizon == outcome_horizon,
+                    )
+                )
+                if existing_outcome is None:
+                    session.add(
+                        OutcomeObservation(
+                            id=uuid4(),
+                            tenant_id=task.tenant_id,
+                            workspace_id=task.workspace_id,
+                            owner_user_id=task.owner_user_id,
+                            artifact_version_id=commit.artifact_version.id,
+                            task_id=task.id,
+                            run_id=product_run.id,
+                            action=str(analysis["main_action"]),
+                            baseline="decision",
+                            predicted_probability=analysis.get("probability"),
+                            horizon=outcome_horizon,
+                            source="exchange_native",
+                            maturation_at=maturation_at(now, outcome_horizon),
+                            available_at=maturation_at(now, outcome_horizon),
+                        )
+                    )
                 if task.request_payload.get("notify") is True:
-                    analysis = artifact_payload["analysis"]
                     destination_id = await session.scalar(
                         select(NotificationDestination.id)
                         .where(

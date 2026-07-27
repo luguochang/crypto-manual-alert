@@ -2,6 +2,9 @@
 
 > authority_class: informative
 >
+> Current delivery gaps and evidence boundaries:
+> [`21-current-delivery-gap-report.md`](./21-current-delivery-gap-report.md).
+>
 > 状态：已批准进入 V2 Final 实施
 >
 > 基线日期：2026-07-13
@@ -54,6 +57,10 @@ V2 不在 V1 的自研工作流、Agent Swarm 和兼容层上继续修补，也�
    - Windows 11、WSL2、Docker Desktop 的安装、配置、启动、停止、日志、迁移和内存治理。
 19. [20-AI 接手与继续实施手册](./20-ai-handoff.md)
    - 新环境 AI 的阅读顺序、配置边界、验证命令、当前生产缺口和继续实施规则。
+20. [21-当前交付缺口报告](./21-current-delivery-gap-report.md)
+   - 当前本地证据、结构缺口、外部授权输入和生产阻塞边界。
+21. [22-Agent 产品主链完成计划](./22-agent-product-mainline-completion-plan.md)
+   - 排除外部通知后的完整产品主链 requirement-to-evidence 清单、免费框架复用边界和执行顺序。
 
 ### 2.1 权威分类
 
@@ -64,7 +71,8 @@ V2 不在 V1 的自研工作流、Agent Swarm 和兼容层上继续修补，也�
 | `05`、`07` | Verified evidence index | 证明官方来源覆盖，不单独新增产品规范 |
 | `04`、`15`、`16`、本 README、`adr/README.md` | Informative | 模板、状态、实施证据、导航和索引，不作为独立产品要求来源 |
 | `10` | Superseded by `14` | 保留历史阶段意图，当前执行顺序和门禁以 `14` 为准 |
-| ADR 0008 | Proposed governance gate | 只有真实部署证据通过后才能转为 Accepted normative |
+| ADR 0008 | Superseded historical gate | hosted 商业部署目标已由 ADR 0011 取代 |
+| ADR 0011 | Approved normative | Aegra 自托管开源 Agent Server 选型与兼容边界 |
 
 Task 0 的 `normative-baseline.json` 是机器可读的唯一分类来源；需求注册表不得自行扩大或缩小 normative 文件集合。
 
@@ -97,7 +105,7 @@ Task 0 的 `normative-baseline.json` 是机器可读的唯一分类来源；需�
 - [x] `07-official-doc-coverage-index.md` 已覆盖事件流、子 Agent、Middleware、长任务、HITL、前端和生产运行时相关官方文档族。
 - [x] 用户批准 `08-production-governance-and-nonfunctional.md` 的数据权威、幂等、安全、隐私、部署和量化验收边界。
 - [x] 用户批准 `09-review-packet-and-decisions.md` 的推荐结论 D01-D15。
-- [x] 用户批准 ADR 0001-0007 推荐结论；ADR 0008 仍以真实生产证据为接受条件。
+- [x] 用户批准 ADR 0001-0007 推荐结论，并于 2026-07-21 明确拒绝商业授权、批准 ADR 0011 的 Aegra 自托管方案；ADR 0008 已被取代。
 - [x] 用户批准 `10-implementation-roadmap.md` 的阶段意图；其执行顺序、停止条件和证据要求已由 `14-v2-final-implementation-plan.md` 取代。
 - [x] 用户通过 D13 与 V2 Final 批准将 `11-core-object-access-recovery-contract.md` 纳入实施权威。
 - [x] 用户通过 D13 与 V2 Final 批准将 `12-production-proof-slo-and-lifecycle.md` 纳入实施权威。

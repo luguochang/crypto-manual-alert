@@ -113,6 +113,13 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   if (method === "POST" && path === "api/v2/auth/context/select") return true;
   if (method === "GET" && path === "api/v2/runs") return true;
   if (method === "GET" && path === "api/v2/home") return true;
+  if ((method === "GET" || method === "POST") && path === "api/v2/memory") return true;
+  if ((method === "PATCH" || method === "DELETE") && isMemoryMemberRoute(pathSegments)) return true;
+  if (method === "GET" && path === "api/v2/outcomes") return true;
+  if (method === "GET" && path === "api/v2/usage") return true;
+  if (method === "POST" && path === "api/v2/usage/reconciliations") return true;
+  if ((method === "GET" || method === "POST") && isImprovementCollectionRoute(pathSegments)) return true;
+  if (method === "POST" && isImprovementCandidateActionRoute(pathSegments)) return true;
   if ((method === "GET" || method === "POST") && path === "api/v2/monitors") return true;
   if (method === "GET" && isMonitorTriggersRoute(pathSegments)) return true;
   if (method === "POST" && isMonitorActionRoute(pathSegments)) return true;
@@ -139,6 +146,7 @@ function isAllowedProductRoute(method: string, pathSegments: string[]): boolean 
   if (method === "GET" && isDataLifecycleDeletionRoute(pathSegments)) return true;
   if (method === "POST" && path === "api/v2/analysis") return true;
   if (method === "POST" && path === "api/v2/deep-research") return true;
+  if (method === "POST" && path === "api/v2/decision-requests") return true;
   if (method === "POST" && isTaskCancelRoute(pathSegments)) return true;
   if (method === "POST" && isTaskRetryRoute(pathSegments)) return true;
   if (method === "POST" && isTaskForkRoute(pathSegments)) return true;
@@ -182,6 +190,39 @@ function isWatchlistRoute(pathSegments: string[]): boolean {
     && pathSegments[1] === "v2"
     && pathSegments[2] === "watchlist"
     && watchlistSymbolPattern.test(pathSegments[3] ?? "");
+}
+
+function isMemoryMemberRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 4
+    && pathSegments[0] === "api"
+    && pathSegments[1] === "v2"
+    && pathSegments[2] === "memory"
+    && taskIdPattern.test(pathSegments[3] ?? "");
+}
+
+function isImprovementCollectionRoute(pathSegments: string[]): boolean {
+  return pathSegments.length === 4
+    && pathSegments[0] === "api"
+    && pathSegments[1] === "v2"
+    && pathSegments[2] === "improvement"
+    && ["datasets", "candidates"].includes(pathSegments[3] ?? "");
+}
+
+function isImprovementCandidateActionRoute(pathSegments: string[]): boolean {
+  const candidatePrefix = pathSegments.length >= 6
+    && pathSegments[0] === "api"
+    && pathSegments[1] === "v2"
+    && pathSegments[2] === "improvement"
+    && pathSegments[3] === "candidates"
+    && taskIdPattern.test(pathSegments[4] ?? "");
+  if (!candidatePrefix) return false;
+  if (pathSegments.length === 6) {
+    return ["experiments", "review", "shadow", "promote", "rollback"]
+      .includes(pathSegments[5] ?? "");
+  }
+  return pathSegments.length === 7
+    && pathSegments[5] === "review"
+    && pathSegments[6] === "decision";
 }
 
 function isRunReadRoute(pathSegments: string[]): boolean {
@@ -366,6 +407,11 @@ function buildServerOwnedHeaders(
     && (
       path === "api/v2/analysis"
       || path === "api/v2/deep-research"
+      || path === "api/v2/decision-requests"
+      || path === "api/v2/memory"
+      || isImprovementCollectionRoute(pathSegments)
+      || isImprovementCandidateActionRoute(pathSegments)
+      || (request.method === "DELETE" && isMemoryMemberRoute(pathSegments))
       || path === "api/v2/monitors"
       || isMonitorActionRoute(pathSegments)
       || (request.method === "DELETE" && isMonitorMemberRoute(pathSegments))

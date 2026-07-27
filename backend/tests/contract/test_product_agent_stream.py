@@ -427,6 +427,7 @@ def test_default_app_does_not_inject_current_agent_assistant_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    review_runtime = object()
     settings = SimpleNamespace(
         product_database_url="postgresql+asyncpg:///test",
         app_environment="local",
@@ -452,6 +453,11 @@ def test_default_app_does_not_inject_current_agent_assistant_id(
         "ProductAnalysisService",
         CapturingProductAnalysisService,
     )
+    monkeypatch.setattr(
+        app_module.CandidateReviewRuntime,
+        "from_settings",
+        lambda _settings: review_runtime,
+    )
 
     app_module.create_default_app()
 
@@ -459,4 +465,5 @@ def test_default_app_does_not_inject_current_agent_assistant_id(
         "session_factory": "session-factory",
         "inbox_cursor_key": None,
         "notification_credential_cipher": None,
+        "candidate_review_runtime": review_runtime,
     }

@@ -207,4 +207,5 @@ def test_atomic_report_writer_uses_owner_only_permissions(tmp_path: Path) -> Non
     output = tmp_path / "observation.json"
     write_report(output, {"proof_level": "local-product-database-observation"})
 
-    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600

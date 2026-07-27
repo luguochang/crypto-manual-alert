@@ -34,6 +34,22 @@ class RecordingResearchCollector:
         return object()
 
 
+class FailingResearchCollector(RecordingResearchCollector):
+    def __init__(self, *, retryable: bool) -> None:
+        super().__init__()
+        self.retryable = retryable
+
+    def collect(self, query: str, config: object = None) -> object:
+        del config
+        self.queries.append(query)
+        raise ResearchUnavailable(
+            "provider failure",
+            provider="builtin_web_search",
+            retryable=self.retryable,
+            error_type="APITimeoutError",
+        )
+
+
 class RecordingRunnable:
     def __init__(self) -> None:
         self.retry_options: dict[str, object] | None = None
@@ -389,6 +405,66 @@ def test_runtime_uses_explicit_builtin_provider_without_reprobing(
     assert selected.queries == ["bounded research"]
 
 
+def test_builtin_retryable_failure_falls_back_once_to_configured_tavily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import crypto_alert_v2.agents.research as research_module
+
+    builtin = FailingResearchCollector(retryable=True)
+    tavily = RecordingResearchCollector()
+    monkeypatch.setattr(research_module, "BuiltinResearchCollector", lambda _: builtin)
+    monkeypatch.setattr(
+        research_module,
+        "TavilyResearchCollector",
+        lambda _, **__: tavily,
+    )
+    collector = CapabilityAwareResearchCollector(
+        object(),  # type: ignore[arg-type]
+        tavily_api_key="configured-key",
+        provider=SearchProvider.BUILTIN,
+        search_http_proxy="http://proxy.example:8080",
+        tavily_fallback_ready=True,
+    )
+
+    result = collector.collect("bounded research")
+
+    assert result is not None
+    assert builtin.queries == ["bounded research"]
+    assert tavily.queries == ["bounded research"]
+
+
+@pytest.mark.parametrize(
+    ("retryable", "tavily_key"),
+    ((False, "configured-key"), (True, None)),
+)
+def test_builtin_failure_does_not_fallback_without_retryable_configured_tavily(
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
+    tavily_key: str | None,
+) -> None:
+    import crypto_alert_v2.agents.research as research_module
+
+    builtin = FailingResearchCollector(retryable=retryable)
+    tavily = RecordingResearchCollector()
+    monkeypatch.setattr(research_module, "BuiltinResearchCollector", lambda _: builtin)
+    monkeypatch.setattr(
+        research_module,
+        "TavilyResearchCollector",
+        lambda _, **__: tavily,
+    )
+    collector = CapabilityAwareResearchCollector(
+        object(),  # type: ignore[arg-type]
+        tavily_api_key=tavily_key,
+        provider=SearchProvider.BUILTIN,
+    )
+
+    with pytest.raises(ResearchUnavailable, match="provider failure"):
+        collector.collect("bounded research")
+
+    assert builtin.queries == ["bounded research"]
+    assert tavily.queries == []
+
+
 def test_explicit_tavily_provider_requires_its_key() -> None:
     collector = CapabilityAwareResearchCollector(
         object(),  # type: ignore[arg-type]
@@ -423,10 +499,10 @@ def test_explicit_ddgs_metasearch_provider_uses_the_named_collector(
     assert selected.queries == ["bounded research"]
 
 
-def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
+def test_readiness_probes_configured_tavily_as_bounded_builtin_fallback() -> None:
     tavily_probe_calls = 0
 
-    def unexpected_tavily_probe(_: str) -> bool:
+    def tavily_probe(_: str) -> bool:
         nonlocal tavily_probe_calls
         tavily_probe_calls += 1
         return True
@@ -437,7 +513,7 @@ def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
         base_url="https://user:password@model.example/v1?token=secret",
         tavily_api_key="must-not-be-exposed",
         capability_probe=lambda _: ready_capabilities(),
-        tavily_probe=unexpected_tavily_probe,
+        tavily_probe=tavily_probe,
         now=lambda: datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
     )
 
@@ -446,8 +522,8 @@ def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
     assert readiness.endpoint == "https://model.example"
     assert readiness.model == "capability-test"
     assert readiness.tavily_configured is True
-    assert readiness.tavily_connected is False
-    assert tavily_probe_calls == 0
+    assert readiness.tavily_connected is True
+    assert tavily_probe_calls == 1
     public = readiness.model_dump(mode="json")
     assert "password" not in str(public)
     assert "secret" not in str(public)
@@ -455,6 +531,21 @@ def test_readiness_prefers_verified_builtin_without_probing_tavily() -> None:
         SearchReadiness.model_validate({**public, "selected_provider": "fixture"})
     with pytest.raises(ValidationError):
         readiness.selected_provider = SearchProvider.TAVILY  # type: ignore[misc]
+
+
+def test_optional_tavily_fallback_probe_failure_keeps_builtin_ready() -> None:
+    readiness = establish_search_readiness(
+        model=object(),  # type: ignore[arg-type]
+        model_name="capability-test",
+        base_url=None,
+        tavily_api_key="configured-tavily-key",
+        capability_probe=lambda _: ready_capabilities(),
+        tavily_probe=lambda _: (_ for _ in ()).throw(TimeoutError()),
+        requested_provider=SearchProvider.BUILTIN,
+    )
+
+    assert readiness.selected_provider is SearchProvider.BUILTIN
+    assert readiness.tavily_connected is False
 
 
 def test_auto_readiness_falls_back_to_connected_tavily() -> None:
