@@ -13464,3 +13464,55 @@ All checks passed!
 
 - Commands/results: restage the final ledger, rerun staged Gitleaks v8.24.2 (`no leaks found`) and `git diff --cached --check` (passed), then create `feat(v2): archive agent product mainline and production gates`. The initial pre-ledger-record commit identity was `5c53e1a`; it contains 218 files / 40,965 insertions / 7,322 deletions and preserves the explicit V2 PARTIAL / Production Ready NO boundary.
 - Commit boundary: the current unpushed commit will be amended only to include this execution-ledger record, so its final SHA will differ from `5c53e1a`. No force push is needed because nothing has been pushed yet. No dotenv or generated backend artifact was committed.
+
+### 2026-07-27 - Archive commit finalization and first push timeout
+
+- Commands/results: stage the commit record, scan the staged ledger delta with Gitleaks (`no leaks found`), pass staged whitespace checks and amend the unpushed archive commit. Final archive SHA is `96618303a7b6f838cd387696c2ebcc4d2d03172d`; worktree was clean and the branch was one commit ahead of origin.
+- Push attempt: run a normal non-force push to `origin/codex/v2-production-completion`. The process emitted no Git result and timed out after about 184 seconds with exit `124`. This timeout is not treated as either push success or rejection.
+- Evidence boundary: finalized local archive commit plus indeterminate first push. A read-only remote SHA refresh is required before any retry. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-27 - Remote SHA check after push timeout
+
+- Command/result: disable terminal/credential-manager interaction for the process and fetch the target branch. Fetch succeeds; local archive SHA is `96618303a7b6f838cd387696c2ebcc4d2d03172d`, remote remains `f04069ce67f282222bd051f31673d65af9b9fd68`, and local is exactly one commit ahead.
+- Decision boundary: the first push did not update GitHub. Retry the same non-force refspec with noninteractive credential mode so authentication either uses existing stored authority or returns a bounded explicit failure. No rebase, merge or force push is needed.
+
+### 2026-07-27 - Noninteractive push authentication failure
+
+- Command/result: retry the same non-force push with terminal and Git Credential Manager interactivity disabled. Git exits `1` immediately with `Cannot prompt because user interactivity has been disabled` / `unable to get password from user`.
+- Evidence boundary: explicit missing HTTPS credential in the noninteractive Git path. Remote is still unchanged. No credential value was read or printed. GitHub CLI authentication is the next in-scope fallback; no force push or remote URL mutation is authorized or attempted.
+
+### 2026-07-27 - GitHub CLI availability check
+
+- Command/result: check for `gh` without reading authentication material; GitHub CLI is not installed.
+- Decision boundary: use the Git-for-Windows bundled Git Credential Manager official GitHub login flow if available. Do not paste, print or persist a token in repository files, commands or the execution ledger.
+
+### 2026-07-27 - Credential Manager and authentication-automation boundary
+
+- Commands/results: Git Credential Manager `2.8.0` is installed and exposes GitHub account list/login/logout, but its known-account list is empty. Read the required Computer Use guidance and confirmation policy before considering Windows UI control.
+- Safety boundary: Computer Use explicitly forbids automating authentication dialogs. No login window, password, OTP, browser credential or token is automated, read or printed. Before requiring user interaction, test only whether an already-authorized local SSH identity can authenticate to GitHub in batch mode; this does not change the configured HTTPS origin.
+
+### 2026-07-27 - Existing SSH identity check
+
+- Command/result: test GitHub SSH authentication in batch mode with a bounded connection timeout and host-key acceptance. SSH exits `255` and classifies as no authorized GitHub SSH identity.
+- Evidence boundary: no SSH push and no remote URL change occurred. Both pre-existing noninteractive authentication paths (HTTPS credential and SSH identity) are unavailable; Git Credential Manager login now requires user participation. No credential material was accessed or emitted.
+
+### 2026-07-27 - Git Credential Manager device-flow selection
+
+- Command/result: inspect `git credential-manager github login --help`; GCM supports official browser, device and PAT flows.
+- Decision boundary: select `--device --no-ui` so the user authorizes directly at GitHub and no PAT/password is entered into commands, repository files or chat. The short-lived device code is not written to this ledger. Push remains pending user authentication.
+
+### 2026-07-27 - First GitHub device-flow transport failure
+
+- Commands/results: start GCM GitHub device flow and, after no terminal code was returned, use Computer Use only to list windows. A unique `Connect to GitHub` GCM window was present; no authentication UI was clicked, typed into or automated. The device-flow process then exited `1` after about 166 seconds with a request/base-connection-closed transport error.
+- Evidence boundary: failed official authentication transport; no credential was created, captured or printed, and remote GitHub state remains unchanged. Since the existing local Clash process may be required for GitHub connectivity, test only endpoint reachability before another user-operated authorization attempt.
+
+### 2026-07-27 - GitHub device endpoint reachability
+
+- Command/result: request `https://github.com/login/device` directly and through process-scoped Clash proxy `http://127.0.0.1:7890`; both paths return HTTP `302` with curl exit zero.
+- Decision boundary: retry GCM device flow once with process-scoped HTTP/HTTPS proxy variables. This does not persist proxy configuration and still requires the user to operate the official authentication window. No credential or response body is read or printed.
+
+### 2026-07-27 - GitHub archive authentication handoff
+
+- Commands/results: start a second official GCM device-flow login with process-scoped Clash HTTP/HTTPS proxy; Computer Use window listing confirms a unique `Connect to GitHub` window. No authentication UI is automated. After several minutes without user completion or process result, terminate the waiting GCM process to avoid leaving an indefinite background authorization session.
+- Current archive state: local archive commit `96618303a7b6f838cd387696c2ebcc4d2d03172d` is intact. GitHub remote branch still points to `f04069ce67f282222bd051f31673d65af9b9fd68`; push is blocked solely by absent user-authorized GitHub credentials. A docs-only handoff commit may record these authentication attempts locally, but it also cannot be pushed until the user completes GCM login.
+- Evidence boundary: no remote mutation, no force push and no credential handling. Resume by completing `git credential-manager github login` in the official window, then perform a normal push and verify remote SHA. V2 remains PARTIAL and Production Ready remains NO.
