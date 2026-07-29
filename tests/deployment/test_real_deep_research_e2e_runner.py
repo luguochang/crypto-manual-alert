@@ -368,32 +368,33 @@ def test_restart_supervisor_restarts_owned_http_child(tmp_path: Path) -> None:
         except subprocess.TimeoutExpired:
             supervisor.kill()
             supervisor.wait(timeout=5)
-        for process in subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select-Object -ExpandProperty ProcessId"],
-            text=True,
-        ).splitlines():
-            if not process.strip().isdigit():
-                continue
-            candidate = int(process.strip())
-            try:
-                details = subprocess.check_output(
-                    [
-                        "powershell",
-                        "-NoProfile",
-                        "-Command",
-                        f"(Get-CimInstance Win32_Process -Filter 'ProcessId={candidate}').CommandLine",
-                    ],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                )
-            except subprocess.CalledProcessError:
-                continue
-            if f"http.server {port}" in details:
-                subprocess.run(
-                    ["taskkill", "/PID", str(candidate), "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                )
+        if os.name == "nt":
+            for process in subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select-Object -ExpandProperty ProcessId"],
+                text=True,
+            ).splitlines():
+                if not process.strip().isdigit():
+                    continue
+                candidate = int(process.strip())
+                try:
+                    details = subprocess.check_output(
+                        [
+                            "powershell",
+                            "-NoProfile",
+                            "-Command",
+                            f"(Get-CimInstance Win32_Process -Filter 'ProcessId={candidate}').CommandLine",
+                        ],
+                        text=True,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except subprocess.CalledProcessError:
+                    continue
+                if f"http.server {port}" in details:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(candidate), "/T", "/F"],
+                        check=False,
+                        capture_output=True,
+                    )
 
 
 def test_database_export_is_an_explicit_secret_safe_allowlist() -> None:

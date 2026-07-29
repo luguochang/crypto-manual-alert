@@ -505,6 +505,7 @@ def test_missing_tool_fails_before_scans_with_machine_readable_summary(
     hermetic_bin = tmp_path / "hermetic-bin"
     hermetic_bin.mkdir()
     commands = (
+        "awk",
         "cat",
         "chmod",
         "cmp",
@@ -533,6 +534,10 @@ def test_missing_tool_fails_before_scans_with_machine_readable_summary(
     result, output_dir = _run_gate(gate_fixture, path=str(hermetic_bin))
 
     assert result.returncode != 0
+    assert (output_dir / "supply-chain-summary.json").is_file(), (
+        result.stdout,
+        result.stderr,
+    )
     summary = _load_summary(output_dir)
     assert summary["status"] == "failed"
     assert summary["failure_reason"] == "required_tool_missing"

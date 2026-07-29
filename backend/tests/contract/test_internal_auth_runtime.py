@@ -772,9 +772,10 @@ def test_agent_readiness_monitor_stays_unready_without_signer() -> None:
         "PATH": os.environ["PATH"],
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
-        "SYSTEMROOT": os.environ["SYSTEMROOT"],
-        "WINDIR": os.environ["WINDIR"],
     }
+    for name in ("SYSTEMROOT", "WINDIR"):
+        if value := os.environ.get(name):
+            env[name] = value
 
     process = subprocess.Popen(
         [

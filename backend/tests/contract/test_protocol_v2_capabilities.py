@@ -183,9 +183,10 @@ asyncio.run(main())
         "REDIS_URI": "redis://127.0.0.1:1/0",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
-        "SYSTEMROOT": os.environ["SYSTEMROOT"],
-        "WINDIR": os.environ["WINDIR"],
     }
+    for name in ("SYSTEMROOT", "WINDIR"):
+        if value := os.environ.get(name):
+            environment[name] = value
     completed = subprocess.run(
         [sys.executable, "-c", script],
         cwd=REPOSITORY_ROOT / "backend",
