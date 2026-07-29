@@ -8,8 +8,10 @@ LangChain/LangGraph Agent 生成结构化分析，再由确定性证据门禁、
 
 > **交付状态：V2 PARTIAL / Production Ready: NO**
 >
-> 本地 Product 主流程、持久化、HITL、恢复和 UI 已实现并有自动化覆盖；托管 HTTPS、
-> 真实 OIDC、生产 HA/DR/SLO 与有效外部 Provider 的现场门禁仍需在目标环境完成。
+> 2026-07-29 已通过一次完整的本地真实主链验收：OKX public 行情、Tavily、OpenAI-compatible
+> 模型、Aegra、LangGraph interrupt、人工批准、checkpoint 恢复、Artifact、Runs 和 Library。
+> 这只是本地实时 Provider 证据；托管 HTTPS、真实 OIDC、生产 HA/DR/SLO 与发布门禁仍需在
+> 目标环境完成。
 > 外部通知发送不属于本次交付范围。
 
 正式方向与历史迁移约束见
@@ -29,24 +31,29 @@ LangChain/LangGraph Agent 生成结构化分析，再由确定性证据门禁、
   Improvement、Usage 和 Settings。
 - **多用户边界**：Next.js BFF 注入服务端身份，租户/Workspace 隔离，内部短时 JWT，
   默认开发身份与生产 OIDC 钩子分离。
-- **安全观测**：LangSmith/Langfuse 接口、字段脱敏、受控诊断路由和不可变审计引用。
+- **安全观测**：OpenTelemetry 作为正式观测出口，支持免费自托管 backend；LangSmith/Langfuse
+  仅为可选适配器，同时保留字段脱敏、受控诊断路由和不可变审计引用。
 
-## 自动化演示
+## 最新演示
 
-以下截图由 Product Playwright walkthrough 自动生成。它验证排队、运行、结构化结果、
-证据门禁、风险门禁、响应式布局、无障碍和敏感字段不渲染；数据是确定性 fixture，
-不代表真实 Provider 或生产环境已经通过。
+以下画面来自 2026-07-29 的真实本地 Compose walkthrough，不是 fixture。Agent 使用 OKX public
+行情、Tavily 和配置的 OpenAI-compatible `gpt-5.5`，经人工批准后从 LangGraph checkpoint
+恢复，最终因证据冲突提交“暂不操作”报告。这个结果证明本机主链可运行，不代表 hosted
+production 已通过。
 
-![Signal Desk desktop workflow](docs/assets/screenshots/signal-desk-workflow-desktop.png)
+![Signal Desk 真实本地主流程结果](docs/assets/screenshots/signal-desk-live-result.png)
 
 <details>
-<summary>查看 Pixel 7 移动端截图</summary>
+<summary>查看 Pixel 7 结果与报告详情</summary>
 
-![Signal Desk mobile workflow](docs/assets/screenshots/signal-desk-workflow-mobile.png)
+![Signal Desk Pixel 7 主流程结果](docs/assets/screenshots/signal-desk-live-result-mobile.png)
+
+![Signal Desk Pixel 7 报告详情](docs/assets/screenshots/signal-desk-live-artifact-mobile.png)
 
 </details>
 
-不准备任何密钥也可以复现这套 UI 流程：
+不准备任何密钥也可以运行确定性的 UI 回归；它覆盖排队、运行、结构化结果、门禁、响应式、
+无障碍和敏感字段不渲染，但只属于 fixture 证据：
 
 ```powershell
 npm.cmd --prefix frontend ci
@@ -79,7 +86,7 @@ API 或通知服务。
   metasearch。
 - OKX 只使用 public market data，不需要也不接受交易 API Key。
 
-## Docker 安装
+## 5 分钟 Docker 安装
 
 ### 1. 获取代码
 
@@ -103,7 +110,7 @@ cp backend/.env.example backend/.env
 chmod 600 backend/.env
 ```
 
-只填写本机的 `backend/.env`，绝对不要提交。最小必填项：
+这是运行时唯一需要用户填写的 dotenv 文件：`backend/.env`。绝对不要提交。最小必填项：
 
 | 变量 | 说明 |
 | --- | --- |
@@ -118,6 +125,14 @@ chmod 600 backend/.env
 
 如果兼容网关不支持 OpenAI Responses Web Search，请显式使用 `SEARCH_PROVIDER=tavily`，
 不要保留默认 builtin 后再把检索失败误判成页面问题。
+
+使用 Clash 等宿主机代理时，容器配置必须写 `host.docker.internal`，不能写 `127.0.0.1`：
+
+```dotenv
+SEARCH_PROVIDER=tavily
+MARKET_DATA_HTTP_PROXY=http://host.docker.internal:7890
+SEARCH_HTTP_PROXY=http://host.docker.internal:7890
+```
 
 ### 3. 启动
 
@@ -146,6 +161,10 @@ docker compose -p signal-desk logs -f langgraph-api command-worker frontend
 
 Agent API 健康端点：`http://127.0.0.1:8123/health`。
 
+完整就绪还应满足：`langgraph-api`、`langgraph-api-readiness`、`command-worker`、`frontend`、
+PostgreSQL 与 Redis 均为 healthy。readiness 使用同一个可选 `backend/.env` 引用验证实际选择的
+搜索 Provider；不会把任何值打包进镜像。
+
 ### 5. 停止
 
 ```bash
@@ -154,7 +173,7 @@ docker compose -p signal-desk down
 
 默认不会删除数据卷。只有明确不再需要本地数据时才使用 `down -v`。
 
-## 使用流程
+## 业务架构与使用流程
 
 1. 打开 `/work`，选择市场分析或深度研究。
 2. 选择 BTC/ETH/SOL、分析周期并输入关注问题。
@@ -182,6 +201,23 @@ flowchart TD
     K -. "可选，本次交付不发送" .-> M["Notification Outbox"]
 ```
 
+业务状态始终从可持久事实投影，页面不会仅凭流事件宣称成功：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued: DecisionRequest admitted
+    Queued --> Running: Aegra starts Run
+    Running --> WaitingHuman: LangGraph interrupt
+    WaitingHuman --> Running: approve / edit
+    WaitingHuman --> Rejected: reject / expire
+    Running --> Succeeded: committed Artifact
+    Running --> Blocked: deterministic gate
+    Running --> Failed: classified dependency/runtime error
+    Running --> Cancelled: user cancellation
+    Succeeded --> RunsLibrary: Product projection
+    Blocked --> RunsLibrary: non-actionable record
+```
+
 ## 技术架构
 
 ```mermaid
@@ -201,7 +237,8 @@ flowchart LR
     P --> PP[("Product PostgreSQL")]
     A --> R[("Redis broker")]
     P --> W["Command / projection / lifecycle workers"]
-    G --> OBS["LangSmith / Langfuse adapters"]
+    G --> OBS["OpenTelemetry exporter"]
+    OBS --> OB["Free self-hosted observability backend"]
 ```
 
 关键原则：
@@ -212,6 +249,7 @@ flowchart LR
 - 模型负责分析，不拥有风险规则、最终副作用授权或交易工具。
 - Next.js BFF 持有服务端身份，浏览器不直接接触内部 JWT 或 Provider 密钥。
 - Aegra 是 Apache-2.0 自托管 Agent Protocol 运行时，不依赖商业 Agent Server 授权。
+- LangSmith/Langfuse 只能作为可选观测适配器，不能成为安装或生产交付前提。
 
 ## 页面导航
 

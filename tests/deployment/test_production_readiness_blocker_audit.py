@@ -92,6 +92,32 @@ def test_report_never_treats_presence_as_production_proof(tmp_path: Path) -> Non
     assert report["secret_scan"] == {"findings": 0}
 
 
+def test_external_blockers_require_free_observability_without_notifications(
+    tmp_path: Path,
+) -> None:
+    repository, plan = _repository(tmp_path)
+
+    report = MODULE.build_report(
+        repository,
+        plan=plan,
+        git_head="a" * 40,
+        git_dirty=False,
+    )
+
+    blockers = {
+        blocker["id"]: blocker
+        for blocker in report["external_authority_blockers"]
+    }
+    assert "external_opentelemetry_backend" in blockers
+    assert "production_alerts" in blockers
+    assert "external_langsmith_langfuse" not in blockers
+    assert "production_alerts_and_notification_receipts" not in blockers
+    owner_inputs = " ".join(report["required_owner_inputs"])
+    assert "langsmith" not in owner_inputs
+    assert "langfuse" not in owner_inputs
+    assert "notification_provider" not in owner_inputs
+
+
 def test_cli_writes_external_report_and_exits_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

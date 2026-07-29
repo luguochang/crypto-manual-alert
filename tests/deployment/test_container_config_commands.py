@@ -940,7 +940,11 @@ def test_compose_secret_consumers_and_jwt_mounts_follow_least_privilege():
     env_file_services = {
         name for name, service in services.items() if "env_file" in service
     }
-    assert env_file_services == {"langgraph-api", "command-worker"}
+    assert env_file_services == {
+        "langgraph-api",
+        "langgraph-api-readiness",
+        "command-worker",
+    }
     for service_name in env_file_services:
         assert services[service_name]["env_file"] == [
             {"path": "backend/.env", "required": False}

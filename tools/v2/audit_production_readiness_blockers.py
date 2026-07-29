@@ -49,13 +49,13 @@ EXTERNAL_BLOCKERS = (
         ),
     },
     {
-        "id": "external_langsmith_langfuse",
-        "owner_input": "langsmith_langfuse_projects_credentials_and_query_access",
+        "id": "external_opentelemetry_backend",
+        "owner_input": "free_self_hosted_otel_endpoint_and_query_access",
         "evidence_paths": ("artifacts/v2-final/observability",),
     },
     {
-        "id": "production_alerts_and_notification_receipts",
-        "owner_input": "monitoring_alert_routing_and_notification_providers",
+        "id": "production_alerts",
+        "owner_input": "monitoring_backend_and_alert_routing",
         "evidence_paths": (
             "artifacts/v2-final/alerts/hosted-red.json",
             "artifacts/v2-final/alerts/hosted-green.json",

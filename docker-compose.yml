@@ -235,6 +235,9 @@ services:
     image: crypto-manual-alert-v2-backend:local
     pull_policy: never
     restart: unless-stopped
+    env_file:
+      - path: backend/.env
+        required: false
     environment:
       APP_ENVIRONMENT: production
       AGENT_SERVER_URL: http://langgraph-api:8000
