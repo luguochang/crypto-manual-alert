@@ -4,7 +4,7 @@
 >
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Every production change follows red-green-refactor and receives specification review before code-quality review.
 
-**Goal:** Build and verify the final multi-user crypto intelligence Agent product using the official LangChain, LangGraph, Deep Agents, Agent Server, LangSmith, Langfuse and React SDK contracts.
+**Goal:** Build and verify the final multi-user crypto intelligence Agent product using official LangChain, LangGraph, Deep Agents and React SDK contracts on the free/open Aegra self-hosted Agent Server, with OpenTelemetry and optional LangSmith/Langfuse adapters.
 
 **Architecture:** One canonical LangGraph runs on ADR 0011's self-hosted Aegra Agent Protocol Server. LangChain agent factories own model/tool/middleware assembly; deterministic domain code owns evidence and risk decisions; Product PostgreSQL owns user-visible business records; `@langchain/react` owns live runtime state while Product APIs own history and projections.
 
@@ -29,7 +29,10 @@
 ## Task 0: Commit the Immutable Normative Baseline
 
 **Files:**
+- Create: `docs/v2/normative-source-policy.json`
 - Create: `docs/v2/normative-baseline.json`
+- Create: `tools/v2/build_normative_baseline.py`
+- Create: `tools/v2/tests/test_normative_baseline.py`
 - Review/modify only as required: `docs/v2/README.md`
 - Review/modify only as required: `docs/v2/01-v2-product-and-architecture.md`
 - Review/modify only as required: `docs/v2/02-official-framework-constraints.md`
@@ -54,6 +57,9 @@
 - Review/modify only as required: `docs/v2/adr/0006-production-slo-retention-and-outcome.md`
 - Review/modify only as required: `docs/v2/adr/0007-launch-and-financial-product-boundary.md`
 - Review/modify only as required: `docs/v2/adr/0008-production-deployment-profile.md`
+- Review/modify only as required: `docs/v2/adr/0009-canonical-agent-and-research-harness.md`
+- Review/modify only as required: `docs/v2/adr/0010-task13-restricted-deep-research-harness.md`
+- Review/modify only as required: `docs/v2/adr/0011-aegra-self-hosted-agent-server.md`
 
 - [ ] **Step 1: Verify the allowlisted documentation tree**
 
@@ -66,6 +72,8 @@ Stage every reviewed V2 baseline document explicitly, never with a bulk working-
 - [ ] **Step 3: Attest the immutable baseline**
 
 After zero Critical/Important findings, generate `docs/v2/normative-baseline.json` containing schema version, the reviewed candidate SHA as `NORMATIVE_SHA`, every reviewed candidate file with one explicit classification (`approved_normative`, `mixed`, `verified_evidence_index`, `informative`, `superseded`, or `proposed_gate`), explicit `normative_regions` anchors for mixed files, replacement/priority metadata, each candidate-file SHA-256, all three reviewer identities/results and timestamp. The manifest explicitly excludes itself from its file-hash set to avoid a self-hash cycle. Commit only that manifest as `docs: attest v2 normative baseline`, verify a clean tree, and require every later implementation note, review request and release-evidence entry to reference `NORMATIVE_SHA`. Normative changes after this point require a new candidate, the full sequential review chain, a new manifest and revalidation of affected implementation tasks.
+
+Before requesting reviews, run `build_normative_baseline.py --check-sources` against the exact candidate SHA and the candidate-committed `docs/v2/normative-source-policy.json`. After the three ordered reviews, rerun the same tool with the concrete review-chain document, repository review note and output path. The builder reads the policy and every source from candidate Git blobs, binds their hashes and refuses to overwrite generation one; source preflight alone is never an approval or attestation.
 
 ## Task 0B: Bootstrap the Requirement Registry Before Any Product RED
 
@@ -89,7 +97,7 @@ Expected: FAIL because the generator, verifier and seed registry do not exist. A
 
 - [ ] **Step 3: Generate the complete seed and prove pre-RED assignment**
 
-Generate `requirements-registry.yaml` only from manifest files/regions classified `approved_normative`/`mixed.normative_regions`, plus stable non-normative gate entries for `proposed_gate` sources such as ADR 0008. Before implementation starts, every entry freezes its stable ID, source/content hash, implementation task/slice, accountable role, intended RED test/command and expected missing behavior, intended GREEN test/command, proof classification, final proof target and required environment. Production requirements and proposed production gates require `hosted-production` final proof. Run a dry assignment for Task 1 with a disposable test Agent ID, generate a receipt, verify it, then reset only that disposable assignment through the tested structured command so the committed seed has roles/tasks/proof mappings but no fake concrete implementer.
+Generate `requirements-registry.yaml` only from manifest files/regions classified `approved_normative`/`mixed.normative_regions`, plus stable non-normative gate entries for any future source that remains explicitly classified `proposed_gate`. ADR 0008 is superseded by the accepted Aegra ADR 0011 and is excluded from normative/gate extraction. Before implementation starts, every entry freezes its stable ID, source/content hash, implementation task/slice, accountable role, intended RED test/command and expected missing behavior, intended GREEN test/command, proof classification, final proof target and required environment. Production requirements and proposed production gates require `hosted-production` final proof. Run a dry assignment for Task 1 with a disposable test Agent ID, generate a receipt, verify it, then reset only that disposable assignment through the tested structured command so the committed seed has roles/tasks/proof mappings but no fake concrete implementer.
 
 Run:
 
@@ -611,7 +619,7 @@ Add a rollback test where the third insert fails and all counts remain zero.
 
 - [ ] **Step 2: Confirm the expected missing-persistence RED**
 
-Run: `cd backend && uv run pytest tests/contract/test_persistence_delivery_retry_budgets.py tests/contract/test_domain_event_contract.py tests/integration/test_migrations.py tests/integration/test_database_role_isolation.py tests/integration/test_artifact_transaction.py tests/integration/test_progressive_stage_persistence.py tests/integration/test_outbox_idempotency.py tests/integration/test_outbox_manual_resend.py tests/integration/test_command_dispatcher.py tests/integration/test_cancel_task.py tests/integration/test_projection_reconciler.py tests/integration/test_reconciler_deadlines.py tests/integration/test_notification_worker.py tests/integration/test_worker_process_lifecycle.py -q`
+Run: `cd backend && uv run pytest tests/contract/test_persistence_delivery_retry_budgets.py tests/contract/test_domain_event_contract.py tests/integration/test_migrations.py tests/integration/test_database_role_isolation.py tests/integration/test_artifact_transaction.py tests/integration/test_progressive_stage_persistence.py tests/integration/test_outbox_idempotency.py tests/integration/test_command_dispatcher.py tests/integration/test_cancel_task.py tests/integration/test_projection_reconciler.py tests/integration/test_reconciler_deadlines.py tests/integration/test_worker_process_lifecycle.py -q`
 
 Expected: FAIL during collection because persistence models, the migration revision, UnitOfWork or dispatcher are missing. Do not start Docker in RED; a connection-refused failure is not evidence that the persistence contract is missing.
 
@@ -627,11 +635,11 @@ Dispatcher ownership is fenced on both sides of remote Run creation: perform a p
 
 `test_domain_event_contract.py` requires exactly `market.snapshot.committed`, `research.evidence.committed`, `agent.output.committed`, `evidence.verdict.committed`, `risk.verdict.committed`, `artifact.committed`, `notification.planned` and `run.terminal`. Every envelope contains event/task/run/checkpoint IDs, schema version, payload ref/hash, Thread-global sequence and timestamp; full recoverable payload lives in Product DB/Object Storage while Graph state keeps IDs/summaries.
 
-`OutboxWorker` claims rows with owner/expiry/fencing-token leases and exact unique logical key `(workspace_id, task_id, channel, type, decision_version)`, records every attempt and delegates to Bark/Web Push/Email adapters. Same key/different payload is an audited conflict; uncertain delivery becomes `unknown` and is not automatically resent. Manual resend creates a new attempt under the same logical notification/audit chain. Graph nodes do not send notifications directly.
+The notification outbox remains a compatibility/audit projection with exact unique logical key `(workspace_id, task_id, channel, type, decision_version)`. Same key/different payload is an audited conflict. No worker delegates to Bark/Web Push/Email and no manual resend or external delivery receipt is required. Graph nodes never send notifications directly.
 
-`python -m crypto_alert_v2.workers` is the single process entrypoint for command-dispatch, projection-reconciliation, notification and webhook lease loops. It exposes worker liveness/readiness, installs TERM/INT handlers, stops claiming new leases, finishes or releases in-flight leases with fencing, and exits within the shutdown budget. `test_worker_process_lifecycle.py` kills/restarts the process and proves pending durable work resumes once without duplicate side effects.
+`python -m crypto_alert_v2.workers` is the single process entrypoint for command-dispatch, projection-reconciliation and webhook lease loops. It exposes worker liveness/readiness, installs TERM/INT handlers, stops claiming new leases, finishes or releases in-flight leases with fencing, and exits within the shutdown budget. `test_worker_process_lifecycle.py` kills/restarts the process and proves pending durable work resumes once without duplicate side effects.
 
-The remaining numerical retry contract is exact: PostgreSQL retries only serialization/deadlock failures, at most 2 attempts and 5 seconds total; Notification Outbox uses at most 5 attempts with exponential backoff and reaches terminal/`unknown` after 24 hours; Webhook uses at most 5 attempts then writes a DLQ record. Every attempt records owner, reason, delay, Retry-After, cost and result. Tests prove non-retryable database failures execute once and no lower-level SDK multiplies these budgets.
+The remaining numerical retry contract is exact: PostgreSQL retries only serialization/deadlock failures, at most 2 attempts and 5 seconds total; Webhook uses at most 5 attempts then writes a DLQ record. Every attempted side effect records owner, reason, delay, Retry-After, cost and result. Tests prove non-retryable database failures execute once and no lower-level SDK multiplies these budgets. Notification outbox rows are not externally delivered in this scope.
 
 Wire the concrete Product UnitOfWork into the typed runtime assembly. `persist_stage.py` performs one idempotent Product transaction per paid stage and writes the matching `product_event_projection`; `commit_artifact.py` performs the single ArtifactVersion + Decision + notification-planned transaction. Integration tests invoke the canonical graph with the real runtime assembly, not repositories in isolation.
 
@@ -991,7 +999,6 @@ Commit: `feat: deliver responsive agent workspace ui`
 - Create: `frontend/tests/e2e/hitl-recovery.spec.ts`
 - Create: `frontend/tests/e2e/cross-tenant-security.spec.ts`
 - Create: `frontend/tests/e2e/provider-failures.spec.ts`
-- Create: `frontend/tests/e2e/notification-delivery.spec.ts`
 - Create: `frontend/tests/e2e/visual-regression.spec.ts`
 - Modify: `frontend/playwright.config.ts`
 - Modify: `frontend/tests/e2e/global-teardown.ts`
@@ -1008,7 +1015,7 @@ Commit: `feat: deliver responsive agent workspace ui`
 
 - [ ] **Step 1: Write real-flow and failure tests**
 
-The default real analysis test submits one BTC request with development `review_policy=bypass`, observes market/search/model stages, validates and persists the rendered artifact without blocking on Interrupt, verifies history and matches correlation IDs. The same Run must produce a real Bark provider delivery receipt plus its In-app Inbox record; `notification-delivery.spec.ts` separately proves a real Web Push or Email delivery/receipt so Bark is not the sole formal channel. All receipts bind provider attempt, correlation, task, run and artifact IDs and reject fixture adapters. `hitl-recovery.spec.ts` explicitly forces `review_policy=required` and covers approve, reject, edit, expire, refresh recovery and cancellation.
+The default real analysis test submits one BTC request with development `review_policy=bypass`, observes market/search/model stages, validates and persists the rendered artifact without blocking on Interrupt, verifies history and matches correlation IDs. The same Run must persist its in-app Inbox/outbox projection and explicitly report external notification delivery as excluded. `hitl-recovery.spec.ts` explicitly forces `review_policy=required` and covers approve, reject, edit, expire, refresh recovery and cancellation.
 
 As test harness scaffolding before RED, add the `real-provider-desktop`/`real-provider-pixel-7` and `failure-injection-desktop`/`failure-injection-pixel-7` Playwright projects, isolated profile env files and startup selection. They boot the healthy Task 11 stack; real-provider projects use existing real adapters, while failure-injection projects start without the still-missing scenario control. Every named test must collect and execute; RED comes from missing end-to-end persistence/receipt/recovery/failure-control assertions, not an unknown project or startup failure.
 
@@ -1018,17 +1025,17 @@ Run:
 
 ```bash
 (cd backend && uv run pytest tests/contract/test_failure_injection_profile.py -q)
-(cd frontend && npm run test:e2e -- real-analysis-flow.spec.ts notification-delivery.spec.ts hitl-recovery.spec.ts cross-tenant-security.spec.ts visual-regression.spec.ts --project=real-provider-desktop)
+(cd frontend && npm run test:e2e -- real-analysis-flow.spec.ts hitl-recovery.spec.ts cross-tenant-security.spec.ts visual-regression.spec.ts --project=real-provider-desktop)
 (cd frontend && npm run test:e2e -- provider-failures.spec.ts visual-regression.spec.ts --project=failure-injection-desktop)
 ```
 
-Expected: FAIL on named missing persisted-flow, notification, HITL recovery, cross-tenant, visual or failure-injection assertions. Unknown project, zero collection, unhealthy stack, connection-only failure or credential skip is invalid when the corresponding project was explicitly selected.
+Expected: FAIL on named missing persisted-flow, HITL recovery, cross-tenant, visual or failure-injection assertions. Unknown project, zero collection, unhealthy stack, connection-only failure or credential skip is invalid when the corresponding project was explicitly selected.
 
 - [ ] **Step 3: Extend the V2 stack and add failure injection**
 
 Complete the pre-RED real/failure projects with the failure-injection implementation. Each project keeps exact `testMatch`, profile env and an isolated Compose project. Failure scenarios are controlled through the test-only scenario API and reset before each test; the route/profile fail startup outside `local/test`. Release proof uses both real-provider projects; fixture tests cannot satisfy real-provider gates.
 
-Explicitly test OKX 500/timeout, search unavailable, model invalid structured output, database rollback, Bark/Web Push-or-Email notification failure, LangSmith unavailable and Langfuse unavailable. Provider/model/database failures end as `failed`. Notification or observability failures may end as `succeeded` only with explicit warnings and an incomplete `completion_scope`; neither is a separate Run terminal status. Each observability outage also proves a redacted structured local log with correlation/retry state and the matching alert fingerprint; Task 14 later proves the production alert rule fires. No scenario may show generic success.
+Explicitly test OKX 500/timeout, search unavailable, model invalid structured output, database rollback, notification outbox/inbox projection failure and configured observability-backend unavailability. Provider/model/database failures end as `failed`. Product notification-projection or observability failures may end as `succeeded` only with explicit warnings and an incomplete `completion_scope`; neither is a separate Run terminal status. External Bark/Web Push/Email delivery is excluded and cannot supply completion evidence. Each observability outage also proves a redacted structured local log with correlation/retry state and the matching alert fingerprint; Task 14 later proves the production alert rule fires. No scenario may show generic success.
 
 Against a live Agent Server and Product command dispatcher, `hitl-recovery.spec.ts` also submits a stale interrupt ID, races two responses for the same `(interrupt_id, checkpoint_id, response_version)`, and resolves simultaneous interrupts with one `respondAll()` call. It asserts one winner, `INTERRUPT_ALREADY_RESOLVED` for the loser, namespace/checkpoint matching and one immutable resume Run.
 
@@ -1043,7 +1050,7 @@ Against a live Agent Server and Product command dispatcher, `hitl-recovery.spec.
 (cd frontend && npm run test:e2e -- --project=failure-injection-desktop --project=failure-injection-pixel-7)
 ```
 
-Expected: zero failures, no browser console errors, no failed network requests outside injected scenarios, desktop/mobile screenshots accepted, real Bark plus Web Push-or-Email receipts are stored, and all real provider proof fields are populated under `artifacts/v2-final/provider-proof/`; command logs and observability-outage alert/log hashes are stored under `artifacts/v2-final/test-logs/` with secrets redacted.
+Expected: zero failures, no browser console errors, no failed network requests outside injected scenarios, desktop/mobile screenshots accepted, persisted Inbox/outbox projections remain safe, and all real market/search/model proof fields are populated under `artifacts/v2-final/provider-proof/`; command logs and observability-outage alert/log hashes are stored under `artifacts/v2-final/test-logs/` with secrets redacted. No external notification receipt is required or accepted as completion evidence.
 
 - [ ] **Step 5: Create the candidate commit, run both reviews, then attest**
 
@@ -1310,7 +1317,7 @@ Create only `test_alert_rules.py`, `test_release_source_tooling.py`, `test_basel
 
 `test_legacy_parity.py` requires three machine-readable sections: every retained V1 business rule/golden/presentation behavior maps to a named V2 test or explicit `retired` rationale; every V1 table maps to a V2 table or legacy-readonly decision with source/target row counts and checksums; every V1 path maps to migrate/delete/archive with verification. `build_legacy_inventory.py` generates the authoritative source inventory from full V1 commit `a44a7d24ba5ec02e784522fb684bb39b99802773`, prototype commit `b583e5a5fbdf7fc0df99e8182d1701c8df1f4082`, tracked paths/tests/schema definitions and the authoritative V1 data snapshot. `V1_DATA_DIR` is required when data exists; otherwise a signed zero-data attestation identifying searched hosts/paths/owners is required. Missing databases cannot be self-declared `no-data` by the migration script.
 
-Task 14 fills observed evidence fields in the Task 0B registry but never creates requirement IDs or intended proof mappings retroactively. `build_requirement_registry.py` reads the complete source set exclusively from `normative-baseline.json`: files/regions classified `approved_normative`/`mixed.normative_regions` become normative entries, `proposed_gate` sources retain stable non-normative gate entries, and informative/verified/superseded regions are excluded or referenced only as supporting evidence. When ADR 0008 is accepted through the new Task 0 manifest, its existing gate IDs transition to normative without recreation. `requirements-registry.yaml` records observed RED/GREEN commands, hashes/counts, final proof receipts, reviewer dispositions, the applicable `NORMATIVE_SHA` generation and `SOURCE_SHA` against the intended mappings frozen in Task 0B. The generator/verifier fails when a source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
+Task 14 fills observed evidence fields in the Task 0B registry but never creates requirement IDs or intended proof mappings retroactively. `build_requirement_registry.py` reads the complete source set exclusively from `normative-baseline.json`: files/regions classified `approved_normative`/`mixed.normative_regions` become normative entries, future `proposed_gate` sources retain stable non-normative gate entries, and informative/verified/superseded regions are excluded or referenced only as supporting evidence. ADR 0011 is extracted as the accepted Aegra decision; superseded ADR 0008 produces no requirement or gate entry. `requirements-registry.yaml` records observed RED/GREEN commands, hashes/counts, final proof receipts, reviewer dispositions, the applicable `NORMATIVE_SHA` generation and `SOURCE_SHA` against the intended mappings frozen in Task 0B. The generator/verifier fails when a source is added, changed or removed without a corresponding registry transition, when a child requirement is replaced by a catch-all meta-entry, or when owner/evidence fields contain placeholders, shared catch-all owners, skips or indirect proof.
 
 `test_requirement_evidence.py` supports explicit `EVIDENCE_PHASE=source_candidate|pre_review|post_review`. `source_candidate` uses deterministic synthetic manifests to verify registry/evidence schemas, source coverage and verifier behavior without pretending runtime proof already exists; it must be GREEN before the release-source candidate. `pre_review` validates the complete real immutable `requirements-evidence.json`; `post_review` revalidates that same snapshot plus the separate final-review attestation without mutation. `test_slo_contract.py` and `test_concurrency_stream_load.py` likewise use deterministic contract fixtures in `source_candidate` mode, while real local/hosted measurements are mandatory in later evidence modes. An authority-consistency test rejects contradictory status headers, unchecked approval prerequisites, unresolved owner placeholders and ADR/index/checklist disagreements.
 
@@ -1381,7 +1388,7 @@ Expected RED: the test reaches the proven baseline database/application topology
 
 - [ ] **Step 3B: Write the remaining release-gate tests and record their RED**
 
-Now create `test_legacy_parity.py`, `test_requirement_evidence.py`, `test_authority_consistency.py`, `test_release_source_manifest.py`, both performance tests, both security tests, `hosted-production.spec.ts`, `hosted-security.spec.ts` and the final hosted Playwright project/profile scaffolding. The hosted projects must collect successfully but are not executed before ADR 0008 acceptance. Run the non-hosted RED matrix:
+Now create `test_legacy_parity.py`, `test_requirement_evidence.py`, `test_authority_consistency.py`, `test_release_source_manifest.py`, both performance tests, both security tests, `hosted-production.spec.ts`, `hosted-security.spec.ts` and the final hosted Playwright project/profile scaffolding. The hosted projects must collect successfully but are not executed before the reviewed Aegra production profile, immutable source candidate and public HTTPS/OIDC target exist. Run the non-hosted RED matrix:
 
 ```bash
 (cd backend && EVIDENCE_PHASE=pre_review uv run pytest tests/contract/test_legacy_parity.py tests/contract/test_requirement_evidence.py tests/contract/test_authority_consistency.py tests/contract/test_release_source_manifest.py tests/performance/test_slo_contract.py tests/performance/test_concurrency_stream_load.py -q)
@@ -1390,7 +1397,7 @@ uv run --project backend python tools/v2/verify_legacy_parity.py --check
 uv run --project backend python tools/v2/verify_requirements.py --check
 ```
 
-Expected: every named file collects and fails on its intended missing parity/evidence/source-manifest/security/SLO behavior. Unknown project, zero tests, skip, missing dependency or connection-only failure is invalid. Hosted browser/alert-delivery RED remains deferred until the accepted deployment transition in Step 7.
+Expected: every named file collects and fails on its intended missing parity/evidence/source-manifest/security/SLO behavior. Unknown project, zero tests, skip, missing dependency or connection-only failure is invalid. Hosted browser/alert RED remains deferred until the reviewed Aegra production preflight in Step 7.
 
 - [ ] **Step 4: Run supplemental local security, recovery and SLO gates**
 
@@ -1454,40 +1461,31 @@ test -z "$(git status --porcelain)"
 
 Review this immutable release-source candidate for specification compliance and then release/code quality. Any fix creates a new candidate and repeats both reviews. After approval, create the Task 14 note-only attestation commit, then write the reviewed candidate SHA, not the later attestation SHA, to `artifacts/v2-final/deployment/source-sha.txt` in the next evidence/governance slice. Call that reviewed clean candidate `SOURCE_SHA`. All production images, hosted tests and runtime evidence must identify `SOURCE_SHA`. Any later change to application code, tests, migrations, dependency locks, Dockerfiles, deployment/profile config, CI, build/deploy/probe scripts, requirement/parity/secret/source-identity verifiers or other release-critical tooling creates a new release-source candidate, repeats both reviews and invalidates all prior production evidence.
 
-- [ ] **Step 7: Accept the deployment profile before hosted runtime proof**
+- [ ] **Step 7: Validate the free/open Aegra deployment profile before hosted runtime proof**
 
-Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. In the candidate non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. Only after license/region/egress/Auth/persistence/HA/SLO/cost plus this real exit evidence pass may the governance candidate change ADR 0008 from `Proposed`/`authority_class: proposed_gate` to `Accepted`/`authority_class: approved_normative`. The same candidate updates the root/ADR indexes consistently but does not yet mutate `normative-baseline.json`:
+Write the reviewed release-source candidate SHA to `artifacts/v2-final/deployment/source-sha.txt`. Against the candidate Aegra non-production target, run preflight and exit drills with explicit output paths; the exit drill exports Thread/Checkpoint/Store/Product data, switches to the documented free/open alternate profile without changing frontend/DTO contracts, validates hashes, and switches back. The preflight must bind the Aegra version/image digest, Apache-2.0 license, region, egress, OIDC/AuthZ, PostgreSQL/Redis persistence, HA/SLO, cost and exit evidence. ADR 0011 is already the accepted normative deployment decision; ADR 0008 remains superseded and is never promoted or used as a commercial-license prerequisite.
 
 ```bash
 ./tools/v2/verify_hosted_release.sh --preflight --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/preflight.json
 ./tools/v2/deployment_exit_drill.sh --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --output artifacts/v2-final/deployment/exit-drill.json
-git add docs/v2/adr/0008-production-deployment-profile.md docs/v2/adr/README.md docs/v2/README.md docs/v2/implementation/2026-07-13-task-14-production-gate.md
+uv run --project backend python tools/v2/build_requirement_registry.py --manifest docs/v2/normative-baseline.json --registry docs/v2/requirements-registry.yaml --check
+jq -er '.normative_sha' docs/v2/normative-baseline.json > artifacts/v2-final/deployment/governance-candidate-sha.txt
+git add docs/v2/implementation/2026-07-13-task-14-production-gate.md
 git add -f artifacts/v2-final/deployment/source-sha.txt artifacts/v2-final/deployment/preflight.json artifacts/v2-final/deployment/exit-drill.json
-git commit -m "docs: accept v2 production deployment profile"
-```
-
-Treat that exact governance candidate as a new proposed normative baseline. Run the complete Task 0 sequence: specification/authority review to approval, then plan-executability review to approval, then official-framework review to approval; any finding creates a new governance candidate and restarts all three reviews in order. After zero Critical/Important findings, write the reviewed candidate SHA, generate a new manifest generation that promotes ADR 0008 from `proposed_gate` to `approved_normative`, and transition the existing stable gate requirement IDs without recreation. Revalidate every affected deployment/hosted registry entry before committing only the transition metadata:
-
-```bash
-git rev-parse HEAD > artifacts/v2-final/deployment/governance-candidate-sha.txt
-uv run --project backend python tools/v2/transition_normative_baseline.py --current-manifest docs/v2/normative-baseline.json --candidate-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --promote docs/v2/adr/0008-production-deployment-profile.md --review-note docs/v2/implementation/2026-07-13-task-14-production-gate.md --output docs/v2/normative-baseline.json
-uv run --project backend python tools/v2/build_requirement_registry.py --manifest docs/v2/normative-baseline.json --registry docs/v2/requirements-registry.yaml --transition-gate ADR-0008 --check
-uv run --project backend python tools/v2/verify_requirements.py --registry docs/v2/requirements-registry.yaml --manifest docs/v2/normative-baseline.json --phase governance-transition --require-normative-sha "$(jq -er '.normative_sha' docs/v2/normative-baseline.json)"
-git add docs/v2/normative-baseline.json docs/v2/requirements-registry.yaml docs/v2/implementation/2026-07-13-task-14-production-gate.md
 git add -f artifacts/v2-final/deployment/governance-candidate-sha.txt
-git commit -m "docs: attest accepted v2 deployment baseline"
+git commit -m "docs: record reviewed aegra production preflight"
 ```
 
-Hosted release proof is forbidden before that reviewed governance candidate, new manifest generation, transitioned registry and attestation exist. All subsequent evidence records the new `NORMATIVE_SHA` plus the unchanged application `SOURCE_SHA`.
+The compatibility-named `governance-candidate-sha.txt` records the already reviewed generation-one `NORMATIVE_SHA`; it does not identify a new ADR transition. If hosted preflight requires a normative source change, create a new candidate and repeat the full Task 0 review chain before continuing. Hosted release proof is forbidden until the reviewed baseline/registry, immutable `SOURCE_SHA`, Aegra preflight and exit evidence all exist. All subsequent evidence records that `NORMATIVE_SHA` plus the unchanged application `SOURCE_SHA`.
 
-After the reviewed governance candidate is accepted, deploy the signed Task 13 baseline image to that accepted non-production hosted profile and execute the explicitly deferred browser RED:
+After the reviewed Aegra preflight is accepted, deploy the signed Task 13 baseline image to that non-production hosted profile and execute the explicitly deferred browser RED:
 
 ```bash
 ./tools/v2/verify_hosted_release.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt")" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")"
 ./tools/v2/verify_production_alerts.sh --red --profile hosted-production --base-url "$HOSTED_BASE_URL" --source-sha "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-source-sha.txt")" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat "$V2_EVIDENCE_STAGING_ROOT/baseline-digest.txt")" --output artifacts/v2-final/alerts/hosted-red.json
 ```
 
-The commands must reach a healthy public HTTPS deployment. Browser RED collects `hosted-production.spec.ts` and `hosted-security.spec.ts` on both named desktop/Pixel projects and fails on the intentionally missing release-candidate proof/enforcement assertion. Alert RED independently exhausts LangSmith and Langfuse delivery and fails because the baseline monitoring stack does not produce the required rule/receipt. Unknown project, localhost/private/tunnel URL, credential skip, connection refusal, zero collected tests or failure to inject the canary is not RED evidence. The same browser and alert cases run GREEN only in Step 8 against `SOURCE_SHA`.
+The commands must reach a healthy public HTTPS deployment. Browser RED collects `hosted-production.spec.ts` and `hosted-security.spec.ts` on both named desktop/Pixel projects and fails on the intentionally missing release-candidate proof/enforcement assertion. Alert RED exhausts the configured free/self-hosted OpenTelemetry export and alert path and fails because the baseline monitoring stack does not produce the required rule/receipt. Unknown project, localhost/private/tunnel URL, credential skip, connection refusal, zero collected tests or failure to inject the canary is not RED evidence. The same browser and alert cases run GREEN only in Step 8 against `SOURCE_SHA`.
 
 - [ ] **Step 8: Build, scan, deploy, upgrade and rollback the clean source**
 
@@ -1506,11 +1504,11 @@ uv run --project backend python tools/v2/run_load_probe.py --profile hosted-prod
 uv run --project backend python tools/v2/run_slo_probe.py --profile hosted-production --base-url "$HOSTED_BASE_URL" --release-tier internal_alpha --source-sha "$(cat artifacts/v2-final/deployment/source-sha.txt)" --governance-sha "$(cat artifacts/v2-final/deployment/governance-candidate-sha.txt)" --image-digest "$(cat artifacts/v2-final/deployment/candidate-digest.txt)" --output artifacts/v2-final/slo/hosted-results.json
 ```
 
-`verify_hosted_release.sh` refuses localhost, private IPs, tunnels and non-HTTPS URLs. It runs `hosted-production.spec.ts` and `hosted-security.spec.ts` in explicit `hosted-production-desktop` and `hosted-production-pixel-7` projects without `page.route`, HAR, fixture providers or seeded results, and fails unless every file/project is collected, executed and has zero skip/deselection. An API gate creates one real long-running Deep Research Task/Run. The browser observes coordinator, approved subagent, Tool, Artifact, Evidence and Risk components from official `stream.subagents` plus Product projections; diagnostic `stream.subgraphs` is not used as the ordinary UI source. A hosted review case creates both root and approved nested-subagent interrupts, verifies namespace/checkpoint routing, submits an allowed state correction atomically with the response, restarts Agent Server, rejoins and proves one-winner replay/idempotency. Playwright also disconnects during an active background Run, closes the page, rejoins from a fresh browser context with `since`, proves ordered replay without duplicated messages/events, waits for completion and verifies the real Bark receipt plus Inbox link and a real Web Push-or-Email receipt bind to the same Task/Run/Artifact. Desktop and mobile then open that same task/run/artifact and verify market/search/model/risk/database/notification/observability proof IDs and correlation ID. The hosted security project uses the two real tenants/users, removed member and operator described in Step 1 and verifies all BFF/SDK/UI denials, audits and Internal Alpha boundaries. Save HTML, JUnit, screenshots, traces, video, network logs, URLs, actor/tenant/workspace IDs, provider receipts, `SOURCE_SHA`, governance commit, image digests, `release_tier=internal_alpha`, profile and timestamps under `artifacts/v2-final/hosted-playwright/`.
+`verify_hosted_release.sh` refuses localhost, private IPs, tunnels and non-HTTPS URLs. It runs `hosted-production.spec.ts` and `hosted-security.spec.ts` in explicit `hosted-production-desktop` and `hosted-production-pixel-7` projects without `page.route`, HAR, fixture providers or seeded results, and fails unless every file/project is collected, executed and has zero skip/deselection. An API gate creates one real long-running Deep Research Task/Run. The browser observes coordinator, approved subagent, Tool, Artifact, Evidence and Risk components from official `stream.subagents` plus Product projections; diagnostic `stream.subgraphs` is not used as the ordinary UI source. A hosted review case creates both root and approved nested-subagent interrupts, verifies namespace/checkpoint routing, submits an allowed state correction atomically with the response, restarts Agent Server, rejoins and proves one-winner replay/idempotency. Playwright also disconnects during an active background Run, closes the page, rejoins from a fresh browser context with `since`, proves ordered replay without duplicated messages/events, waits for completion and verifies the persisted Product result plus Inbox/outbox projection bind to the same Task/Run/Artifact. Desktop and mobile then open that same task/run/artifact and verify market/search/model/risk/database/observability proof IDs and correlation ID. No Bark/Web Push/Email delivery is invoked. The hosted security project uses the two real tenants/users, removed member and operator described in Step 1 and verifies all BFF/SDK/UI denials, audits and Internal Alpha boundaries. Save HTML, JUnit, screenshots, traces, video, network logs, URLs, actor/tenant/workspace IDs, provider receipts, `SOURCE_SHA`, governance commit, image digests, `release_tier=internal_alpha`, profile and timestamps under `artifacts/v2-final/hosted-playwright/`.
 
 `upgrade_rollback_drill.sh` first verifies the baseline Sigstore bundle/trusted signer and the attestation's baseline digest/source/packaging/migration/database checksum bindings, then verifies the candidate digest carries the requested `SOURCE_SHA`/governance labels. Only then may it apply forward-compatible migrations, wait for health/error thresholds, validate data checksums, upgrade, roll back to the baseline and revalidate. A same-source bootstrap mechanics run is supplemental only and cannot satisfy the normative rollback gate. Evidence is stored under `artifacts/v2-final/deployment/upgrade-rollback/`.
 
-`verify_production_alerts.sh` independently exhausts LangSmith and Langfuse delivery, requires the configured hosted monitoring backend to fire the corresponding exact fingerprint/rule, waits through pending-to-firing resolution, and stores rule/query hashes, correlation ID, alert receipt/state, timestamps, `SOURCE_SHA`, governance SHA and image digest under `artifacts/v2-final/alerts/`. It also proves a negative control does not fire.
+`verify_production_alerts.sh` independently exhausts the configured free/self-hosted OpenTelemetry export and alert path, requires the hosted monitoring backend to fire the corresponding exact fingerprint/rule, waits through pending-to-firing resolution, and stores rule/query hashes, correlation ID, alert receipt/state, timestamps, `SOURCE_SHA`, governance SHA and image digest under `artifacts/v2-final/alerts/`. Optional LangSmith/Langfuse adapters may be tested separately but cannot be required. The verifier also proves a negative control does not fire.
 
 All build/deploy/probe scripts materialize source from the committed `SOURCE_SHA` (git archive or isolated worktree) and refuse to copy application files from the current dirty evidence worktree. Hosted security/recovery/load/SLO/alert commands require the accepted profile, public HTTPS URL, `SOURCE_SHA`, governance SHA and image digest; they reject localhost/private/tunnel/fixture targets, zero samples, skip/deselection, missing positive canary receipts and connection failures. Reproducible build labels, SBOMs and image annotations must contain the same source tree hash.
 
@@ -1610,8 +1608,8 @@ test -z "$(git status --porcelain)"
 - [ ] PostgreSQL migrations and backup/restore drill pass.
 - [ ] Agent Server restart preserves and resumes an interrupted Thread.
 - [ ] Real OKX, Web Search and model results are visible in the product UI.
-- [ ] LangSmith and Langfuse share correlation IDs without secret leakage.
-- [ ] LangSmith Dataset/Experiment/Release Gate, Agent Server Cron monitors, signed webhooks, entitlements, quota and immutable usage reconciliation pass.
+- [ ] OpenTelemetry plus the selected free/self-hosted backend share correlation IDs without secret leakage; any LangSmith/Langfuse adapter remains optional.
+- [ ] Local/open Dataset/Experiment/Release Gate, Aegra Cron monitors, signed webhooks, entitlements, quota and immutable usage reconciliation pass.
 - [ ] Worker restart, concurrent Run/research/stream load, alerting, runbook, key rotation, upgrade/rollback and hosted HTTPS evidence pass against the immutable `SOURCE_SHA`.
 - [ ] No V1 runtime, static product mock, raw JSON primary UI, private SSE or generic-success fallback remains.
 - [ ] A final independent reviewer reports no open Critical or Important findings.

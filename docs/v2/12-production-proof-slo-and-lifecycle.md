@@ -112,7 +112,7 @@ URL 后续失效时仍能证明模型和门禁当时使用了什么内容；受�
 - lease 包含 owner、expires_at 和 fencing token；旧 worker 不能在租约失效后提交状态。
 - 超时无法确认是否送达标记 `unknown`，默认不自动补发。
 - 人工补发创建新的 attempt，但保持同一 logical notification 和审计链。
-- Graph 只创建 `planned`，不直接调用 Bark。
+- Graph 只创建兼容 `planned`/Inbox 投影，不调用任何外部通知 Provider。
 
 ## 8. LangSmith/Langfuse 去重合同
 

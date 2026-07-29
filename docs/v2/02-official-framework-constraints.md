@@ -236,7 +236,7 @@ V2 允许自定义的代码必须属于以下业务领域：
 - Web Evidence 业务字段和来源质量规则。
 - 交易风险、动作、价格、杠杆、TTL 和 confidence cap。
 - 产品业务表和 Actor-aware Repository。
-- Bark 通知格式与幂等策略。
+- In-app Inbox/outbox 投影与签名 webhook 的项目专用策略；不实现外部通知 Provider。
 - 面向用户的 View Model 和产品组件。
 - 多用户业务权限规则。
 - Outcome 和金融质量评测。

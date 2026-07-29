@@ -180,22 +180,19 @@ trial|active -> grace -> suspended -> cancelled
 
 Model Factory 必须显式记录 Provider/model integration 的 `max_retries`。启用 `ModelRetryMiddleware` 时关闭或限制 SDK 自带 retry，避免默认网络/429/5xx 重试与 Middleware/Graph 形成乘法。
 
-## 6. 通知与外部副作用幂等
+## 6. Inbox 投影与外部副作用幂等
 
-Bark 等通知不假设 Provider 支持 idempotency key。使用事务 Outbox：
+外部 Bark/Web Push/Email 通知发送不在本范围。事务 Outbox 只绑定业务提交与 In-app Inbox/兼容审计投影：
 
 ```text
-planned -> leased -> sending -> delivered
-                         -> failed_retryable -> planned
-                         -> failed_terminal
-                         -> unknown
+planned -> projected_inbox
+        -> excluded_external
 ```
 
 - `planned` 与最终业务结果在同一数据库事务创建。
-- deterministic message key = workspace + task + channel + notification type + decision version。
-- Worker 使用租约防并发重复发送。
-- 发送超时且无法判断对方是否收到时标记 `unknown`，不自动无限重发。
-- `unknown` 可人工确认或按渠道策略进行至多一次补发。
+- deterministic projection key = workspace + task + channel + notification type + decision version。
+- Worker 不调用外部通知 Provider，也不生成伪造的 delivered receipt。
+- 签名 webhook 等其他在范围内的外部副作用使用各自独立的租约、重放保护、DLQ 和审计合同。
 - 通知失败、unknown 或重复抑制不能改变 RiskVerdict。
 - 所有 webhook/notification payload 脱敏并记录 hash，不默认保存完整 secret-bearing request。
 - Agent Server webhook 只作为非关键完成提示，不假设具备业务所需的密码学签名和可靠投递保证；可靠 webhook 一律通过 Product Outbox、签名、重放保护、重试、DLQ 和审计。

@@ -149,12 +149,12 @@
 - [ ] Work 内 Thread/Task 列表只显示当前用户数据。
 - [ ] Run/Artifact Detail 首屏展示结论、价格、风险和状态。
 - [ ] 模型分析、交易事实、Web Evidence、风险门禁分区展示。
-- [ ] Notification 和用户反馈可见。
+- [ ] In-app Inbox/outbox 投影和用户反馈可见；外部通知发送不在本范围。
 - [ ] Home、Work、Monitors、Inbox、Library 和 Settings 形成可用闭环。
 - [ ] Coordinator conversation、subagent tree 和 Artifact workspace 信息层级清晰。
 - [ ] Settings 保留用户级配置钩子。
 - [ ] 用户可以查看、删除、关闭和限定长期 Memory；业务设置不写入 LangGraph Store。
-- [ ] 商业发布至少支持 In-app Inbox + Web Push/Email 之一，Bark 不作为唯一正式渠道。
+- [ ] In-app Inbox/outbox 投影可审计；Bark/Web Push/Email 不进入完成门禁。
 - [ ] Admin/Login 后置页面不阻断开发主链。
 
 ### 4.3 状态与可访问性
@@ -306,8 +306,8 @@
 - [ ] 真实 OpenAI-compatible 模型 Structured Output 成功。
 - [ ] 真实 Web Search 返回可验证来源。
 - [ ] 真实交易所公共数据满足 exchange-native freshness。
-- [ ] 同一次 Run 的模型、行情、搜索、风险、持久化和 Bark 均成功。
-- [ ] 同一真实长任务经历断线、后台继续、重连 replay 和完成通知，无重复内容。
+- [ ] 同一次 Run 的模型、行情、搜索、风险与持久化均成功，且外部通知明确标为 excluded。
+- [ ] 同一真实长任务经历断线、后台继续、重连 replay 和持久结果完成，无重复内容。
 - [ ] 同一真实 Run 展示 coordinator、subagent、Tool、Artifact、Evidence 和 Risk 正式组件。
 - [ ] Desktop/Mobile hosted visual gate 使用同一真实 Run。
 - [ ] 公网 hosted Playwright 禁止 route interception/mock，报告绑定部署 URL、commit、image digest、同一 Run ID、桌面/移动 trace/video 和测试时间。

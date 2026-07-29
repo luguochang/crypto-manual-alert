@@ -50,7 +50,7 @@ ActorContext
 - `MarketAnalysis`、`EvidenceVerdict`、`RiskVerdict` 等领域模型。
 - 风控纯函数和有业务价值的单元测试。
 - 证据门禁规则，但必须补齐 VIX、10Y real yield、DXY、事件扫描四项硬门禁。
-- OKX、Web Search、Bark 的 Provider 请求逻辑，但统一返回验证后的 DTO。
+- OKX、Web Search 的 Provider 请求逻辑，但统一返回验证后的 DTO；通知只保留兼容 Inbox/outbox 投影。
 - 分析结果、行情、证据、风险等前端展示组件。
 - V1 中已经证明有价值的产品文案和 golden cases。
 
@@ -250,7 +250,7 @@ START
 - Product PostgreSQL负责 Workspace、Task、Run Projection、Artifact、Evidence、Decision、Interrupt Projection、Notification Outbox、Feedback和Outcome。
 - Task创建后立即写入 Product DB；市场快照、搜索证据、结构化输出、Evidence Verdict和Risk Verdict按阶段幂等提交，避免中途失败丢失已付费结果。
 - Artifact、Decision和Outbox必须在同一数据库事务提交。
-- Outbox worker负责发送 Bark/Web Push/Email；Graph节点不直接把“调用过发送函数”当作“发送成功”。
+- Notification Outbox 仅保留兼容 Inbox/审计投影；Graph 与 worker 均不发送 Bark/Web Push/Email，也不得将 planned 投影写成外部送达。
 - 每个外部副作用使用稳定 idempotency key。
 - Alembic migration必须支持空库 upgrade、已有库 upgrade和 downgrade smoke test。
 - Reconciler以 Checkpoint执行状态和Product Projection版本为输入，修复“Checkpoint已推进但投影未提交”或“投影已提交但Run状态未推进”的可恢复不一致；不得直接读取或修改Agent Server内部表。

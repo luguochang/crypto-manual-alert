@@ -1,0 +1,55 @@
+{
+  "conflict_policy": "No implicit winner. Resolve conflicts explicitly in source text or through superseded_by before attestation.",
+  "precedence_semantics": "Ascending review order only; precedence does not override an unresolved semantic conflict.",
+  "schema_version": "1.0",
+  "sources": [
+    {"classification": "approved_normative", "path": "docs/v2/13-v2-final-rebuild-spec.md", "precedence": 10},
+    {"classification": "approved_normative", "path": "docs/v2/14-v2-final-implementation-plan.md", "precedence": 20},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0011-aegra-self-hosted-agent-server.md", "precedence": 30},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0010-task13-restricted-deep-research-harness.md", "precedence": 40},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0009-canonical-agent-and-research-harness.md", "precedence": 50},
+    {"classification": "approved_normative", "path": "docs/v2/12-production-proof-slo-and-lifecycle.md", "precedence": 60},
+    {"classification": "approved_normative", "path": "docs/v2/11-core-object-access-recovery-contract.md", "precedence": 70},
+    {"classification": "approved_normative", "path": "docs/v2/08-production-governance-and-nonfunctional.md", "precedence": 80},
+    {"classification": "approved_normative", "path": "docs/v2/06-c-end-agent-product-blueprint.md", "precedence": 90},
+    {"classification": "approved_normative", "path": "docs/v2/03-v2-delivery-checklist.md", "precedence": 100},
+    {"classification": "approved_normative", "path": "docs/v2/02-official-framework-constraints.md", "precedence": 110},
+    {"classification": "approved_normative", "path": "docs/v2/01-v2-product-and-architecture.md", "precedence": 120},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0007-launch-and-financial-product-boundary.md", "precedence": 130},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0006-production-slo-retention-and-outcome.md", "precedence": 140},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0005-observability-and-prompt-source.md", "precedence": 150},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0004-frontend-presentation-stack.md", "precedence": 160},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0003-identity-and-auth-bootstrap.md", "precedence": 170},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0002-web-search-provider.md", "precedence": 180},
+    {"classification": "approved_normative", "path": "docs/v2/adr/0001-agent-runtime-deployment.md", "precedence": 190},
+    {
+      "classification": "mixed",
+      "normative_regions": [
+        {"anchor": "D01"}, {"anchor": "D02"}, {"anchor": "D03"},
+        {"anchor": "D04"}, {"anchor": "D05"}, {"anchor": "D06"},
+        {"anchor": "D07"}, {"anchor": "D08"}, {"anchor": "D09"},
+        {"anchor": "D10"}, {"anchor": "D11"}, {"anchor": "D12"},
+        {"anchor": "D13"}, {"anchor": "D14"}, {"anchor": "D15"}
+      ],
+      "path": "docs/v2/09-review-packet-and-decisions.md",
+      "precedence": 200
+    },
+    {"classification": "verified_evidence_index", "path": "docs/v2/07-official-doc-coverage-index.md", "precedence": 800},
+    {"classification": "verified_evidence_index", "path": "docs/v2/05-official-research-evidence.md", "precedence": 810},
+    {"classification": "informative", "path": "docs/v2/04-implementation-note-template.md", "precedence": 820},
+    {"classification": "informative", "path": "docs/v2/README.md", "precedence": 830},
+    {"classification": "informative", "path": "docs/v2/adr/README.md", "precedence": 840},
+    {
+      "classification": "superseded",
+      "path": "docs/v2/10-implementation-roadmap.md",
+      "precedence": 900,
+      "superseded_by": "docs/v2/14-v2-final-implementation-plan.md"
+    },
+    {
+      "classification": "superseded",
+      "path": "docs/v2/adr/0008-production-deployment-profile.md",
+      "precedence": 910,
+      "superseded_by": "docs/v2/adr/0011-aegra-self-hosted-agent-server.md"
+    }
+  ]
+}

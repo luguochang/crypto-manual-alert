@@ -285,7 +285,7 @@ V2 只保存 external customer/subscription/price reference、entitlement snapsh
 
 ### 11.4 Integrations
 
-首批开发验证可以使用 Bark，但商业 C 端至少需要 In-app Inbox 加 Web Push 或 Email 之一。最终边界支持 Slack/Discord/Telegram、webhook 和 MCP/OAuth 数据源。所有 OAuth token 进入专用 secret store，不能进入 Graph State、Prompt、Trace 或业务 JSON。
+本范围只保留 In-app Inbox/outbox 投影；不实现 Bark、Web Push、Email、Slack、Discord 或 Telegram 发送。签名 webhook 和 MCP/OAuth 数据源仍属于受控集成边界。所有 OAuth token 进入专用 secret store，不能进入 Graph State、Prompt、Trace 或业务 JSON。
 
 ### 11.5 用户可控 Memory
 

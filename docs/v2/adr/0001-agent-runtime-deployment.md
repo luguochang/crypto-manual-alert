@@ -14,9 +14,9 @@ V2 必须使用官方 Thread、Run、Checkpoint、Interrupt、Streaming 和 Reac
 
 ## 决策
 
-- Agent Runtime 使用 LangGraph Agent Server 和官方 Protocol v2。
-- 开发 smoke 使用 `langgraph dev`。集成/容器验证使用官方 `langgraph build` 从锁定的 Agent Server image digest 构建应用镜像，再由项目 Compose 注入独立 PostgreSQL/Redis URI 并启动；产品代码不得替代 Agent Server Runtime。
-- 生产优先评估并采用官方 LangSmith Deployment；若许可、数据驻留或成本不满足，再新增 ADR 选择自管 Agent Server。
+- Agent Runtime 使用 ADR 0011 的 Aegra 自托管开源 Agent Server，并保留官方 LangGraph/Protocol v2 边界。
+- 开发 smoke 可使用 `langgraph dev`。集成/容器/生产验证使用锁定 Aegra image/package digest，由项目 Compose 注入独立 PostgreSQL/Redis URI 并启动；产品代码不得替代 Agent Server Runtime。
+- 生产采用经 hosted 证据验证的 Aegra Profile；官方商业 LangSmith Deployment 不作为许可或交付前提。
 - 浏览器只访问 Next.js BFF；BFF 代理 Agent Server 并注入身份和 correlation metadata。
 - Product PostgreSQL 与 Agent Server persistence 使用独立数据库和独立角色；本地可以共用一个 Postgres 实例，但不能共用表或权限。
 - Compose 自管集成环境中，`PRODUCT_POSTGRES_*` 与 `AGENT_POSTGRES_*` 配置服务端数据库/角色；覆盖这些值时，调用方必须同时提供与之匹配且已完整 percent-encode 的 `COMPOSE_PRODUCT_DATABASE_URL` 与 `COMPOSE_AGENT_POSTGRES_URI`。Compose 不从原始用户名或密码拼接 URI，也不承诺独立覆盖两侧后仍可连接。

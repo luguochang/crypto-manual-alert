@@ -193,12 +193,12 @@ LangChain 与 LangGraph 1.0 是 LTS。Deep Agents 官方仍标记为 pre-1.0，�
 
 - 最大程度使用官方 Runtime、SDK 和协议。
 - 不需要自己实现 SSE、Run 恢复、Thread History、Interrupt Resume。
-- 可直接使用 `langgraph dev`、Studio、官方 React SDK 和 LangSmith Deployment。
+- 开发可使用 `langgraph dev`/Studio；集成和生产复用 Aegra、官方 LangGraph SDK/Protocol 与 React SDK。
 - 代码最少，排障路径与官方文档一致。
 
 风险：
 
-- 生产部署依赖 LangSmith Deployment 或 Agent Server 对应许可与运行方式。
+- Aegra 版本、PostgreSQL/Redis、Auth、HA 与官方 Protocol 兼容性必须通过真实部署证据持续验证。
 - custom routes 必须严格限制，不能再次演化成第二套 FastAPI 应用。
 
 裁决：采用。
@@ -224,7 +224,7 @@ LangChain 与 LangGraph 1.0 是 LTS。Deep Agents 官方仍标记为 pre-1.0，�
 ```mermaid
 flowchart LR
     U["Browser"] --> N["Next.js Agent Workspace / BFF"]
-    N -->|"official stream protocol"| S["LangGraph Agent Server"]
+    N -->|"official stream protocol"| S["Aegra self-hosted Agent Server"]
     N -->|"business query API"| S
 
     S --> G["Canonical StateGraph"]
@@ -235,7 +235,7 @@ flowchart LR
     LC --> M["ChatOpenAI / configured provider"]
     DA --> W["Official web-search tools"]
     DT --> X["CCXT or exchange-native market adapter"]
-    DT --> B["Bark notification adapter"]
+    DT --> B["In-app Inbox / outbox projection"]
 
     S --> PG[("PostgreSQL")]
     PG --> CP["langgraph schema: checkpoints/store"]
@@ -245,8 +245,9 @@ flowchart LR
     S --> Q["Background Runs / Crons / Webhooks"]
     N --> P["Inbox / Artifacts / Usage / Settings"]
 
-    G --> LS["LangSmith"]
-    G --> LF["Langfuse"]
+    G --> OT["OpenTelemetry"]
+    OT --> OBS["Free / self-hosted observability"]
+    OT -. optional .-> LS["LangSmith / Langfuse adapters"]
 ```
 
 ## 7. Canonical Graph 设计
@@ -490,7 +491,7 @@ IdentityProvider.authorize(actor, action, resource) -> decision
 | `agent_outputs` | Agent 名称、结构化输出、可读摘要、模型与 Prompt Version |
 | `decision_results` | 最终产品决策和 RiskVerdict |
 | `rule_hits` | 确定性规则命中记录 |
-| `notification_attempts` | Bark 请求、结果和错误 |
+| `notification_attempts` | 兼容 outbox/inbox 投影与历史审计；本范围不执行外部通知 |
 | `run_feedback` | 用户反馈、修正和标注 |
 | `outcomes` | 成熟窗口后的真实结果与评测字段 |
 | `audit_events` | 权限、配置和管理员动作审计 |
@@ -773,7 +774,7 @@ backend/
     tools/
       market.py              # 交易所事实 tools
       research.py            # 官方 web search/fetch tools
-      notification.py        # Bark tool，仅确定性节点调用
+      notification.py        # 兼容 outbox/inbox 投影；不执行外部通知
     domain/
       models.py              # 业务 Pydantic models
       evidence_policy.py     # 纯函数
@@ -815,8 +816,8 @@ docs/v2/
 - Agent Server Integration：真实 Thread、Run、Stream、Resume、History API。
 - Frontend Component：Zod/View Model、状态切换和可访问性。
 - Playwright E2E：真实 Next.js + Agent Server + PostgreSQL/Redis，外部 Provider 可控。
-- Gated Real-provider Test：真实行情、真实 Web Search、真实模型、真实 Bark。
-- LangSmith Dataset Regression：已知场景、badcase、对抗样本。
+- Gated Real-provider Test：真实行情、真实 Web Search、真实模型和持久 Product 结果。
+- Local/open Dataset Regression：已知场景、badcase、对抗样本；LangSmith 可选。
 - Outcome Evaluation：成熟窗口后的 hit、Brier、PnL、MFE、MAE 与 no-trade baseline。
 
 ### 17.2 Playwright 必测状态
@@ -962,7 +963,7 @@ docs/v2/
 
 本设计已经给出推荐默认值，用户可在开始实现前修改：
 
-1. 生产 Agent Runtime 默认使用 LangSmith Deployment/Agent Server；保留通过 ADR 切换自管 Runtime 的权利。
+1. 生产 Agent Runtime 使用 ADR 0011 的 Aegra 自托管开源 Agent Server；商业 Agent Server 不得成为前提。
 2. Web Search 优先使用 Provider built-in Responses web search；不支持时显式使用 Tavily 官方集成。
 3. 第一阶段使用固定开发账号；正式 Auth 在主链稳定后接入，但所有多租户字段和授权钩子第一天存在。
 4. Deep Agents 只用于研究域，最终风险和副作用保持确定性 LangGraph Node。

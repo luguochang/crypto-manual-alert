@@ -1,6 +1,8 @@
 # ADR 0008：生产部署 Profile 与退出方案
 
-> authority_class: proposed_gate
+> authority_class: superseded
+>
+> superseded_by: docs/v2/adr/0011-aegra-self-hosted-agent-server.md
 >
 > 状态：Superseded by ADR 0011（2026-07-21）
 >

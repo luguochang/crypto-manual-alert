@@ -75,11 +75,11 @@ Current external evidence roots added or refreshed during this audit:
 
 | Priority | Gate | Current evidence | Required completion evidence |
 | --- | --- | --- | --- |
-| P0 | Normative baseline and requirement registry | Generator/verifier tests pass, but the reviewed baseline and registry files do not exist | Ordered Task 0/0B reviews, immutable candidate SHA, reviewed baseline, complete individually owned registry |
+| P0 | Normative baseline and requirement registry | Generation-one builder, 27-source candidate policy and repository preflight pass; real extraction still fails closed on unanchored approved-source statements | Ordered Task 0/0B reviews, immutable candidate SHA, reviewed baseline, complete explicit anchors and individually owned registry |
 | P0 | Immutable release candidate and independent review | Dirty worktree; no final artifact tree or signed final review | Clean committed candidate, frozen evidence, independent reviewer with zero Critical/Important findings, signed attestation |
 | P0 | Production deployment and identity | Production Compose/CI/hosted browser profiles and fail-closed probe now exist; no trusted domain, protected environment or hosted browser proof | Public trusted HTTPS, real OIDC, owner/peer/cross-tenant/revoked-user Desktop and Pixel 7 matrix |
 | P0 | Production Aegra availability | Local real restart and QA-only HA are separate evidence sets | Hosted multi-instance ingress, rolling upgrade, failover and full Product retry/cancel/fork recovery |
-| P0 | External observability and alerting | Local SDK/transport and redaction contracts only | Same real Run visible in LangSmith and Langfuse, correlation/redaction/outage receipts, production alerts and release gates |
+| P0 | External observability and alerting | Local SDK/transport and redaction contracts only | Same real Run visible through OpenTelemetry in a verified free/self-hosted backend, with correlation/redaction/outage receipts and production alerts; LangSmith/Langfuse remain optional |
 | P1 | Production data resilience | Local backup/restore, rollback and key rotation passed | Managed backup policy, PITR, cross-region restore, measured RTO/RPO and hosted migration/rollback |
 | P1 | Formal load, SLO and security | Health load passed; Product DB can measure 0/12 formal SLOs | Hosted business-flow load, all 12 source-of-truth metrics, alert receipts, full hosted tenant/secret canary audit |
 | P1 | Supply-chain release proof | Current exact-image SBOM/Cosign pass; Trivy gate RED with 4 Critical and 19 High unfixed findings | Clean CVE policy result, registry digest, protected KMS/keyless signer, Rekor/timestamp, signed OCI provenance/attestation |
