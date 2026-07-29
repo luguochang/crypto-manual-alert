@@ -13516,3 +13516,17 @@ All checks passed!
 - Commands/results: start a second official GCM device-flow login with process-scoped Clash HTTP/HTTPS proxy; Computer Use window listing confirms a unique `Connect to GitHub` window. No authentication UI is automated. After several minutes without user completion or process result, terminate the waiting GCM process to avoid leaving an indefinite background authorization session.
 - Current archive state: local archive commit `96618303a7b6f838cd387696c2ebcc4d2d03172d` is intact. GitHub remote branch still points to `f04069ce67f282222bd051f31673d65af9b9fd68`; push is blocked solely by absent user-authorized GitHub credentials. A docs-only handoff commit may record these authentication attempts locally, but it also cannot be pushed until the user completes GCM login.
 - Evidence boundary: no remote mutation, no force push and no credential handling. Resume by completing `git credential-manager github login` in the official window, then perform a normal push and verify remote SHA. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - GitHub archive push retry preflight
+
+- Commands/results: inspect the current branch/status and compare the local and tracked remote commit identities before restarting user-operated authentication. The worktree is clean on `codex/v2-production-completion`; local HEAD is `b96f247bab54a163a63de336744b16ab49d2faea`, the tracked remote remains `f04069ce67f282222bd051f31673d65af9b9fd68`, and the local branch is exactly two commits ahead.
+- Evidence boundary: this is a local preflight only. No remote mutation, credential material, force push, branch switch, dotenv access or production-readiness claim occurred. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - User-operated GitHub browser authorization
+
+- Command/result: run the official Git Credential Manager GitHub browser login with process-scoped Clash HTTP/HTTPS proxy variables. The command exits `0` after the user-operated authorization flow.
+- Evidence boundary: only the command exit status is recorded. No password, token, OTP, browser content or credential value was read, printed or written to the repository. A credential-account presence check and normal non-force push are still required; V2 remains PARTIAL and Production Ready remains NO.
+- Follow-up command/result: `git credential-manager github list` exits `0` and reports the authorized GitHub account `luguochang`. This command enumerates account identity only; it does not expose credential material.
+- Archive-delta check: `git diff --check` exits `0`; the only worktree change is this ledger with 11 inserted lines before this record. Git reports its normal Windows LF-to-CRLF worktree warning. No application source, configuration or dotenv path is changed.
+- Staged secret-scan attempt: `gitleaks git --staged --redact=100 --no-banner` could not start because `gitleaks` is not present in the post-restart PATH; repository-local search found no tracked/local Gitleaks binary. This is a tooling availability limitation, not a scan pass. No dotenv value was read or printed.
+- Commit result: create docs-only commit `32b473d` (`docs(v2): record GitHub push authorization`) after staged whitespace validation. The commit contains only this execution-ledger update.
