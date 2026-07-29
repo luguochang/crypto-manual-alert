@@ -372,7 +372,9 @@ def test_v2_live_and_historical_ownership_is_documented_and_preserved_by_fronten
     assert "Product task GET 可以用 `run_id` 选择历史 Product Run" in status
     assert "官方 HITL、notification 和 feedback 的 Product 侧交互" in status
     assert "完整 Protocol v2" in status
-    assert "strict real Playwright 已在开发 Runtime 下通过" in status
+    assert "Historical strict real Playwright" in status
+    assert "is not current Provider acceptance" in status
+    assert "returned HTTP `403`" in status
 
 
 def test_main_flow_checkpoint_records_latest_proof_gate_hardening_summary():

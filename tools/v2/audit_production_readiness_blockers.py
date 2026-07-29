@@ -18,7 +18,7 @@ PROOF_LEVEL = "local-production-readiness-blocker-audit"
 PLAN_PATH = PurePosixPath("docs/v2/14-v2-final-implementation-plan.md")
 
 CRITICAL_REPOSITORY_ARTIFACTS = (
-    ".github/workflows/v2-ci.yml",
+    ".github/workflows/ci.yml",
     "docs/v2/normative-baseline.json",
     "docs/v2/requirements-registry.yaml",
     "deploy/docker-compose.production.yml",

@@ -22,13 +22,13 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     plan_path.parent.mkdir(parents=True)
     plan = "\n".join(
         (
-            "- Create: `.github/workflows/v2-ci.yml`",
+            "- Create: `.github/workflows/ci.yml`",
             "- Create: `artifacts/v2-final/versions.json`",
             "Publish `artifacts/v2-final/load/hosted-results.json`.",
         )
     )
     plan_path.write_text(plan + "\n", encoding="utf-8")
-    workflow = repository / ".github" / "workflows" / "v2-ci.yml"
+    workflow = repository / ".github" / "workflows" / "ci.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text("name: fixture\n", encoding="utf-8")
     return repository, plan

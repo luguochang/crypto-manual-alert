@@ -1,227 +1,313 @@
-# crypto-manual-alert
+# Signal Desk
 
-AI-assisted crypto manual alert and evaluation workbench.
+面向人工决策的加密市场 Agent 工作台。系统采集交易所原生行情与公开来源，使用
+LangChain/LangGraph Agent 生成结构化分析，再由确定性证据门禁、风险门禁和人工审核
+决定结果能否提交。它不会自动下单、撤单、转账或提现。
 
-本项目定位是“人工确认的加密货币操作提醒”，不是自动交易系统。系统可以抓取行情、调用固定 crypto skill、生成操作计划、记录 trace，并通过 Bark 强提醒用户手动核对；当前手动提醒阶段明确不提供下单、撤单、提现能力。
+[English](README.en.md) | [部署指南](docs/deployment.md) | [架构设计](docs/v2/01-v2-product-and-architecture.md) | [当前状态](docs/v2/15-v2-implementation-status.md) | [交付裁决](docs/formal/37-真实多Agent对抗审查与交付方向裁决.md)
 
-## 技术栈
+> **交付状态：V2 PARTIAL / Production Ready: NO**
+>
+> 本地 Product 主流程、持久化、HITL、恢复和 UI 已实现并有自动化覆盖；托管 HTTPS、
+> 真实 OIDC、生产 HA/DR/SLO 与有效外部 Provider 的现场门禁仍需在目标环境完成。
+> 外部通知发送不属于本次交付范围。
 
-- Python 3.11+：FastAPI、Agent workflow、skill 调用、行情、LLM、Bark、Trace/Eval。
-- TypeScript / Next.js：本地工作台、手动 query、Runs/Trace 查看、后续 Eval/Candidates 页面。
-- SQLite：默认本地存储，不依赖 Redis、队列、Temporal、向量库或外部 LLMOps 服务。
+正式方向与历史迁移约束见
+[`37-真实多Agent对抗审查与交付方向裁决.md`](docs/formal/37-真实多Agent对抗审查与交付方向裁决.md)。
+其中的 `legacy_prompt` 是旧主链迁移背景，不是当前 canonical Product Graph 的运行入口。
 
-## 当前能力
+## 产品能力
 
-- `GET /api/system/health`：API 健康检查。
-- `POST /api/runs/manual`：提交一次手动分析，返回 `trace_id`、计划摘要和风控结论。
-- `GET /api/runs`：查询最近运行记录。
-- `GET /api/runs/{trace_id}`：查询 trace、span、LLM 摘要、badcase，默认隐藏原始 prompt/completion payload。
-- CLI 手动入口：`crypto-alert run-once --symbol ETH-USDT-SWAP --query "评估 ETH 未来 6h 是否值得人工追多" --horizon 6h`。
+- **市场分析**：BTC、ETH、SOL 永续合约，多周期请求，OKX public 行情和 Web 研究证据。
+- **证据优先**：来源 URL、发布时间、抓取时间、Provider、匹配关系和数据新鲜度可追溯。
+- **确定性门禁**：模型只生成候选分析；证据充分性、风险预算和副作用授权由代码裁决。
+- **Human-in-the-loop**：支持 approve、reject、edit、多 interrupt 合并和 first-writer 语义。
+- **耐久执行**：官方 LangGraph checkpoint/interrupt/stream 协议，Aegra 开源自托管运行时，
+  PostgreSQL 持久化，Redis 协调，可取消、重试、恢复和 fork。
+- **深度研究**：受限 Deep Agents 研究链、后台运行、报告草稿审核和正式 Artifact 提交。
+- **产品工作区**：Home、Work、Runs、Inbox、Library、Monitors、Memory、Outcomes、
+  Improvement、Usage 和 Settings。
+- **多用户边界**：Next.js BFF 注入服务端身份，租户/Workspace 隔离，内部短时 JWT，
+  默认开发身份与生产 OIDC 钩子分离。
+- **安全观测**：LangSmith/Langfuse 接口、字段脱敏、受控诊断路由和不可变审计引用。
 
-`run-once --query` 当前承载 operator audit note：系统会保存这段手动查询上下文用于 trace、审计和前端展示；`--horizon` 当前是手动复核/后续采集上下文。现阶段生产规划仍由 symbol/config、行情事实、LLM 输出和风控门禁共同决定，不把自由文本查询或请求 horizon 直接当作可执行交易指令。CLI 输出会包含 `trace_id`、`business_summary`、`notification`、`result_review`、`requested_horizon` 和 `plan_horizon`，便于把一次手动触发与后续详情、通知状态、结果复盘串起来。
+## 自动化演示
 
-## 当前架构状态
+以下截图由 Product Playwright walkthrough 自动生成。它验证排队、运行、结构化结果、
+证据门禁、风险门禁、响应式布局、无障碍和敏感字段不渲染；数据是确定性 fixture，
+不代表真实 Provider 或生产环境已经通过。
 
-当前生产决策链仍是 legacy prompt 主链，不是 Agent Swarm 接管。真实链路是 `RunExecutor -> LegacyPlanRunnerAdapter -> LegacyDecisionWorkflow -> final LLM -> parser/gates -> journal/notification`。
+![Signal Desk desktop workflow](docs/assets/screenshots/signal-desk-workflow-desktop.png)
 
-仓库内已有 `agent_swarm/`、`lead/`、`artifacts/`、`decision/` 等受控 Agent Swarm 迁移模块，但目前默认只作为 shadow audit、candidate/replay 和结构化审计侧路使用；`DecisionInput` 仍不是生产 FinalDecisionAgent 的默认输入，`decision.final_input_mode` 默认仍是 `legacy_prompt`。当前交付方向以 `docs/formal/37-真实多Agent对抗审查与交付方向裁决.md` 为准：先跑通人工提醒主流程和真实 prod-actionable 证明，后续 Swarm/candidate 切换必须单独 release review；`31/32/34` 保留为历史计划和背景材料。
+<details>
+<summary>查看 Pixel 7 移动端截图</summary>
 
-## 本地启动
+![Signal Desk mobile workflow](docs/assets/screenshots/signal-desk-workflow-mobile.png)
+
+</details>
+
+不准备任何密钥也可以复现这套 UI 流程：
 
 ```powershell
-cd <repo-root>
-python -m pip install -e .
-python -m pytest
-uvicorn crypto_manual_alert.api.app:app --reload
+npm.cmd --prefix frontend ci
+npm.cmd --prefix frontend run test:e2e -- `
+  tests/e2e-product/work-product.spec.ts `
+  --grep "renders the normal Product projection from queue through success" `
+  --project=fixture-desktop --project=fixture-pixel-7
 ```
 
-前端工作台位于 `frontend/`，启动前先设置：
+macOS/Linux 把 `npm.cmd` 换成 `npm`，并使用 `\` 续行。截图输出到
+`frontend/artifacts/playwright/`。该命令是 UI walkthrough，不会访问真实模型、交易所私有
+API 或通知服务。
+
+## 系统要求
+
+推荐的完整本地环境：
+
+- Git。
+- Docker Desktop 或 Docker Engine，支持 Compose v2。
+- 至少 8 GB 可用内存，建议 12 GB 以上。
+- 默认可用端口：前端 `3001`、Agent API `8123`。
+- 只做前端开发：Node.js 22 + npm。
+- 只做后端开发：Python 3.12 + `uv`。
+
+完整实时分析还需要：
+
+- 一个 OpenAI 或 OpenAI-compatible 模型端点，且同时支持 Chat Completions tool calling、
+  structured output、streaming 和 usage metadata。
+- 搜索方式三选一：模型原生 Responses Web Search、Tavily，或仅限开发/受控环境的 DDGS
+  metasearch。
+- OKX 只使用 public market data，不需要也不接受交易 API Key。
+
+## Docker 安装
+
+### 1. 获取代码
+
+```bash
+git clone https://github.com/luguochang/crypto-manual-alert.git
+cd crypto-manual-alert
+```
+
+### 2. 创建本地配置
+
+Windows PowerShell：
 
 ```powershell
-$env:NEXT_PUBLIC_API_BASE_URL="http://127.0.0.1:8000"
+Copy-Item backend/.env.example backend/.env
 ```
 
-上面是手动开发启动方式，API 默认使用 `8000`。完整本地全链路 smoke 会使用隔离端口：API `8010`、前端 `3001`、mock OpenAI `8011`、mock OKX `8012`、Server Component fault API `8013`。
-
-## 环境变量
-
-复制 `.env.example` 后只在本地填写真实值，不要提交 `.env`。
-
-生产工作台配置不要从空白 `.env` 手拼。先复制生产意图模板，再填写真实外部依赖和事件断言：
+macOS/Linux：
 
 ```bash
-cp .env.production.example .env
-chmod 600 .env
+cp backend/.env.example backend/.env
+chmod 600 backend/.env
 ```
 
-随后启动 hosted workbench 并跑严格配置 smoke：
+只填写本机的 `backend/.env`，绝对不要提交。最小必填项：
+
+| 变量 | 说明 |
+| --- | --- |
+| `APP_ENVIRONMENT` | 本地可用 `development`；Compose 会为服务设置生产式运行边界。 |
+| `MODEL_NAME` | Provider 实际开放且具备所需能力的模型 ID。 |
+| `OPENAI_BASE_URL` | OpenAI 为官方 API；兼容网关通常必须包含 `/v1`。 |
+| `OPENAI_API_KEY` | 模型密钥。 |
+| `SEARCH_PROVIDER` | `builtin_web_search`、`tavily` 或受限的 `ddgs_metasearch`。 |
+| `TAVILY_API_KEY` | 仅当 `SEARCH_PROVIDER=tavily` 时必填。 |
+| `MARKET_DATA_HTTP_PROXY` | 可选；容器访问宿主 Clash 通常使用 `http://host.docker.internal:7890`。 |
+| `SEARCH_HTTP_PROXY` | 可选；格式同上。 |
+
+如果兼容网关不支持 OpenAI Responses Web Search，请显式使用 `SEARCH_PROVIDER=tavily`，
+不要保留默认 builtin 后再把检索失败误判成页面问题。
+
+### 3. 启动
+
+Compose 的本地 secret store 即使不发送通知也需要一个临时加密键。只放在当前终端环境：
+
+```powershell
+$env:NOTIFICATION_CREDENTIAL_KEY = python -c "import secrets; print(secrets.token_urlsafe(32))"
+docker compose -p signal-desk up -d --build
+```
+
+macOS/Linux：
 
 ```bash
-docker compose -p crypto-alert-prod --env-file .env up -d --build api frontend
-python3 tools/deployment/smoke_hosted_workbench.py \
-  --api-base http://127.0.0.1:8010 \
-  --frontend-base http://127.0.0.1:3001 \
-  --symbol ETH-USDT-SWAP \
-  --query "生产工作台配置 smoke：验证非 fixture 配置和人工提醒入口" \
-  --horizon 6h \
-  --require-prod-config
+export NOTIFICATION_CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker compose -p signal-desk up -d --build
 ```
 
-`smoke_hosted_workbench.py --require-prod-config` 只证明 hosted workbench 使用生产意图配置；真正 `prod-actionable` 成功还必须看到真实 LLM、真实 OKX public、Bark `sent`、完整 `no_active_event` 人工断言和 `allowed=true`。
-严格配置 smoke 还会拒绝 `market_data.okx_base_url` 指向本地/mock endpoint 的配置；生产意图下该字段必须为空或 `https://www.okx.com`，且 `readiness.market_data.status=unsafe` 会失败，不能用 exchange-shaped mock OKX 冒充真实 OKX public。
+启动后访问 [http://127.0.0.1:3001/work](http://127.0.0.1:3001/work)。
 
-生产环境里，配置 strict smoke 之后还应跑 hosted run-level 证据 gate：
+### 4. 检查状态
 
 ```bash
-python3 tools/deployment/smoke_hosted_prod_actionable.py \
-  --api-base <public-https-api> \
-  --symbol ETH-USDT-SWAP \
-  --query "Hosted prod-actionable smoke：验证真实人工提醒证据链" \
-  --horizon 6h \
-  --proof-output hosted-prod-actionable-proof.json
+docker compose -p signal-desk ps
+docker compose -p signal-desk logs -f langgraph-api command-worker frontend
 ```
 
-`smoke_hosted_prod_actionable.py` 会提交一笔 hosted manual run，并要求 `--api-base` 是 public HTTPS API base；localhost、内网/私网 IP 和非 HTTPS URL 默认会被拒绝，不能用本地可达性冒充生产证据。这一笔详情还必须同时满足 `allowed=true`、`decision.final` OpenAI-compatible `status=ok`、真实 OKX public 配置（`market_data.okx_base_url` 为空或 `https://www.okx.com`，且不是 `readiness.market_data.status=unsafe`）、exchange-native fresh execution evidence、Bark `sent`、`legacy_prompt` final input 和 manual-only safety。缺任一项都不能叫生产成功。
-通过时，`--proof-output` 会写出 `hosted-prod-actionable-proof.json`，包含 `trace_id`、`api_base_url`、`config_digest`、`run_detail_digest`、`run_detail_summary` 和 `does_not_prove=hosted_real_outcome`。这个文件只保存摘要/digest，不保存 raw prompt、raw response、Bark device key 或 secret；它是 API run-level 生产证据，不替代后面的 visual gate 或 horizon 成熟后的 real-outcome gate。
+Agent API 健康端点：`http://127.0.0.1:8123/health`。
 
-同一生产环境还应跑前端真实渲染 gate，确保同一条 hosted trace 在页面上显示为可读提醒，而不是 raw JSON 或内部对象：
+### 5. 停止
 
 ```bash
-PLAYWRIGHT_REUSE_EXISTING_STACK=true \
-PLAYWRIGHT_EXPECT_HOSTED_PROD_ACTIONABLE=true \
-PLAYWRIGHT_FRONTEND_BASE_URL=<public-https-frontend> \
-PLAYWRIGHT_API_BASE_URL=<public-https-api> \
-npm --prefix frontend run e2e -- --project=chromium-desktop hosted-prod-actionable-visual.spec.ts
-
-PLAYWRIGHT_REUSE_EXISTING_STACK=true \
-PLAYWRIGHT_EXPECT_HOSTED_PROD_ACTIONABLE=true \
-PLAYWRIGHT_FRONTEND_BASE_URL=<public-https-frontend> \
-PLAYWRIGHT_API_BASE_URL=<public-https-api> \
-npm --prefix frontend run e2e -- --project=chromium-mobile hosted-prod-actionable-visual.spec.ts
+docker compose -p signal-desk down
 ```
 
-这个 Playwright gate 必须在 desktop and mobile 两个 project 上通过，才算 hosted-positive visual proof。每个 project 会提交一笔 hosted manual run，复查同一条 `/api/runs/{trace_id}`，再打开同一条 `/runs/{trace_id}` 页面。它不只看页面文本，还会同步执行严格证据谓词：真实 OKX public 配置（`market_data.okx_base_url` 为空或 `https://www.okx.com`，且不是 `readiness.market_data.status=unsafe`）、非 `mock/fixture/fake/stub/test/local` 模型名、exchange-native fresh execution evidence、同一 run 的 Bark `sent` row、HTTP 2xx `status_code`，且 Bark 时间戳不能早于本次 manual-run start。页面侧还要求 `模型审阅`、证据摘要、Bark 状态和深滚动布局可见，同时不得出现 raw JSON、`request_json`、`response_json`、secret、DOM overlap 或响应式布局缺陷。没有 `PLAYWRIGHT_EXPECT_HOSTED_PROD_ACTIONABLE=true` 时，它只做负向保护：证明默认 fixture/local stack 不能被误标成生产视觉验收。
+默认不会删除数据卷。只有明确不再需要本地数据时才使用 `down -v`。
 
-`PLAYWRIGHT_FRONTEND_BASE_URL` 和 `PLAYWRIGHT_API_BASE_URL` 必须是 public HTTPS URL，并且 hosted-positive visual gate 会做 DNS 解析；任何解析到 local/private/reserved 地址的 hostname 都会被拒绝，不能用公网样式域名指向本地或内网来冒充 hosted production visual proof。
+## 使用流程
 
-positive gate 通过时，Playwright output 目录会生成并 attach `hosted-prod-actionable-proof-manifest.json`。该 manifest 包含 `trace_id`、`frontend_base_url`、`api_base_url`、`config_digest`、`run_detail_digest`、`run_detail_summary`、`screenshot_path` 和 `does_not_prove=hosted_real_outcome`；它只保存摘要/digest 和 full-page screenshot 路径，不保存 raw prompt、raw response、Bark device key 或 secret。这个 manifest 证明同一 hosted trace 的 run-level 谓词和真实页面渲染通过，但仍不能替代 horizon 成熟后的 real-outcome gate。
+1. 打开 `/work`，选择市场分析或深度研究。
+2. 选择 BTC/ETH/SOL、分析周期并输入关注问题。
+3. 系统通过统一 Decision Admission 校验意图、复杂度和副作用边界。
+4. Agent 采集 OKX public 行情、Web 来源并生成结构化候选分析。
+5. 证据门禁和风险门禁独立裁决；失败时页面显示分类原因，不返回伪成功。
+6. 需要人工决定时，任务进入 `/inbox`；审核后从官方 checkpoint 恢复。
+7. 完成结果进入 `/library` 和 `/runs`，可重试、取消、fork，并由后续 outcome 复盘。
 
-等真实提醒 horizon 成熟后，再跑 hosted real-outcome collection gate：
+```mermaid
+flowchart TD
+    A["用户提交请求"] --> B["Decision Admission"]
+    B --> C["创建 Task / Thread / Run"]
+    C --> D["OKX public 市场快照"]
+    C --> E["Web 研究与来源验证"]
+    D --> F["LangChain 市场分析 Agent"]
+    E --> F
+    F --> G["确定性证据门禁"]
+    G --> H["确定性风险门禁"]
+    H -->|"需人工确认"| I["LangGraph Interrupt / Inbox"]
+    I -->|"approve / reject / edit"| J["官方 Checkpoint 恢复"]
+    H -->|"无需中断"| K["提交 Artifact"]
+    J --> K
+    K --> L["Runs / Library / Outcome"]
+    K -. "可选，本次交付不发送" .-> M["Notification Outbox"]
+```
+
+## 技术架构
+
+```mermaid
+flowchart LR
+    U["Browser"] --> N["Next.js Product UI + BFF"]
+    N -->|"Agent Protocol / stream"| A["Aegra OSS Runtime"]
+    N -->|"Product API"| P["FastAPI custom Product app"]
+    A --> G["Canonical LangGraph StateGraph"]
+    P --> G
+    G --> LC["LangChain analysis agents"]
+    G --> DA["Restricted Deep Agents research"]
+    G --> DG["Deterministic evidence/risk nodes"]
+    LC --> M["OpenAI-compatible model"]
+    DA --> S["Builtin Search / Tavily / DDGS dev"]
+    DG --> O["OKX public market data"]
+    A --> AP[("Agent PostgreSQL")]
+    P --> PP[("Product PostgreSQL")]
+    A --> R[("Redis broker")]
+    P --> W["Command / projection / lifecycle workers"]
+    G --> OBS["LangSmith / Langfuse adapters"]
+```
+
+关键原则：
+
+- 只保留一个 canonical Product Graph；不自研 Agent loop、checkpoint、interrupt、SSE 或
+  stream 去重。
+- Checkpoint 保存执行恢复状态，Product PostgreSQL 保存可查询的业务投影，两者职责分离。
+- 模型负责分析，不拥有风险规则、最终副作用授权或交易工具。
+- Next.js BFF 持有服务端身份，浏览器不直接接触内部 JWT 或 Provider 密钥。
+- Aegra 是 Apache-2.0 自托管 Agent Protocol 运行时，不依赖商业 Agent Server 授权。
+
+## 页面导航
+
+| 页面 | 用途 |
+| --- | --- |
+| `/home` | 市场简报、Watchlist、活动任务和待处理事项。 |
+| `/work` | 市场分析、深度研究和统一请求入口。 |
+| `/runs` | Run 状态、阶段历史、恢复、取消、重试和 fork。 |
+| `/inbox` | HITL 审批、后台完成、失败和恢复事项。 |
+| `/library` | 已提交分析/研究 Artifact 和证据。 |
+| `/monitors` | 周期监控与触发历史。 |
+| `/memory` | 可控记忆和禁用/清理。 |
+| `/outcomes` | 历史判断成熟窗口复盘。 |
+| `/improvement` | 受控改进候选、评审和发布治理。 |
+| `/usage` | 用量、额度和治理状态。 |
+| `/settings` | 数据生命周期、集成和通知配置状态。 |
+
+## 开发与验证
+
+后端：
 
 ```bash
-python3 tools/deployment/smoke_hosted_real_outcome_collection.py \
-  --api-base <public-https-api> \
-  --symbol ETH-USDT-SWAP \
-  --limit 50 \
-  --min-count 1 \
-  --same-host-data-dir-confirmed \
-  --proof-output hosted-real-outcome-proof.json
+uv sync --project backend --frozen
+uv run --project backend pytest backend/tests/unit backend/tests/contract tests/deployment tools/v2/tests -q
 ```
 
-`smoke_hosted_real_outcome_collection.py` 是 outcome 复盘门禁，不是 prod-actionable 门禁。它必须在 collector 和 hosted API 共享同一 `DATA_DIR`/volume 的环境里运行；默认 `collection_errors_allowed=false`，且 `collect-outcomes` 返回 `collected=0` 时不会用旧样本冒充本次采集成功。`collect-outcomes` 在 `collected>0` 时必须输出 `collected_refs`，每条 ref 至少包含 `decision_ref`、`evaluation_target`、`symbol`、`window_name` 和 timezone-aware `collected_at`。脚本会在 collection 前后各跑一次 evidence 检查，要求后置 API 证据新增或更新的 matched ref 精确命中本次 `collected_refs` 中的 `(decision_ref, evaluation_target, symbol, window_name)`，并在成功输出里包含 `new_refs_verified=true`。
-wrapper 会把同一 symbol 和本轮 gate start 自动传给底层 evidence gate：等价于要求 `tools/deployment/smoke_real_outcome_evidence.py --symbol ETH-USDT-SWAP --collected-after <gate_started_at>`。因此成功证据必须来自同一 symbol，且 matched outcome 的 `window.collected_at` 不能早于本次 collection gate；旧样本、并发的其他交易对样本，或同一交易对但不属于本次 `collected_refs` 的并发样本，都不能满足本次 real-outcome proof。
-通过时，`--proof-output` 会写出 `hosted-real-outcome-proof.json`，包含 `schema_version=2026-07-09.hosted-real-outcome-proof.v1`、`collect_outcomes_digest`、`real_outcome_evidence_digest`、`outcome_summary`、`new_or_updated_refs`、`new_or_updated_ref_details` 和 `does_not_prove=hosted_prod_actionable`。这个文件只保存 collection/evidence 摘要和 digest，不保存 raw prompt、raw response、Bark device key 或 secret；它证明同一 symbol 且 exact `collected_refs` 绑定的 hosted real-outcome collection 闭环，不证明 prod-actionable、Bark sent 或 fresh LLM 决策链路。
-
-如果只是要复现默认 Docker hosted-runtime proof，可用一条命令完成 compose build/up、hosted smoke、strict fixture rejection 和 cleanup：
+前端：
 
 ```bash
-python3 tools/deployment/smoke_docker_hosted_runtime.py
+npm --prefix frontend ci
+npm --prefix frontend run test:unit
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run build
 ```
 
-这个脚本默认使用 fixture 工作台并输出 `proof_level=hosted-runtime`，不是 `prod-config` 或 `prod-actionable`。生产意图容器环境仍需要 `.env.production.example` 填好后，再跑 `smoke_hosted_workbench.py --require-prod-config`、`smoke_hosted_prod_actionable.py`，以及 horizon 成熟后的 `smoke_hosted_real_outcome_collection.py`。
-
-机器可读 proof ladder 用来统一 release 和迁移记录的证据口径：
+Product UI walkthrough：
 
 ```bash
-python3 tools/deployment/proof_ladder.py
+npm --prefix frontend run test:e2e -- \
+  tests/e2e-product/work-product.spec.ts \
+  --grep "renders the normal Product projection from queue through success" \
+  --project=fixture-desktop --project=fixture-pixel-7
 ```
 
-它输出 `schema_version=2026-07-09.main-flow-proof-ladder`，并列出 `local_no_secret_matrix`、`strict_local_prod_actionable_guard`、`docker_hosted_runtime`、`hosted_prod_config`、`hosted_prod_actionable`、`hosted_prod_actionable_visual`、`hosted_real_outcome` 的命令、证明范围和不能证明的内容。`tools/deployment/proof_ladder.py` does not run the gates；它只是防止把 fixture/mock/staging/hosted-runtime 或 negative visual guard 误写成生产成功。
+所有 fixture、mock、skip 和本地结果只能证明对应测试边界，不能写成生产完成。完整证据阶梯、
+真实 Provider、durability、HA、备份恢复和 hosted gate 见 [部署指南](docs/deployment.md)。
 
-- `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`：仅在 `DECISION_ENGINE=openai_compatible` 时需要。
-- `BARK_DEVICE_KEY`：仅在 `NOTIFICATION_ENABLED=true` 时需要。
-- OKX 仅使用 public market data；v1 不接收 `OKX_API_KEY`、`OKX_API_SECRET`、`OKX_API_PASSPHRASE`、交易 key 或提现 key。
+## 常见问题
+
+### Agent API unhealthy，日志显示 capability probe failed
+
+确认模型 ID 与密钥有效，`OPENAI_BASE_URL` 指向真正的 API 根路径，并且网关支持 tool
+calling、structured output、streaming 和 usage metadata。普通文本聊天成功并不足够。
+
+### `builtin_web_search` 返回 403 或没有来源
+
+兼容网关往往不实现 OpenAI Responses Web Search。配置有效的 `TAVILY_API_KEY` 并使用
+`SEARCH_PROVIDER=tavily`；受控开发环境也可使用 `ddgs_metasearch`，但不能把它写作生产
+Provider 证明。
+
+### 容器无法访问宿主 Clash
+
+容器内不要使用 `127.0.0.1:7890`，它指向容器自身。Docker Desktop 通常使用
+`http://host.docker.internal:7890`，分别配置市场和搜索代理。
+
+### 为什么仓库仍有 `crypto_alert_v2`、`tools/v2` 和 `docs/v2`
+
+对外测试目录和 CI 已使用稳定的 Product 命名。内部 Python namespace、数据库/协议契约、
+发布门禁脚本和历史设计文档已经形成兼容边界；机械重命名会破坏迁移、checkpoint、审计证据
+和大量测试，因此在独立迁移版本前保留。它们不是第二套运行主线。
 
 ## 安全边界
 
-- `AUTO_ORDER_ENABLED` 必须保持 `false`。
-- `manual_execution_required` 必须保持 `true`。
-- 不注册任何下单、撤单、提现工具。
-- eval/replay 不允许发 Bark。
-- 前端/API/日志不返回完整 secret。
-- 默认不暴露 raw prompt、raw completion、LLM 原始请求/响应或 eval replay 工程明细；
-  `include_payloads=true`、`mode=judge_openai`、eval run detail 和 promotion artifacts
-  需要显式 `DIAGNOSTIC_ROUTES_ENABLED=true`，只能用于工程诊断环境。
-- 默认 `POST /api/eval/runs` 和 `GET /api/eval/runs` 只返回产品安全 metadata
-  （当前保留 `financial_quality_gate`），不返回 report refs、promotion artifacts、release gate 或 replay 细节。
+- 永远保持 manual-only；没有下单、撤单、转账或提现工具。
+- 不需要 OKX 私有 Key，不要向本项目提供交易或提现凭证。
+- 不把模型输出直接当作可执行金融建议。
+- 默认不向浏览器、日志或普通 API 返回 secret、raw prompt、raw completion 或私有
+  chain-of-thought。
+- 通知必须经过 Outbox 和独立授权；本次交付不执行外部通知发送。
+- 生产声明必须来自 hosted HTTPS、真实身份、真实 Provider、真实持久化和对应 gate，不能由
+  fixture/mock/local 结果替代。
 
-## 测试
-
-```powershell
-python -m pytest
-```
-
-## 本地全链路自测
-
-部署和 smoke profile 的完整说明见 `docs/deployment.md`。常用命令按证明强度分层：
-
-```bash
-# no-secret local matrix：pytest + typecheck/build + Playwright + fixture/mock/staging/outcome smoke。
-python3 tools/local_stack/run_local_checks.py
-```
-
-`run_local_checks.py` 会顺序占用 `8010/3001/8011/8012/8013`，不要和其他本地栈并行运行。它证明本地/模拟/预发链路，不运行真实 `prod-actionable` release gate，也不能写成生产成功。
-
-```bash
-# fixture flow：本地 API/前端主流程和安全默认，预期 allowed=false。
-python3 tools/local_stack/smoke_local_stack.py
-
-# mock LLM flow：OpenAI-compatible client、telemetry、redaction、严格 JSON 解析；not production success。
-python3 tools/local_stack/smoke_local_stack.py --with-mock-llm
-
-# actionable staging flow：本地 OKX mock + no-active-event，证明人工复核 allowed 路径可达；not production success。
-python3 tools/local_stack/smoke_local_stack.py --with-actionable-staging
-
-# prod-actionable readiness / real attempt：缺 readiness 会输出 ok=false + skip_reason，not production success。
-python3 tools/local_stack/smoke_local_stack.py --prod-actionable
-
-# release gate：缺 readiness 时非零退出，避免把 skip 当成功。
-python3 tools/local_stack/smoke_local_stack.py --prod-actionable --fail-on-skip
-```
-
-本地 `--prod-actionable` 即使跑到 `ok=true`，也必须输出 `proof_level=local-prod-actionable-rehearsal`、`production_success=false`、`hosted_proof_required=true`、`does_not_prove=hosted_prod_actionable`；它只是 localhost 严格演练，不能当成 hosted production proof。真实生产可执行提醒成功还必须通过 `smoke_hosted_prod_actionable.py --api-base <public-https-api>` 和同环境 hosted visual gate，并看到 `allowed=true`、真实 LLM interaction、`market_provider=okx_public`、`MACRO_EVENT_PROVIDER=no_active_event` 操作员断言及其元数据（`MACRO_EVENT_OPERATOR_REF`、`MACRO_EVENT_CONFIRMED_AT`、`MACRO_EVENT_SOURCE_REF`、`MACRO_EVENT_ASSERTION_HORIZON`、`MACRO_EVENT_VALID_UNTIL`）、Bark 通知已发送，并且始终保持 `manual_execution_required=true`、`auto_order_enabled=false`。当前尚未接入真实事件池 provider；`--prod-actionable` 的 structured skip 只是诚实报告缺少外部 readiness，不能当成生产成功。
-
-公开仓库推送前至少检查：
-
-```powershell
-rg -n "sk-[A-Za-z0-9]{20,}|BARK_DEVICE_KEY=[A-Za-z0-9]{20,}|OKX_API_KEY=.+|OKX_API_SECRET=.+|OKX_API_PASSPHRASE=.+" . --glob "!data/**" --glob "!frontend/node_modules/**"
-```
-
-## 目录
+## 仓库结构
 
 ```text
-src/crypto_manual_alert/
-  api/        FastAPI 路由和响应契约
-  agent_swarm/  受控 worker、harness、shadow 编排运行时
-  artifacts/    结构化证据、贡献和编排输入
-  cli/        命令行入口和子命令装配
-  config/     配置模型、加载和安全校验
-  context/    DecisionRequest、DecisionRunContext 和 artifact store
-  decision/   决策输入、解析、门禁和最终输入选择
-  domain/     领域数据结构
-  lead/       LeadAgent 规划与 synthesis
-  market/     行情 provider
-  notification/ Bark 等通知 sink
-  research_pipeline/ 检索降级链路
-  skills/     skill runtime 与决策引擎适配
-  storage/    SQLite journal 和查询仓储
-  telemetry/  trace、span、LLM telemetry
-  workflow/   RunExecutor、legacy workflow shell 和步骤编排
-tests/        按业务域归档的测试，根层不放散落 .py
-tools/local_stack/ 本地启动和烟测脚本
-frontend/     Next.js TypeScript 工作台
-docs/formal/  正式设计文档
-docs/migration/ 每轮开发迁移记录
+backend/                 Product Agent、Aegra 配置、API、Graph、Worker、Alembic
+frontend/                Next.js UI、BFF、schema 和 Product Playwright
+deploy/                  生产 Compose、HA/ingress 和告警配置
+docs/                    部署、架构、状态、ADR 和自动化截图
+tools/v2/                已锁定的内部交付/耐久/安全门禁（兼容路径）
+tests/                   跨模块部署、结构和供应链契约
+src/crypto_manual_alert/ 迁移期 legacy 包；不属于 canonical Product Graph
 ```
 
-`src/crypto_manual_alert/` 根包只保留包元信息；新增 Python 实现必须进入对应业务子包，不能直接平铺到根包。
+## License 与风险说明
+
+当前仓库未提供自动交易能力，也不构成投资建议。部署者需自行完成适用司法辖区、数据源条款、
+模型条款、风险披露和运维安全评审。第三方依赖遵循各自许可证；Aegra 采用 Apache-2.0。

@@ -15,7 +15,7 @@ DATA_LIFECYCLE_CONTROLS = (
 OFFICIAL_RUN_STREAM = (
     FRONTEND_SRC / "features" / "agent-runtime" / "official-run-stream.tsx"
 )
-WORK_PRODUCT_E2E = Path("frontend/tests/e2e-v2/work-product.spec.ts")
+WORK_PRODUCT_E2E = Path("frontend/tests/e2e-product/work-product.spec.ts")
 V2_IMPLEMENTATION_STATUS = Path("docs/v2/15-v2-implementation-status.md")
 
 
@@ -41,12 +41,12 @@ def test_work_route_uses_typed_product_api_and_official_stream_projection():
     assert 'from "@/features/agent-runtime/official-run-stream";' in source
     assert "OfficialRunStream" in source
     assert 'cancelTask,' in source
-    assert 'createAnalysis,' in source
+    assert 'createDecisionRequest,' in source
     assert 'getTask,' in source
     assert 'ProductApiError,' in source
     assert 'from "@/lib/api/product-client";' in source
     assert 'from "@/lib/schemas/product-api";' in source
-    assert "query_text: query" in source
+    assert "query_text: input.query" in source
     assert "<OfficialRunStream" in source
     assert "<AnalysisProjection" in source
 

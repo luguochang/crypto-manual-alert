@@ -97,8 +97,28 @@ export function MemorySurface() {
 }
 
 function summarize(content: Record<string, unknown>): string {
-  const text = JSON.stringify(content);
+  const entries = Object.entries(content);
+  if (entries.length === 0) return "无可显示内容";
+
+  const summary = entries
+    .slice(0, 4)
+    .map(([key, value]) => `${formatMemoryKey(key)}：${formatMemoryValue(value)}`)
+    .join("；");
+  const text = entries.length > 4 ? `${summary}；还有 ${entries.length - 4} 项` : summary;
   return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function formatMemoryKey(key: string): string {
+  return key.replaceAll("_", " ");
+}
+
+function formatMemoryValue(value: unknown): string {
+  if (value === null || value === undefined) return "未设置";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.length === 0 ? "无" : `${value.length} 项`;
+  if (typeof value === "object") return `${Object.keys(value).length} 个字段`;
+  return "受保护内容";
 }
 
 function formatDate(value: string): string {

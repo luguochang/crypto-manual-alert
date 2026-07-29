@@ -1337,7 +1337,7 @@ for required_path in \
   "$AEGRA_WINDOWS_SERVE" \
   "$FRONTEND_DIR/package.json" \
   "$FRONTEND_DIR/playwright.config.ts" \
-  "$FRONTEND_DIR/tests/e2e-v2/real-deep-research-flow.spec.ts"; do
+  "$FRONTEND_DIR/tests/e2e-product/real-deep-research-flow.spec.ts"; do
   if [[ ! -f "$required_path" ]]; then
     die 66 "Required real Deep Research source is missing: $required_path"
   fi
@@ -1619,7 +1619,7 @@ fi
 
 start_owned_process "$FRONTEND_DIR" "$TEMP_DIR/playwright.log.raw" \
   node node_modules/@playwright/test/cli.js test \
-    tests/e2e-v2/real-deep-research-flow.spec.ts \
+    tests/e2e-product/real-deep-research-flow.spec.ts \
     --project=fixture-desktop \
     --project=fixture-pixel-7
 E2E_PID="$STARTED_PROCESS_PID"

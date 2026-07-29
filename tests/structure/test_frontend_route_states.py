@@ -13,9 +13,9 @@ ANALYSIS_PROJECTION = FRONTEND_FEATURES / "analysis" / "analysis-projection.tsx"
 RESEARCH_EVIDENCE = FRONTEND_FEATURES / "analysis" / "research-evidence.tsx"
 PRODUCT_API_SCHEMA = ROOT / "frontend" / "src" / "lib" / "schemas" / "product-api.ts"
 OFFICIAL_FLOW_E2E = (
-    ROOT / "frontend" / "tests" / "e2e-v2" / "official-stream-main-flow.spec.ts"
+    ROOT / "frontend" / "tests" / "e2e-product" / "official-stream-main-flow.spec.ts"
 )
-WORK_PRODUCT_E2E = ROOT / "frontend" / "tests" / "e2e-v2" / "work-product.spec.ts"
+WORK_PRODUCT_E2E = ROOT / "frontend" / "tests" / "e2e-product" / "work-product.spec.ts"
 
 
 def test_frontend_declares_product_route_state_boundaries():

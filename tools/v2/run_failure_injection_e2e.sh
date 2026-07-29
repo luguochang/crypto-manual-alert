@@ -67,8 +67,8 @@ done
 curl -fsS http://127.0.0.1:3001/work >/dev/null
 
 node_modules/.bin/playwright test \
-  tests/e2e-v2/provider-failures.spec.ts \
-  tests/e2e-v2/database-rollback.spec.ts \
+  tests/e2e-product/provider-failures.spec.ts \
+  tests/e2e-product/database-rollback.spec.ts \
   --project=failure-injection-desktop \
   --project=failure-injection-pixel-7 \
   --reporter=line \

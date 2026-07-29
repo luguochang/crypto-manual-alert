@@ -78,9 +78,20 @@ def _wait_port_closed(port: int, timeout: float = 5.0) -> bool:
 
 def _pids_listening_on_port(port: int) -> list[int]:
     if os.name == "nt":
-        return []
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            (
+                f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
+                "-ErrorAction SilentlyContinue).OwningProcess"
+            ),
+        ]
+    else:
+        command = ["lsof", "-tiTCP:%d" % port, "-sTCP:LISTEN"]
     result = subprocess.run(
-        ["lsof", "-tiTCP:%d" % port, "-sTCP:LISTEN"],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,

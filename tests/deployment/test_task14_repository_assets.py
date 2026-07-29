@@ -21,7 +21,7 @@ def _yaml(relative: str) -> dict[str, object]:
 
 def test_task14_repository_owned_assets_exist() -> None:
     expected = {
-        ".github/workflows/v2-ci.yml",
+        ".github/workflows/ci.yml",
         "backend/Dockerfile",
         "deploy/docker-compose.production.yml",
         "deploy/env.production.example",
@@ -199,7 +199,7 @@ def test_attestation_policy_is_four_role_and_deny_by_default() -> None:
 
 
 def test_ci_and_runbook_keep_hosted_release_fail_closed() -> None:
-    workflow = _read(".github/workflows/v2-ci.yml")
+    workflow = _read(".github/workflows/ci.yml")
     runbook = _read("docs/v2/runbooks/production.md")
     assert "permissions:\n  contents: read" in workflow
     assert "environment: v2-production" in workflow

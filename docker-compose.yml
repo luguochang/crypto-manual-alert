@@ -239,7 +239,7 @@ services:
       APP_ENVIRONMENT: production
       AGENT_SERVER_URL: http://langgraph-api:8000
       AGENT_ASSISTANT_ID: crypto_analysis
-      SEARCH_PROVIDER: builtin_web_search
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-builtin_web_search}
       AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER: ${SEARCH_PROVIDER:-builtin_web_search}
       AGENT_READINESS_HOST: 0.0.0.0
       AGENT_READINESS_PORT: "9091"

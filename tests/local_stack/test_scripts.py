@@ -1093,7 +1093,7 @@ def test_start_local_stack_frontend_production_mode_uses_next_start(monkeypatch,
     assert process.pid == 12345
     assert build_calls == [f"{start.smoke.API_BASE}|{start.smoke.API_BASE}"]
     command = calls[0]["command"]
-    assert command[:3] == ["npm", "exec", "next"]
+    assert command[:3] == ["npm.cmd" if os.name == "nt" else "npm", "exec", "next"]
     assert "start" in command
     assert calls[0]["env"]["NEXT_PUBLIC_API_BASE_URL"] == start.smoke.API_BASE
     assert calls[0]["env"]["API_INTERNAL_BASE_URL"] == start.smoke.API_BASE
@@ -1123,7 +1123,11 @@ def test_start_local_stack_frontend_production_mode_builds_when_build_id_missing
 
     assert process.pid == 12345
     assert build_calls == [f"{start.smoke.API_BASE}|{start.smoke.API_BASE}"]
-    assert calls[0]["command"][:3] == ["npm", "exec", "next"]
+    assert calls[0]["command"][:3] == [
+        "npm.cmd" if os.name == "nt" else "npm",
+        "exec",
+        "next",
+    ]
 
 
 def test_start_local_stack_frontend_production_mode_rebuilds_even_when_build_id_exists(monkeypatch, tmp_path):
@@ -1640,6 +1644,32 @@ def test_stop_local_stack_discovers_listening_port_pids(monkeypatch):
     monkeypatch.setattr(stop.subprocess, "run", fake_run)
 
     assert stop._pids_listening_on_port(8010) == [123, 456]
+
+
+def test_stop_local_stack_uses_native_listener_discovery(monkeypatch):
+    stop = _load_script("stop_local_stack.py")
+    calls: list[list[str]] = []
+
+    class Result:
+        stdout = ""
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Result()
+
+    monkeypatch.setattr(stop.subprocess, "run", fake_run)
+
+    assert stop._pids_listening_on_port(8010) == []
+    if os.name == "nt":
+        assert calls[0][:4] == [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+        ]
+        assert "Get-NetTCPConnection -LocalPort 8010 -State Listen" in calls[0][4]
+    else:
+        assert calls[0] == ["lsof", "-tiTCP:8010", "-sTCP:LISTEN"]
 
 
 def test_stop_local_stack_covers_mock_okx_port():

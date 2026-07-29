@@ -1,5 +1,22 @@
 # V2 Implementation Status Ledger
 
+## 2026-07-29 Release verification update
+
+The current-source deterministic Product walkthrough passes on Desktop and Pixel 7
+and produced the public README screenshots. That walkthrough uses a schema-valid
+fixture to verify the BFF admission contract, queue/running/result projections,
+evidence and risk gates, responsive layout, accessibility and secret-safe rendering.
+It is not a real-Provider or hosted-production result.
+
+The fresh live Product attempt saved a real OKX market snapshot and then failed closed
+as `research_unavailable`. The configured model endpoint returned HTTP `403` for the
+minimal Chat Completions request and `/v1/models`, both directly and through the local
+proxy; Web Search was also permission-denied. Historical strict real Playwright
+evidence is retained as chronology only and is not current Provider acceptance.
+
+No external notification was sent. Current verdict remains `V2: PARTIAL`;
+`Production Ready: NO`.
+
 ## 2026-07-23 Agent product-mainline completion update
 
 The six user-approved product-mainline groups, excluding external notification

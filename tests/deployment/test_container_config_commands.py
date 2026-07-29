@@ -852,7 +852,9 @@ def test_authenticated_readiness_targets_official_api_and_gates_worker():
 
     assert readiness["restart"] == "unless-stopped"
     assert readiness_environment["AGENT_SERVER_URL"] == "http://langgraph-api:8000"
-    assert readiness_environment["SEARCH_PROVIDER"] == "builtin_web_search"
+    assert readiness_environment["SEARCH_PROVIDER"] == (
+        "${SEARCH_PROVIDER:-builtin_web_search}"
+    )
     assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
         "${SEARCH_PROVIDER:-builtin_web_search}"
     )
@@ -1032,12 +1034,25 @@ def test_compose_separates_bootstrap_from_production_services():
         assert "SEARCH_PROVIDER" not in environment
         assert "SEARCH_HTTP_PROXY" not in environment
     readiness_environment = services["langgraph-api-readiness"]["environment"]
-    assert readiness_environment["SEARCH_PROVIDER"] == "builtin_web_search"
+    assert readiness_environment["SEARCH_PROVIDER"] == (
+        "${SEARCH_PROVIDER:-builtin_web_search}"
+    )
     assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
         "${SEARCH_PROVIDER:-builtin_web_search}"
     )
     assert "MARKET_DATA_HTTP_PROXY" not in readiness_environment
     assert "SEARCH_HTTP_PROXY" not in readiness_environment
+
+
+def test_search_provider_override_reaches_api_and_readiness():
+    services = _render_scrubbed_compose({"SEARCH_PROVIDER": "tavily"})["services"]
+
+    assert services["langgraph-api"]["environment"]["SEARCH_PROVIDER"] == "tavily"
+    readiness_environment = services["langgraph-api-readiness"]["environment"]
+    assert readiness_environment["SEARCH_PROVIDER"] == "tavily"
+    assert readiness_environment["AGENT_HEALTHCHECK_EXPECTED_SEARCH_PROVIDER"] == (
+        "tavily"
+    )
 
 
 def test_backend_environment_example_documents_v2_provider_egress_safely():
@@ -1130,7 +1145,7 @@ def test_v2_browser_gate_keeps_request_boundaries_and_failure_evidence():
     config = (ROOT / "frontend" / "playwright.config.ts").read_text(
         encoding="utf-8"
     )
-    suite_directory = ROOT / "frontend" / "tests" / "e2e-v2"
+    suite_directory = ROOT / "frontend" / "tests" / "e2e-product"
     official_flow = (suite_directory / "official-stream-main-flow.spec.ts").read_text(
         encoding="utf-8"
     )

@@ -18,7 +18,7 @@ SUPERVISOR = ROOT / "tools/v2/aegra_restart_supervisor.py"
 COMPOSE_SUPERVISOR = ROOT / "tools/v2/aegra_compose_restart_supervisor.py"
 WINDOWS_SERVE = ROOT / "tools/v2/aegra_windows_serve.py"
 PROFILE = ROOT / "tools/v2/profiles/real-deep-research.env"
-PLAYWRIGHT_FLOW = ROOT / "frontend/tests/e2e-v2/real-deep-research-flow.spec.ts"
+PLAYWRIGHT_FLOW = ROOT / "frontend/tests/e2e-product/real-deep-research-flow.spec.ts"
 PLAYWRIGHT_CONFIG = ROOT / "frontend/playwright.config.ts"
 
 
