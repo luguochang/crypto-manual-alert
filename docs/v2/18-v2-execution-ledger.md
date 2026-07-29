@@ -13670,3 +13670,23 @@ All checks passed!
 
 - Commands/results: restore the Next.js-generated route-reference file to the exact tracked blob hash, stage only this ledger delta, and run `git diff --cached --check`; no source drift or whitespace error remains. Scan the staged snapshot with fixed free Gitleaks `v8.24.3` and 100% redaction; it scans about 3.98 KB and reports `no leaks found`.
 - Evidence boundary: this candidate records release-presentation revalidation only. Previously published source and bilingual README/screenshots are unchanged. A final scan is required after staging this record. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - Release presentation archive publication
+
+- Commands/results: restage the terminal ledger record, pass `git diff --cached --check`, and rerun fixed Gitleaks `v8.24.3`; it scans about 4.68 KB and reports `no leaks found`. Commit `ed55a57dff9e92e6e9bdc7d4c0c7b7428c20f983` (`docs(release): record presentation revalidation [skip ci]`) and push `main` normally. Fast-forward the sole retained local/remote delivery branch `codex/v2-production-completion` to the same commit without switching branches or force pushing. `git ls-remote --heads origin` confirms the remote contains exactly those two branch heads at `ed55a57`.
+- Evidence boundary: this is a docs-only publication of already reported release-presentation evidence. The `[skip ci]` marker avoids a redundant hosted run for a ledger-only delta; the previous source candidate remains covered by its successful hosted CI. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - Task 0/0B governance baseline audit start
+
+- Commands/results: inspect the clean synchronized `main`, then read the current requirement-registry unit test, builder, verifier, normative-transition tool, final rebuild specification, final implementation plan, current delivery-gap report and mainline completion plan. The authority documents still report the baseline manifest, reviewed registry and final review/evidence artifacts as absent. Existing tooling is fail-closed: it requires explicit reviewed mappings and an ordered review chain rather than inferring approvals or owners.
+- Evidence boundary: this audit begins the workstation-completable Task 0/0B work. No reviewer identity, approval, hosted evidence or final attestation is inferred. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - User-visible release handoff recheck
+
+- Commands/results: inspect `main`, local/remote branch topology, the latest commit, published walkthrough assets and the ledger tail. Read the in-app Browser automation contract, open `http://127.0.0.1:3001/work`, inspect the semantic page state and capture an in-session full-page image for visual review. The Signal Desk shell, complete navigation and Work request form render correctly; the submit control is disabled while the required analysis question is empty. Inspect the bilingual README headings and local screenshot references, then query remote heads. Both public READMEs contain installation, usage, troubleshooting, business-flow and technical-architecture sections and reference the desktop/mobile walkthrough assets. The remote contains exactly `main` and the explicitly retained `codex/v2-production-completion`, both at `ed55a57dff9e92e6e9bdc7d4c0c7b7428c20f983`.
+- Evidence boundary: the visible page check proves current presentation and navigation only. The published success-state screenshots remain deterministic fixture evidence; the latest real external flow still stops at the recorded Provider HTTP 403 boundary. No real Provider success, hosted production topology, notification delivery, review identity or final attestation is claimed. No dotenv value was read, printed or modified. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - Release handoff ledger candidate scan
+
+- Commands/results: run unstaged and staged whitespace validation, stage only `docs/v2/18-v2-execution-ledger.md`, and scan the staged delta with fixed free Gitleaks `v8.24.3` at full redaction. Both whitespace checks pass; Gitleaks scans about 3.26 KB and reports `no leaks found` with exit zero.
+- Evidence boundary: this scan covers only the staged Git delta. It does not inspect ignored dotenv content, validate external credentials or prove production behavior. A final scan follows after staging this terminal record. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
