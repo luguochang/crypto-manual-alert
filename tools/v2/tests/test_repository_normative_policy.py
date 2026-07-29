@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.v2.build_normative_baseline import inspect_candidate_sources
 

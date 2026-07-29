@@ -13762,3 +13762,14 @@ All checks passed!
 - Commands/results: restage the scan receipt, pass staged whitespace validation, and rerun fixed Gitleaks `v8.24.3`; it scans about 71.92 KB and reports `no leaks found`. Create the still-unpushed commit `dceed0c` (`feat(governance): add normative baseline bootstrap`) with exactly 18 reviewed paths. Unset the candidate override and run all three governance test files against the actual new `HEAD`; all 23 cases pass in 53 seconds. Git reports `main` ahead of `origin/main` by one and no worktree delta before appending this receipt.
 - Publication procedure: stage this terminal receipt, rerun the same staged checks, and amend only the unpushed local commit before a normal push. No published history is rewritten.
 - Evidence boundary: a clean actual-HEAD contract pass proves the source-policy contract is not dependent on the dangling preflight SHA. It still does not supply independent reviews, requirement mappings, a baseline/registry or hosted production evidence. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - Published candidate isolated-test regression and fix
+
+- Commands/results: restage the pre-publication receipt, pass staged whitespace and fixed Gitleaks `v8.24.3` scan (`no leaks found`, about 1.13 KB), amend the still-unpushed candidate to `a91c4f9`, then invoke the repository policy test alone. The isolated test fails during collection with `ModuleNotFoundError: tools`; the earlier combined run passed only because `test_normative_baseline.py` had already mutated `sys.path` in the same pytest process. PowerShell did not stop on the native pytest exit code, so the compound command continued and pushed `a91c4f9` to `main` normally.
+- Fix: make `test_repository_normative_policy.py` independently add the repository root before importing the tool, matching the other standalone tool tests. Rerun the single file with explicit `$LASTEXITCODE` handling: one case passes. Rerun all three governance files the same way: all 23 pass. `git diff --check` passes.
+- Evidence boundary: this is a test-isolation defect and follow-up fix, not a product/runtime failure. The already published candidate is not treated as final until the follow-up fix commit and hosted CI pass. No force push or dotenv access occurred. V2 remains PARTIAL and Production Ready remains NO.
+
+### 2026-07-29 - Isolated-test fix candidate scan
+
+- Commands/results: stage only the repository-policy test and this ledger, pass staged whitespace validation, inspect the exact two-path staged list and scan with fixed Gitleaks `v8.24.3` at full redaction. It scans about 1.36 KB and reports `no leaks found` with exit zero.
+- Evidence boundary: this scan covers only the two-file follow-up delta. Hosted CI and publication remain pending. No dotenv value was read or printed. V2 remains PARTIAL and Production Ready remains NO.
