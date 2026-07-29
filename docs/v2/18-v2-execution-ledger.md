@@ -13530,3 +13530,11 @@ All checks passed!
 - Archive-delta check: `git diff --check` exits `0`; the only worktree change is this ledger with 11 inserted lines before this record. Git reports its normal Windows LF-to-CRLF worktree warning. No application source, configuration or dotenv path is changed.
 - Staged secret-scan attempt: `gitleaks git --staged --redact=100 --no-banner` could not start because `gitleaks` is not present in the post-restart PATH; repository-local search found no tracked/local Gitleaks binary. This is a tooling availability limitation, not a scan pass. No dotenv value was read or printed.
 - Commit result: create docs-only commit `32b473d` (`docs(v2): record GitHub push authorization`) after staged whitespace validation. The commit contains only this execution-ledger update.
+
+### 2026-07-29 - GitHub archive push success and remote verification
+
+- Commit finalization: amend the still-unpushed docs-only authorization record to `0e983f210b3337a17827ddf6bc7ab5ca797ee263`; no published history is rewritten.
+- Push result: with process-scoped Clash proxy variables, perform a normal non-force push of `HEAD` to `origin/codex/v2-production-completion`. Git exits `0` and advances the GitHub branch from `f04069c` to `0e983f2`.
+- Remote verification: fetch the target branch and compare identities. Local HEAD and `refs/remotes/origin/codex/v2-production-completion` both resolve to `0e983f210b3337a17827ddf6bc7ab5ca797ee263`, and the branch has no ahead/behind divergence.
+- Final ledger-delta check: `git diff --check` exits `0`, with only the normal Windows LF-to-CRLF worktree warning. The pending delta is confined to this push-evidence section.
+- Evidence boundary: the archived V2 source and its prior verification evidence are now present on GitHub. This proves repository archival only; it does not change the product gate. V2 remains PARTIAL and Production Ready remains NO. No force push, branch switch, dotenv access or credential-value handling occurred.
